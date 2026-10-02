@@ -1,0 +1,175 @@
+// Editor state shared by the panels, plus the application entry point.
+#pragma once
+
+#include <functional>
+#include <string>
+#include <vector>
+
+#include "core/Project.h"
+#include "dsp/AudioClip.h"
+#include "raylib.h"
+#include "render/Renderer.h"
+#include "ui/Widgets.h"
+
+struct CguiNode;
+
+namespace pf {
+
+struct BrowserState {
+    bool open = false;
+    std::string title;
+    std::string purpose;      // "audio" | "shader" | "project-open" | "project-save" | "export"
+    std::string directory;
+    std::string filter;       // ".glsl", ".wav,.mp3", ...
+    std::string fileName;
+    std::vector<std::string> entryNames;
+    std::vector<bool> entryIsDirectory;
+    float scroll = 0.0f;
+    std::string error;
+};
+
+struct CanvasState {
+    int hoveredNode = -1;
+    int hoveredPortNode = -1;
+    int hoveredPortIndex = -1;
+    bool hoveredPortIsInput = false;
+
+    bool draggingNode = false;
+    int dragNodeId = -1;
+    Vector2 dragOffset{};
+
+    bool panning = false;
+
+    bool draggingLink = false;
+    int linkFromNode = -1;
+    int linkFromPort = -1;
+
+    std::string lastConnectError;
+};
+
+// Application preferences, persisted next to the executable.
+struct Preferences {
+    bool defaultDarkTheme = true;
+    float guiScale = 1.25f;
+};
+
+void loadPreferences(Preferences &preferences, const std::string &path);
+bool savePreferences(const Preferences &preferences, const std::string &path);
+
+struct UiState {
+    Project project;
+    Renderer renderer;
+    AudioClip clip;
+    AnalysisPtr analysis;
+    ImageBufferPtr previewImage;
+    EvalContext frameContext;
+
+    // transport
+    bool playing = false;
+    double playhead = 0.0;
+    bool loopPlayback = true;
+
+    int selectedNode = -1;
+    float inspectorScroll = 0.0f;
+
+    // layout
+    Rectangle topBarRect{};
+    Rectangle paletteRect{};
+    Rectangle canvasRect{};
+    Rectangle timelineRect{};
+    Rectangle previewRect{};
+    Rectangle inspectorRect{};
+    Rectangle statusRect{};
+    bool layoutDirty = true;
+
+    CanvasState canvas;
+    BrowserState browser;
+
+    // dialogs
+    bool showExportDialog = false;
+    bool showPreferences = false;
+    bool showMessage = false;
+    std::string messageTitle;
+    std::string messageText;
+    bool messageIsError = false;
+    // When set, the message box asks for confirmation and runs this on Continue.
+    std::function<void()> messageConfirm;
+    Preferences preferences;
+    std::string preferencesPath;
+    std::string windowTitle;
+    bool showHelp = false;
+    std::string exportPath;
+    std::string exportLog;
+    std::string exportError;
+    bool exporting = false;
+    float exportProgress = 0.0f;
+    std::string exportStatus;
+
+    // notifications
+    std::string statusMessage;
+    double statusUntil = 0.0;
+    bool statusIsError = false;
+
+    // stats
+    double lastRenderMs = 0.0;
+    double lastUiFps = 0.0;
+    int shaderPasses = 0;
+    int pooledTargets = 0;
+
+    // analysis progress
+    bool analyzing = false;
+    float analysisProgress = 0.0f;
+
+    std::string projectDirectory;
+    std::string resourceDirectory;
+    int previewScaleIndex = 0;   // 0 = full, 1 = half, 2 = quarter
+
+    // CrystalGUI chrome
+    CguiNode *root = nullptr;
+};
+
+void setStatus(UiState &state, const std::string &message, bool error = false);
+
+// panels
+void drawTopBar(UiState &state, Rectangle bounds);
+void drawPalette(UiState &state, Rectangle bounds);
+void drawGraphCanvas(UiState &state, Rectangle bounds);
+void drawTimeline(UiState &state, Rectangle bounds);
+void drawInspector(UiState &state, Rectangle bounds);
+void drawPreview(UiState &state, Rectangle bounds);
+void drawStatusBar(UiState &state, Rectangle bounds);
+void drawExportDialog(UiState &state);
+void drawPreferencesDialog(UiState &state);
+void drawMessageBox(UiState &state);
+void drawHelpOverlay(UiState &state);
+void drawBrowser(UiState &state);
+void refreshBrowserListing(BrowserState &browser);
+
+// actions shared by the panels
+void newProject(UiState &state);
+void loadAudioFile(UiState &state, const std::string &path);
+void loadProjectFile(UiState &state, const std::string &path);
+void saveProjectFile(UiState &state, const std::string &path);
+void startExport(UiState &state, const std::string &path);
+void openBrowser(UiState &state, const std::string &purpose, const std::string &title,
+                 const std::string &filter, const std::string &initialPath);
+void deleteSelectedNode(UiState &state);
+// Changes the selected block, resetting the inspector scroll and dropping any
+// in-progress edit so its state cannot leak into another block's widgets.
+void selectNode(UiState &state, int nodeId);
+void addNodeFromKind(UiState &state, const std::string &kind);
+void showMessage(UiState &state, const std::string &title, const std::string &text, bool error);
+// Reminder with Continue/Cancel; `onConfirm` runs when the user continues.
+void showConfirm(UiState &state, const std::string &title, const std::string &text, bool error,
+                 std::function<void()> onConfirm);
+// Re-derives the output audio codec/bitrate from the imported media, e.g. after
+// the container changes. Never transcodes; it only re-points the settings.
+void refreshOutputAudio(UiState &state);
+// Starts the render for the current export path, first asking for confirmation
+// when the audio settings would audibly downgrade the imported media.
+void requestExport(UiState &state);
+Rectangle nodeBounds(const Graph &graph, const Node &node);
+
+int runApp(int argc, char **argv);
+
+}  // namespace pf

@@ -1,0 +1,1441 @@
+// Built-in blocks: sources, DSP/analysis, timing, modulation, render and output.
+#include "core/Registry.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <vector>
+
+#include "render/Geometry.h"
+#include "render/Palette.h"
+#include "render/Renderer.h"
+
+namespace pf {
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// Samples kept for the Frequency Band block's live input/output bar.
+constexpr int kBandHistory = 48;
+
+float dtOf(const EvalContext &ctx) { return ctx.fps > 1.0f ? 1.0f / ctx.fps : 1.0f / 60.0f; }
+
+float logFrequencyPosition(float hz, int sampleRate) {
+    const float nyquist = std::max(1000.0f, static_cast<float>(sampleRate) * 0.5f);
+    const float lo = 20.0f;
+    const float clamped = std::clamp(hz, lo, nyquist);
+    return std::log(clamped / lo) / std::log(nyquist / lo);
+}
+
+// One-pole attack/release follower with per-node state.
+float follow(Node &node, const char *key, float target, float attack, float release, float dt) {
+    const float current = static_cast<float>(node.runtimeState[key]);
+    const float coefficient = target > current ? std::clamp(attack, 0.001f, 1.0f)
+                                               : std::clamp(release, 0.001f, 1.0f);
+    // coefficient is interpreted as the fraction covered per 1/60 s.
+    const float k = 1.0f - std::pow(1.0f - coefficient, std::max(dt, 1e-4f) * 60.0f);
+    const float next = current + (target - current) * k;
+    node.runtimeState[key] = next;
+    return next;
+}
+
+const AnalysisData *analysisFrom(const std::vector<Value> &in, const EvalContext &ctx, size_t port) {
+    if (port < in.size() && in[port].analysis) return in[port].analysis.get();
+    return ctx.analysis.get();
+}
+
+float scalarFrom(const std::vector<Value> &in, size_t port) {
+    if (port < in.size() && in[port].type == PortType::Scalar) return in[port].scalar;
+    return 0.0f;
+}
+
+Texture2D textureFrom(const std::vector<Value> &in, size_t port) {
+    if (port < in.size() && in[port].image && in[port].image->valid()) return in[port].image->texture.texture;
+    return Texture2D{};
+}
+
+// ---------------------------------------------------------------------------
+// Sources
+// ---------------------------------------------------------------------------
+
+void evalAudioSource(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                     std::vector<Value> &out) {
+    (void)node;
+    (void)in;
+    out[0].type = PortType::Audio;
+    out[0].audio = ctx.audio;
+}
+
+// ---------------------------------------------------------------------------
+// Timing
+// ---------------------------------------------------------------------------
+
+void evalClock(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)in;
+    const float speed = node.pfloat("speed", 1.0f);
+    const float offset = node.pfloat("offset", 0.0f);
+    const float bpm = std::max(1.0f, node.pfloat("bpm", 120.0f));
+    const double time = ctx.time * speed + offset;
+    out[0] = Value::makeScalar(static_cast<float>(time));
+    out[1] = Value::makeScalar(static_cast<float>(ctx.frame));
+    out[2] = Value::makeScalar(ctx.duration > 0.0
+                                   ? static_cast<float>(std::clamp(time / ctx.duration, 0.0, 1.0))
+                                   : 0.0f);
+    const double beats = time * bpm / 60.0;
+    out[3] = Value::makeScalar(static_cast<float>(beats - std::floor(beats)));
+}
+
+void evalPulse(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)in;
+    const float bpm = std::max(1.0f, node.pfloat("bpm", 120.0f));
+    const int division = node.pint("division", 2);
+    static const float divisors[] = {1.0f, 0.5f, 0.25f, 0.125f, 0.0625f};
+    const float beatLength = 60.0f / bpm * divisors[std::clamp(division, 0, 4)];
+    const float decay = std::max(0.05f, node.pfloat("decay", 0.5f));
+    const float offset = node.pfloat("offset", 0.0f);
+    const double phase = (ctx.time + offset) / std::max(1e-4f, beatLength);
+    const float fract = static_cast<float>(phase - std::floor(phase));
+    out[0] = Value::makeScalar(std::exp(-fract * decay * 9.0f));
+}
+
+// ---------------------------------------------------------------------------
+// Analysis / DSP
+// ---------------------------------------------------------------------------
+
+void evalAnalyzer(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)in;
+    const float gain = node.pfloat("gain", 1.0f);
+    const float gate = node.pfloat("gate", 0.0f);
+    const AnalysisData *analysis = ctx.analysis.get();
+    out[0].type = PortType::Analysis;
+    out[0].analysis = ctx.analysis;
+    if (!analysis) {
+        for (size_t i = 1; i < out.size(); ++i) out[i] = Value::makeScalar(0.0f);
+        return;
+    }
+    auto shape = [&](float value) {
+        value *= gain;
+        return value < gate ? 0.0f : std::clamp(value, 0.0f, 1.0f);
+    };
+    const float *row = analysis->spectrumRow(ctx.audioTime);
+    float bass = 0.0f, mid = 0.0f, treble = 0.0f;
+    if (row) {
+        const int bins = analysis->spectrumBins;
+        const int bassEnd = std::max(1, bins / 8);
+        const int midEnd = std::max(bassEnd + 1, bins / 2);
+        auto average = [&](int from, int to) {
+            float sum = 0.0f;
+            for (int i = from; i < to; ++i) sum += row[i];
+            return to > from ? sum / static_cast<float>(to - from) : 0.0f;
+        };
+        bass = average(0, bassEnd);
+        mid = average(bassEnd, midEnd);
+        treble = average(midEnd, bins);
+    }
+    out[1] = Value::makeScalar(shape(analysis->valueAt(ctx.audioTime, 1)));
+    out[2] = Value::makeScalar(shape(analysis->valueAt(ctx.audioTime, 3)));
+    out[3] = Value::makeScalar(shape(bass));
+    out[4] = Value::makeScalar(shape(mid));
+    out[5] = Value::makeScalar(shape(treble));
+}
+
+void evalBand(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    const AnalysisData *analysis = analysisFrom(in, ctx, 0);
+    const float gain = node.pfloat("gain", 1.0f);
+    const float curve = std::max(0.05f, node.pfloat("curve", 1.0f));
+    const float gate = node.pfloat("gate", 0.0f);
+    if (!analysis || analysis->spectrumBins <= 0) {
+        out[0] = Value::makeScalar(0.0f);
+        return;
+    }
+    const float nyquist = std::max(1000.0f, static_cast<float>(analysis->sampleRate) * 0.5f);
+    const float lo = logFrequencyPosition(node.pfloat("lowHz", 40.0f), analysis->sampleRate);
+    const float hi = logFrequencyPosition(std::max(node.pfloat("highHz", 250.0f),
+                                                   node.pfloat("lowHz", 40.0f) + 1.0f),
+                                          analysis->sampleRate);
+    const int bins = analysis->spectrumBins;
+    const int from = std::clamp(static_cast<int>(lo * bins), 0, bins - 1);
+    const int to = std::clamp(static_cast<int>(hi * bins) + 1, from + 1, bins);
+    const float *row = analysis->spectrumRow(ctx.audioTime);
+    float value = 0.0f;
+    if (row) {
+        const int mode = node.pint("mode", 0);
+        float sum = 0.0f, peak = 0.0f;
+        for (int i = from; i < to; ++i) {
+            sum += row[i];
+            peak = std::max(peak, row[i]);
+        }
+        switch (mode) {
+            case 1: value = peak; break;
+            case 2: value = sum; break;
+            default: value = sum / static_cast<float>(std::max(1, to - from)); break;
+        }
+    }
+    value = std::pow(std::clamp(value * gain, 0.0f, 1.0f), curve);
+    if (value < gate) value = 0.0f;
+    // Raw and shaped values are kept for the block's live bar.
+    const float raw = value;
+    const float smoothed = follow(node, "env", value, node.pfloat("attack", 0.5f),
+                                  node.pfloat("release", 0.12f), dtOf(ctx));
+    node.runtimeState["in"] = raw;
+    node.runtimeState["out"] = smoothed;
+    Node::pushHistory(node.historyA, raw, kBandHistory);
+    Node::pushHistory(node.historyB, smoothed, kBandHistory);
+    ++node.historyCount;
+    out[0] = Value::makeScalar(smoothed);
+    (void)nyquist;
+}
+
+void evalEnvelope(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    float value = std::clamp(scalarFrom(in, 0), 0.0f, 4.0f);
+    const float gate = node.pfloat("threshold", 0.0f);
+    if (value < gate) value = 0.0f;
+    const float smoothed = follow(node, "env", value, node.pfloat("attack", 0.4f),
+                                  node.pfloat("release", 0.1f), dtOf(ctx));
+    float result = smoothed * node.pfloat("gain", 1.0f) + node.pfloat("offset", 0.0f);
+    result = std::max(result, node.pfloat("floor", 0.0f));
+    out[0] = Value::makeScalar(result);
+}
+
+void evalRemap(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float value = scalarFrom(in, 0);
+    float t = normalize01(value, node.pfloat("inMin", 0.0f), node.pfloat("inMax", 1.0f));
+    if (node.pbool("smoothstep", false)) t = t * t * (3.0f - 2.0f * t);
+    const float power = std::max(0.05f, node.pfloat("power", 1.0f));
+    if (std::fabs(power - 1.0f) > 1e-3f) t = std::pow(t, power);
+    float result = lerp(node.pfloat("outMin", 0.0f), node.pfloat("outMax", 1.0f), t);
+    if (node.pbool("clamp", true)) {
+        const float lo = std::min(node.pfloat("outMin", 0.0f), node.pfloat("outMax", 1.0f));
+        const float hi = std::max(node.pfloat("outMin", 0.0f), node.pfloat("outMax", 1.0f));
+        result = std::clamp(result, lo, hi);
+    }
+    out[0] = Value::makeScalar(result);
+}
+
+void evalNoise(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)in;
+    const float speed = node.pfloat("speed", 1.0f);
+    const double phase = ctx.time * speed;
+    double &state = node.runtimeState["noise"];
+    const int type = node.pint("type", 0);
+    float value = 0.0f;
+    switch (type) {
+        case 1: {  // sample & hold
+            const double cell = std::floor(phase);
+            const unsigned int hashed = static_cast<unsigned int>(cell * 2654435761.0) ^
+                                        static_cast<unsigned int>(node.pint("seed", 1) * 40503);
+            state = static_cast<double>(hashed % 100000u) / 100000.0;
+            value = static_cast<float>(state);
+            break;
+        }
+        case 2: {  // pink-ish (sum of octaves)
+            float sum = 0.0f;
+            float amp = 0.5f;
+            for (int octave = 0; octave < 4; ++octave) {
+                const double p = phase * static_cast<double>(1 << octave);
+                const float x = static_cast<float>(std::sin(p * 12.9898) * 43758.5453);
+                sum += (x - std::floor(x) - 0.5f) * amp;
+                amp *= 0.6f;
+            }
+            value = std::clamp(sum + 0.5f, 0.0f, 1.0f);
+            break;
+        }
+        default: {  // smooth value noise
+            const double cell = std::floor(phase);
+            const float t = static_cast<float>(phase - cell);
+            auto hashat = [&](double c) {
+                const unsigned int h = static_cast<unsigned int>(c * 1274126177.0) ^
+                                       static_cast<unsigned int>(node.pint("seed", 1) * 7919);
+                return static_cast<float>((h % 10000u)) / 10000.0f;
+            };
+            const float a = hashat(cell);
+            const float b = hashat(cell + 1.0);
+            value = lerp(a, b, t * t * (3.0f - 2.0f * t));
+            break;
+        }
+    }
+    value = lerp(0.5f, value, std::clamp(node.pfloat("amount", 1.0f), 0.0f, 1.0f));
+    out[0] = Value::makeScalar(std::clamp(value, 0.0f, 1.0f));
+}
+
+// ---------------------------------------------------------------------------
+// Math
+// ---------------------------------------------------------------------------
+
+
+void setMatrixRow(Matrix &m, int row, float a, float b, float c, float d) {
+    switch (row) {
+        case 0: m.m0 = a; m.m1 = b; m.m2 = c; m.m3 = d; break;
+        case 1: m.m4 = a; m.m5 = b; m.m6 = c; m.m7 = d; break;
+        case 2: m.m8 = a; m.m9 = b; m.m10 = c; m.m11 = d; break;
+        default: m.m12 = a; m.m13 = b; m.m14 = c; m.m15 = d; break;
+    }
+}
+
+Vector4 matrixRow(const Matrix &m, int row) {
+    switch (row) {
+        case 0: return Vector4{m.m0, m.m1, m.m2, m.m3};
+        case 1: return Vector4{m.m4, m.m5, m.m6, m.m7};
+        case 2: return Vector4{m.m8, m.m9, m.m10, m.m11};
+        default: return Vector4{m.m12, m.m13, m.m14, m.m15};
+    }
+}
+
+float scalarOr(const std::vector<Value> &in, size_t port, float fallback) {
+    if (port < in.size() && in[port].type == PortType::Scalar) return in[port].scalar;
+    return fallback;
+}
+
+float applyOutputShape(Node &node, float value, const char *gainKey = "gain",
+                       const char *offsetKey = "offset") {
+    value = value * node.pfloat(gainKey, 1.0f) + node.pfloat(offsetKey, 0.0f);
+    const float lo = node.pfloat("clampMin", -1.0e6f);
+    const float hi = node.pfloat("clampMax", 1.0e6f);
+    return std::clamp(value, std::min(lo, hi), std::max(lo, hi));
+}
+
+void evalConstant(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    (void)in;
+    out[0] = Value::makeScalar(node.pfloat("value", 1.0f));
+}
+
+void evalArithmetic(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float a = scalarOr(in, 0, 0.0f);
+    const float b = scalarOr(in, 1, node.pfloat("bValue", 0.0f));
+    float result = 0.0f;
+    switch (node.pint("op", 0)) {
+        case 0: result = a + b; break;
+        case 1: result = a - b; break;
+        case 2: result = a * b; break;
+        case 3: result = std::fabs(b) < 1e-6f ? 0.0f : a / b; break;
+        case 4: result = std::min(a, b); break;
+        case 5: result = std::max(a, b); break;
+        default: result = std::fabs(b) < 1e-6f ? 0.0f : std::fmod(a, b); break;
+    }
+    out[0] = Value::makeScalar(applyOutputShape(node, result));
+}
+
+void evalPower(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float base = scalarOr(in, 0, 0.0f);
+    const float exponent = scalarOr(in, 1, node.pfloat("exponent", 2.0f));
+    // Negative bases with fractional exponents are NaN in C; mirror instead and
+    // keep the sign so the signal stays usable as a modulation source.
+    const bool signedPower = node.pbool("signed", true);
+    const float magnitude = std::pow(std::max(std::fabs(base), 1.0e-9f), exponent);
+    const float result = (signedPower && base < 0.0f) ? -magnitude : magnitude;
+    out[0] = Value::makeScalar(applyOutputShape(node, result));
+}
+
+void evalExponential(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float x = scalarOr(in, 0, 0.0f) * node.pfloat("inputScale", 1.0f);
+    const int base = node.pint("base", 0);
+    const float result = base == 1 ? std::exp2(x) : (base == 2 ? std::pow(10.0f, x) : std::exp(x));
+    out[0] = Value::makeScalar(applyOutputShape(node, result));
+}
+
+void evalLogarithm(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float floorValue = std::max(1.0e-9f, node.pfloat("floor", 1.0e-4f));
+    const float x = std::max(scalarOr(in, 0, floorValue), floorValue);
+    const int base = node.pint("base", 0);
+    const float result = base == 1 ? std::log2(x) : (base == 2 ? std::log10(x) : std::log(x));
+    out[0] = Value::makeScalar(applyOutputShape(node, result));
+}
+
+float angleToRadians(float value, int unit) {
+    switch (unit) {
+        case 1: return value * 6.28318530718f;          // turns
+        case 2: return value * 0.0174532925199f;        // degrees
+        default: return value;                           // radians
+    }
+}
+
+float radiansToUnit(float radians, int unit) {
+    switch (unit) {
+        case 1: return radians / 6.28318530718f;
+        case 2: return radians * 57.2957795131f;
+        default: return radians;
+    }
+}
+
+void evalTrig(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float raw = scalarOr(in, 0, 0.0f);
+    const float angle = angleToRadians(raw * node.pfloat("frequency", 1.0f) +
+                                           node.pfloat("phase", 0.0f),
+                                       node.pint("unit", 0));
+    const float gain = node.pfloat("gain", 1.0f);
+    const float offset = node.pfloat("offset", 0.0f);
+    out[0] = Value::makeScalar(std::sin(angle) * gain + offset);
+    out[1] = Value::makeScalar(std::cos(angle) * gain + offset);
+    out[2] = Value::makeScalar(std::clamp(std::tan(angle), -1.0e4f, 1.0e4f) * gain + offset);
+}
+
+void evalHyperbolic(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float x = scalarOr(in, 0, 0.0f) * node.pfloat("inputScale", 1.0f);
+    const float gain = node.pfloat("gain", 1.0f);
+    const float offset = node.pfloat("offset", 0.0f);
+    out[0] = Value::makeScalar(std::sinh(x) * gain + offset);
+    out[1] = Value::makeScalar(std::cosh(x) * gain + offset);
+    out[2] = Value::makeScalar(std::tanh(x) * gain + offset);
+}
+
+void evalInverseTrig(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float x = scalarOr(in, 0, 0.0f);
+    const int unit = node.pint("unit", 0);
+    const float gain = node.pfloat("gain", 1.0f);
+    const float offset = node.pfloat("offset", 0.0f);
+    const float clamped = std::clamp(x, -1.0f, 1.0f);
+    out[0] = Value::makeScalar(radiansToUnit(std::asin(clamped), unit) * gain + offset);
+    out[1] = Value::makeScalar(radiansToUnit(std::acos(clamped), unit) * gain + offset);
+    out[2] = Value::makeScalar(radiansToUnit(std::atan(x), unit) * gain + offset);
+}
+
+void evalVector2(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float x = scalarOr(in, 0, node.pfloat("x", 0.0f));
+    const float y = scalarOr(in, 1, node.pfloat("y", 0.0f));
+    out[0] = Value::makeVec2(Vector2{x, y});
+    out[1] = Value::makeScalar(x);
+    out[2] = Value::makeScalar(y);
+}
+
+void evalVector3(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float x = scalarOr(in, 0, node.pfloat("x", 0.0f));
+    const float y = scalarOr(in, 1, node.pfloat("y", 0.0f));
+    const float z = scalarOr(in, 2, node.pfloat("z", 0.0f));
+    out[0] = Value::makeVec3(Vector3{x, y, z});
+    out[1] = Value::makeScalar(x);
+    out[2] = Value::makeScalar(y);
+    out[3] = Value::makeScalar(z);
+}
+
+void evalVector4(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float x = scalarOr(in, 0, node.pfloat("x", 0.0f));
+    const float y = scalarOr(in, 1, node.pfloat("y", 0.0f));
+    const float z = scalarOr(in, 2, node.pfloat("z", 0.0f));
+    const float w = scalarOr(in, 3, node.pfloat("w", 0.0f));
+    out[0] = Value::makeVec4(Vector4{x, y, z, w});
+    out[1] = Value::makeScalar(x);
+    out[2] = Value::makeScalar(y);
+    out[3] = Value::makeScalar(z);
+    out[4] = Value::makeScalar(w);
+}
+
+void evalMatrix(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    // The enum index (2x2/3x3/4x4) maps to the dimension as index + 2.
+    const int matrixSize = std::clamp(node.pint("size", 1) + 2, 2, 4);
+    // Identity fallback when the node has no grid parameter (older projects).
+    static const Param kIdentity = [] {
+        Param p;
+        p.values.assign(16, 0.0f);
+        for (int i = 0; i < 4; ++i) p.values[static_cast<size_t>(i * 4 + i)] = 1.0f;
+        return p;
+    }();
+    const Param *grid = node.find("matrix");
+    const Param &source = grid ? *grid : kIdentity;
+    Matrix matrix{};
+    for (int row = 0; row < 4; ++row) {
+        setMatrixRow(matrix, row, matrixParamValue(source, row, 0), matrixParamValue(source, row, 1),
+                     matrixParamValue(source, row, 2), matrixParamValue(source, row, 3));
+    }
+    // Connected Vector4 rows overwrite the grid rows.
+    for (int row = 0; row < matrixSize; ++row) {
+        if (row < static_cast<int>(in.size()) && in[static_cast<size_t>(row)].type == PortType::Vec4) {
+            const Vector4 rowValue = in[static_cast<size_t>(row)].vec4;
+            setMatrixRow(matrix, row, rowValue.x, rowValue.y, rowValue.z, rowValue.w);
+        }
+    }
+    out[0] = Value::makeMatrix(matrix);
+}
+
+float determinant2(const Matrix &m) { return m.m0 * m.m5 - m.m1 * m.m4; }
+
+float determinant3(const Matrix &m) {
+    return m.m0 * (m.m5 * m.m10 - m.m6 * m.m9) - m.m1 * (m.m4 * m.m10 - m.m6 * m.m8) +
+           m.m2 * (m.m4 * m.m9 - m.m5 * m.m8);
+}
+
+float determinant4(const Matrix &m) {
+    const float a = m.m0, b = m.m1, c = m.m2, d = m.m3;
+    const float e = m.m4, f = m.m5, g = m.m6, h = m.m7;
+    const float i = m.m8, j = m.m9, k = m.m10, l = m.m11;
+    const float n = m.m12, o = m.m13, p = m.m14, q = m.m15;
+    return a * (f * k * q - f * l * p - g * j * q + g * l * o + h * j * p - h * k * o) -
+           b * (e * k * q - e * l * p - g * i * q + g * l * n + h * i * p - h * k * n) +
+           c * (e * j * q - e * l * o - f * i * q + f * l * n + h * i * o - h * j * n) -
+           d * (e * j * p - e * k * o - f * i * p + f * k * n + g * i * o - g * j * n);
+}
+
+void evalDeterminant(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    if (in.empty() || in[0].type != PortType::Matrix) {
+        out[0] = Value::makeScalar(0.0f);
+        out[1] = Value::makeScalar(0.0f);
+        return;
+    }
+    const Matrix &m = in[0].matrix;
+    const int size = std::clamp(node.pint("size", 1) + 2, 2, 4);
+    float det = 0.0f;
+    float trace = 0.0f;
+    switch (size) {
+        case 2:
+            det = determinant2(m);
+            trace = m.m0 + m.m5;
+            break;
+        case 4:
+            det = determinant4(m);
+            trace = m.m0 + m.m5 + m.m10 + m.m15;
+            break;
+        default:
+            det = determinant3(m);
+            trace = m.m0 + m.m5 + m.m10;
+            break;
+    }
+    out[0] = Value::makeScalar(det);
+    out[1] = Value::makeScalar(trace);
+}
+
+// ---------------------------------------------------------------------------
+// Modulation
+// ---------------------------------------------------------------------------
+
+void evalLfo(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    const float frequency = node.pfloat("frequency", 1.0f);
+    const float phaseOffset = node.pfloat("phase", 0.0f);
+    const bool sync = node.pbool("sync", false);
+    double phase = 0.0;
+    if (sync) {
+        const float bpm = std::max(1.0f, node.pfloat("bpm", 120.0f));
+        static const float divisors[] = {1.0f, 2.0f, 4.0f, 8.0f, 16.0f};
+        const float cycles = bpm / 60.0f / divisors[std::clamp(node.pint("division", 1), 0, 4)];
+        phase = ctx.time * cycles;
+    } else {
+        phase = ctx.time * frequency;
+    }
+    phase += phaseOffset;
+    if (in.size() > 0 && in[0].type == PortType::Scalar) phase += in[0].scalar;
+    const float t = static_cast<float>(phase - std::floor(phase));
+    float wave = 0.0f;
+    switch (node.pint("shape", 0)) {
+        case 0: wave = std::sin(t * 6.2831853f); break;
+        case 1: wave = 4.0f * std::fabs(t - 0.5f) - 1.0f; break;
+        case 2: wave = t * 2.0f - 1.0f; break;
+        case 3: wave = 1.0f - t * 2.0f; break;
+        case 4: wave = t < 0.5f ? 1.0f : -1.0f; break;
+        case 5: {  // random step
+            const double cell = std::floor(phase);
+            const unsigned int hashed = static_cast<unsigned int>(cell * 2654435761.0);
+            wave = static_cast<float>(hashed % 10000u) / 5000.0f - 1.0f;
+            break;
+        }
+        default: wave = std::sin(t * 6.2831853f) * 0.5f; break;
+    }
+    const float amplitude = node.pfloat("amplitude", 1.0f);
+    const float offset = node.pfloat("offset", 0.0f);
+    // Keep the phase so the block preview can put its pivot on the waveform.
+    node.runtimeState["phase"] = t;
+    out[0] = Value::makeScalar(wave * amplitude + offset);
+}
+
+void evalAutomation(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)in;
+    double normalized = ctx.duration > 0.0 ? ctx.time / ctx.duration : 0.0;
+    if (node.pbool("loop", false)) {
+        const double span = std::max(1e-4, static_cast<double>(node.pfloat("loopLength", 1.0f)));
+        normalized = (normalized / span) - std::floor(normalized / span);
+    }
+    normalized = std::clamp(normalized, 0.0, 1.0);
+    // The curve is stored in 0..1 curve space; the bipolar switch decides whether
+    // that maps to 0..1 or to -1..1 before depth/offset are applied.
+    const float curve = std::clamp(node.curveAt("curve", normalized), 0.0f, 1.0f);
+    node.runtimeState["pos"] = normalized;
+    float result = node.pbool("bipolar", false) ? (curve * 2.0f - 1.0f) : curve;
+    result = result * node.pfloat("depth", 1.0f) + node.pfloat("offset", 0.0f);
+    if (node.pbool("smooth", false)) {
+        result = follow(node, "smooth", result, node.pfloat("smoothing", 0.2f),
+                        node.pfloat("smoothing", 0.2f), dtOf(ctx));
+    }
+    out[0] = Value::makeScalar(result);
+}
+
+void evalAmount(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float value = scalarFrom(in, 0);
+    const bool hasAmount = in.size() > 1 && in[1].type == PortType::Scalar;
+    float amount = hasAmount ? in[1].scalar : node.pfloat("amount", 1.0f);
+    amount = std::pow(std::clamp(amount, 0.0f, 4.0f), std::max(0.05f, node.pfloat("curve", 1.0f)));
+    float result = value * amount * node.pfloat("gain", 1.0f) + node.pfloat("offset", 0.0f);
+    const int steps = node.pint("quantize", 0);
+    if (steps > 1) result = std::round(result * static_cast<float>(steps)) / static_cast<float>(steps);
+    out[0] = Value::makeScalar(result);
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+
+void evalShaderPass(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    if (!ctx.renderer || !ctx.shaders) return;
+    const float scale = std::clamp(node.pfloat("scale", 1.0f), 0.15f, 2.0f);
+    const int width = std::max(2, static_cast<int>(ctx.width * scale));
+    const int height = std::max(2, static_cast<int>(ctx.height * scale));
+
+    const std::string file = node.pstr("shader");
+    Shader *shader = nullptr;
+    std::string error;
+    if (!file.empty()) shader = ctx.shaders->get(file, &error);
+    if (!shader) {
+        const int preset = node.pint("preset", 0);
+        const std::vector<std::string> builtins = ShaderLibrary::builtinNames();
+        const int index = std::clamp(preset, 0, static_cast<int>(builtins.size()) - 1);
+        shader = ctx.shaders->builtin(builtins[static_cast<size_t>(index)]);
+    }
+    if (!shader) {
+        node.status = ctx.shaders->lastError();
+        out[0] = in[0];  // pass the input through when the shader fails
+        return;
+    }
+    node.status.clear();
+
+    float user[8] = {0};
+    for (int i = 0; i < 8; ++i) user[i] = scalarFrom(in, static_cast<size_t>(i) + 1);
+
+    ShaderVectorUniforms vectors;
+    if (in.size() > 9 && in[9].type == PortType::Vec2) {
+        vectors.vec2 = in[9].vec2;
+        vectors.useVec2 = true;
+    }
+    if (in.size() > 10 && in[10].type == PortType::Vec3) {
+        vectors.vec3 = in[10].vec3;
+        vectors.useVec3 = true;
+    }
+    if (in.size() > 11 && in[11].type == PortType::Vec4) {
+        vectors.vec4 = in[11].vec4;
+        vectors.useVec4 = true;
+    }
+    if (in.size() > 12 && in[12].type == PortType::Matrix) {
+        vectors.matrix = in[12].matrix;
+        vectors.useMatrix = true;
+    }
+
+    Texture2D prev = textureFrom(in, 0);
+    Texture2D feedback{};
+    const float feedbackAmount = node.pbool("useFeedback", false) ? node.pfloat("feedback", 0.6f) : 0.0f;
+    ImageBufferPtr feedbackTarget;
+    if (node.pbool("useFeedback", false)) {
+        feedbackTarget = ctx.renderer->persistent(node.id, width, height);
+        if (feedbackTarget) {
+            feedback = feedbackTarget->texture.texture;
+            user[0] = std::max(user[0], feedbackAmount);
+        }
+    }
+
+    ImageBufferPtr target = ctx.renderer->acquire(width, height);
+    if (!target) {
+        node.status = "out of render targets";
+        return;
+    }
+    ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+    ctx.renderer->drawShaderPass(shader, ctx, prev, Texture2D{}, feedback, user, 8,
+                                 node.pcolor("colorA"), node.pcolor("colorB"), vectors);
+    ctx.renderer->endTarget();
+
+    if (feedbackTarget) {
+        ctx.renderer->beginTarget(feedbackTarget, false, BLANK);
+        ctx.renderer->blit(target);
+        ctx.renderer->endTarget();
+    }
+    out[0] = Value::makeImage(target);
+}
+
+void evalBlend(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    if (!ctx.renderer || !ctx.shaders) return;
+    Shader *shader = ctx.shaders->builtin("blend");
+    if (!shader) return;
+    float user[8] = {0};
+    user[0] = static_cast<float>(node.pint("mode", 1));
+    user[1] = node.pfloat("opacity", 1.0f);
+    ImageBufferPtr target = ctx.renderer->acquire(ctx.width, ctx.height);
+    if (!target) return;
+    ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+    ctx.renderer->drawShaderPass(shader, ctx, textureFrom(in, 0), textureFrom(in, 1), Texture2D{},
+                                 user, 2, WHITE, WHITE);
+    ctx.renderer->endTarget();
+    out[0] = Value::makeImage(target);
+}
+
+void evalPostFx(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    if (!ctx.renderer || !ctx.shaders) return;
+    Shader *shader = ctx.shaders->builtin("postfx");
+    if (!shader) return;
+    // Scalar inputs override the matching parameter, so any modulation block can
+    // drive the grade in real time.
+    auto pick = [&](size_t port, const char *key, float fallback, float lo, float hi) {
+        if (port < in.size() && in[port].type == PortType::Scalar) {
+            return std::clamp(in[port].scalar, lo, hi);
+        }
+        return std::clamp(node.pfloat(key, fallback), lo, hi);
+    };
+    const float bloom = pick(1, "bloom", 0.35f, 0.0f, 1.0f);
+    const float chromatic = pick(2, "chromatic", 0.15f, 0.0f, 1.0f);
+    const float vignette = pick(3, "vignette", 0.35f, 0.0f, 1.0f);
+    const float grain = pick(4, "grain", 0.08f, 0.0f, 1.0f);
+    const float scanlines = pick(5, "scanlines", 0.0f, 0.0f, 1.0f);
+    const float feedbackAmount = pick(6, "feedback", 0.0f, 0.0f, 0.98f);
+    const float saturation = pick(7, "saturation", 1.05f, 0.0f, 2.0f);
+    const float hue = pick(8, "hue", 0.0f, -1.0f, 1.0f);
+    Texture2D feedback{};
+    ImageBufferPtr feedbackTarget;
+    if (feedbackAmount > 0.001f) {
+        feedbackTarget = ctx.renderer->persistent(node.id, ctx.width, ctx.height);
+        if (feedbackTarget) feedback = feedbackTarget->texture.texture;
+    }
+    float user[8] = {bloom, chromatic, vignette, grain, scanlines, feedbackAmount, saturation, hue};
+    ImageBufferPtr target = ctx.renderer->acquire(ctx.width, ctx.height);
+    if (!target) return;
+    ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+    ctx.renderer->drawShaderPass(shader, ctx, textureFrom(in, 0), Texture2D{}, feedback, user, 8,
+                                 WHITE, WHITE);
+    ctx.renderer->endTarget();
+    if (feedbackTarget) {
+        ctx.renderer->beginTarget(feedbackTarget, false, BLANK);
+        ctx.renderer->blit(target);
+        ctx.renderer->endTarget();
+    }
+    out[0] = Value::makeImage(target);
+}
+
+void fillWaveWindow(const EvalContext &ctx, std::vector<float> &out) {
+    out.assign(512, 0.0f);
+    if (!ctx.audio || ctx.audio->frameCount <= 0) return;
+    const double window = 0.04;  // +/- seconds
+    for (size_t i = 0; i < out.size(); ++i) {
+        const double t = ctx.audioTime - window + 2.0 * window * (static_cast<double>(i) / (out.size() - 1));
+        out[i] = std::clamp(ctx.audio->monoAt(t * ctx.audio->sampleRate), -1.0f, 1.0f);
+    }
+}
+
+void evalGeometry(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    if (!ctx.renderer) return;
+    static thread_local std::vector<float> wave;
+    fillWaveWindow(ctx, wave);
+
+    ImageBufferPtr target = ctx.renderer->acquire(ctx.width, ctx.height);
+    if (!target) return;
+    ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+    if (in.size() > 0 && in[0].image && in[0].image->valid()) ctx.renderer->blit(in[0].image);
+
+    geometry::GeomSpec spec;
+    spec.width = ctx.width;
+    spec.height = ctx.height;
+    spec.cx = node.pfloat("x", 0.5f) + scalarFrom(in, 3) * node.pfloat("xMod", 0.25f);
+    spec.cy = node.pfloat("y", 0.5f) + scalarFrom(in, 4) * node.pfloat("yMod", 0.0f);
+    // A Vector2 input overrides the position outright, which is how the Vector
+    // blocks drive geometry.
+    if (in.size() > 5 && in[5].type == PortType::Vec2) {
+        spec.cx = in[5].vec2.x;
+        spec.cy = in[5].vec2.y;
+    }
+    spec.radius = std::max(0.01f, node.pfloat("radius", 0.28f) *
+                                      (1.0f + scalarFrom(in, 1) * node.pfloat("scaleMod", 0.5f)));
+    spec.thickness = node.pfloat("thickness", 4.0f);
+    spec.rotation = node.pfloat("rotation", 0.0f) * 6.2831853f +
+                    static_cast<float>(ctx.time) * node.pfloat("spin", 0.0f) +
+                    scalarFrom(in, 2) * node.pfloat("rotationMod", 0.0f);
+    spec.count = std::max(2, node.pint("count", 64));
+    spec.colorA = node.pcolor("colorA");
+    spec.colorB = node.pcolor("colorB");
+    spec.alpha = std::clamp(node.pfloat("alpha", 1.0f), 0.0f, 1.0f);
+    spec.additive = node.pbool("additive", true);
+    spec.reactivity = node.pfloat("reactivity", 0.5f) *
+                      (ctx.analysis ? ctx.analysis->valueAt(ctx.audioTime, 1) : 0.0f);
+    spec.band = node.pint("band", 0);
+    spec.text = node.pstr("text");
+    spec.textSize = node.pfloat("textSize", 72.0f);
+    spec.stateKey = node.id;
+    spec.dt = dtOf(ctx);
+    spec.time = ctx.time;
+    if (ctx.analysis) {
+        spec.spectrum = ctx.analysis->spectrumRow(ctx.audioTime);
+        spec.spectrumCount = ctx.analysis->spectrumBins;
+    }
+    spec.wave = wave.data();
+    spec.waveCount = static_cast<int>(wave.size());
+
+    const int shapeIndex = std::clamp(node.pint("shape", 0), 0, static_cast<int>(geometry::Shape::Count) - 1);
+    geometry::drawPrimitive(static_cast<geometry::Shape>(shapeIndex), spec);
+    ctx.renderer->endTarget();
+    out[0] = Value::makeImage(target);
+}
+
+void evalOutput(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    (void)out;
+    if (in.size() > 0 && in[0].image) {
+        node.status = "receiving";
+    } else {
+        node.status = "not connected";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parameter and port builders
+// ---------------------------------------------------------------------------
+
+Param colorParam(const char *key, const char *label, unsigned int hex, const std::string &group) {
+    return makeColorParam(key, label, palette::fromHex(hex), group);
+}
+
+std::vector<Param> shaderScalarPorts(std::vector<PortDesc> &inputs) {
+    for (int i = 0; i < 8; ++i) {
+        inputs.push_back(PortDesc{"u" + std::to_string(i), PortType::Scalar, "uniform"});
+    }
+    return {};
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+Registry &Registry::instance() {
+    static Registry registry;
+    return registry;
+}
+
+Registry::Registry() { registerBuiltins(); }
+
+void Registry::add(NodeDef def) { definitions_.push_back(std::move(def)); }
+
+const NodeDef *Registry::find(const std::string &kind) const {
+    for (const auto &def : definitions_) {
+        if (def.kind == kind) return &def;
+    }
+    return nullptr;
+}
+
+std::vector<const NodeDef *> Registry::byCategory(const std::string &category) const {
+    std::vector<const NodeDef *> result;
+    for (const auto &def : definitions_) {
+        if (def.category == category) result.push_back(&def);
+    }
+    return result;
+}
+
+std::vector<std::string> Registry::categories() const {
+    std::vector<std::string> result;
+    for (const auto &def : definitions_) {
+        if (std::find(result.begin(), result.end(), def.category) == result.end()) {
+            result.push_back(def.category);
+        }
+    }
+    return result;
+}
+
+void Registry::registerBuiltins() {
+    // ---- Source ----------------------------------------------------------
+    {
+        NodeDef def;
+        def.kind = "src.audio";
+        def.category = "Source";
+        def.label = "Audio Source";
+        def.description =
+            "Emits the project's decoded audio clip. Any format ffmpeg understands is "
+            "accepted and the whole file is decoded to 32-bit float on load.";
+        def.outputs = {PortDesc{"Audio", PortType::Audio, "decoded clip"}};
+        def.evaluate = evalAudioSource;
+        add(std::move(def));
+    }
+
+    // ---- Timing ----------------------------------------------------------
+    {
+        NodeDef def;
+        def.kind = "time.clock";
+        def.category = "Timing";
+        def.label = "Time Source";
+        def.description = "Video timing: emits seconds, frame index, normalised progress and beat phase.";
+        def.outputs = {PortDesc{"Time", PortType::Scalar, "seconds"},
+                       PortDesc{"Frame", PortType::Scalar, "frame index"},
+                       PortDesc{"Progress", PortType::Scalar, "0..1"},
+                       PortDesc{"Beat", PortType::Scalar, "beat phase 0..1"}};
+        def.params = {
+            makeParam("speed", "Speed", 1.0f, 0.0f, 4.0f, 0.01f, "Time"),
+            makeParam("offset", "Offset (s)", 0.0f, -30.0f, 30.0f, 0.01f, "Time"),
+            makeParam("bpm", "Tempo (BPM)", 120.0f, 20.0f, 300.0f, 1.0f, "Beat"),
+        };
+        def.evaluate = evalClock;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "time.pulse";
+        def.category = "Timing";
+        def.label = "Beat Pulse";
+        def.description = "Decaying trigger on a musical division, handy for stabs and envelopes.";
+        def.outputs = {PortDesc{"Pulse", PortType::Scalar, "0..1"}};
+        def.params = {
+            makeParam("bpm", "Tempo (BPM)", 120.0f, 20.0f, 300.0f, 1.0f, "Pulse"),
+            makeEnumParam("division", "Division", {"1/1", "1/2", "1/4", "1/8", "1/16"}, 2, "Pulse"),
+            makeParam("decay", "Decay", 0.5f, 0.02f, 2.0f, 0.01f, "Pulse"),
+            makeParam("offset", "Offset (s)", 0.0f, -10.0f, 10.0f, 0.01f, "Pulse"),
+        };
+        def.evaluate = evalPulse;
+        add(std::move(def));
+    }
+
+    // ---- DSP -------------------------------------------------------------
+    {
+        NodeDef def;
+        def.kind = "dsp.analyze";
+        def.category = "DSP";
+        def.label = "Spectrum Analyzer";
+        def.description =
+            "Exposes the project's FFT analysis: band magnitudes plus level, onset and "
+            "bass/mid/treble scalars. Analysis is precomputed for the whole clip.";
+        def.inputs = {PortDesc{"Audio", PortType::Audio}};
+        def.outputs = {PortDesc{"Analysis", PortType::Analysis},
+                       PortDesc{"Level", PortType::Scalar},
+                       PortDesc{"Onset", PortType::Scalar},
+                       PortDesc{"Bass", PortType::Scalar},
+                       PortDesc{"Mid", PortType::Scalar},
+                       PortDesc{"Treble", PortType::Scalar}};
+        def.params = {
+            makeParam("gain", "Gain", 1.0f, 0.0f, 8.0f, 0.01f, "Output"),
+            makeParam("gate", "Gate", 0.0f, 0.0f, 0.5f, 0.001f, "Output"),
+        };
+        def.evaluate = evalAnalyzer;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "dsp.band";
+        def.category = "DSP";
+        def.label = "Frequency Band";
+        def.description = "Selects a frequency range from the analysis and turns it into a scalar.";
+        def.inputs = {PortDesc{"Analysis", PortType::Analysis}};
+        def.outputs = {PortDesc{"Value", PortType::Scalar}};
+        def.params = {
+            makeParam("lowHz", "Low (Hz)", 40.0f, 20.0f, 16000.0f, 1.0f, "Band"),
+            makeParam("highHz", "High (Hz)", 250.0f, 21.0f, 20000.0f, 1.0f, "Band"),
+            makeEnumParam("mode", "Mode", {"Average", "Peak", "Sum"}, 0, "Band"),
+            makeParam("gain", "Gain", 1.0f, 0.0f, 8.0f, 0.01f, "Shape"),
+            makeParam("curve", "Curve", 1.0f, 0.05f, 4.0f, 0.01f, "Shape"),
+            makeParam("gate", "Gate", 0.0f, 0.0f, 0.5f, 0.001f, "Shape"),
+            makeParam("attack", "Attack", 0.5f, 0.001f, 1.0f, 0.001f, "Envelope"),
+            makeParam("release", "Release", 0.12f, 0.001f, 1.0f, 0.001f, "Envelope"),
+        };
+        def.evaluate = evalBand;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "dsp.env";
+        def.category = "DSP";
+        def.label = "Envelope Follower";
+        def.description = "Attack/release smoothing, gain and floor for any scalar signal.";
+        def.inputs = {PortDesc{"Value", PortType::Scalar}};
+        def.outputs = {PortDesc{"Value", PortType::Scalar}};
+        def.params = {
+            makeParam("attack", "Attack", 0.4f, 0.001f, 1.0f, 0.001f, "Envelope"),
+            makeParam("release", "Release", 0.1f, 0.001f, 1.0f, 0.001f, "Envelope"),
+            makeParam("threshold", "Threshold", 0.0f, 0.0f, 1.0f, 0.001f, "Envelope"),
+            makeParam("gain", "Gain", 1.0f, 0.0f, 8.0f, 0.01f, "Output"),
+            makeParam("offset", "Offset", 0.0f, -1.0f, 1.0f, 0.001f, "Output"),
+            makeParam("floor", "Floor", 0.0f, 0.0f, 1.0f, 0.001f, "Output"),
+        };
+        def.evaluate = evalEnvelope;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "dsp.remap";
+        def.category = "DSP";
+        def.label = "Curve / Remap";
+        def.description = "Remaps an input range onto an output range with optional shaping.";
+        def.inputs = {PortDesc{"Value", PortType::Scalar}};
+        def.outputs = {PortDesc{"Value", PortType::Scalar}};
+        def.params = {
+            makeParam("inMin", "In min", 0.0f, -16.0f, 16.0f, 0.01f, "Input range"),
+            makeParam("inMax", "In max", 1.0f, -16.0f, 16.0f, 0.01f, "Input range"),
+            makeParam("outMin", "Out min", 0.0f, -16.0f, 16.0f, 0.01f, "Output range"),
+            makeParam("outMax", "Out max", 1.0f, -16.0f, 16.0f, 0.01f, "Output range"),
+            makeParam("power", "Power", 1.0f, 0.05f, 6.0f, 0.01f, "Shape"),
+            makeBoolParam("smoothstep", "Smoothstep", false, "Shape"),
+            makeBoolParam("clamp", "Clamp output", true, "Shape"),
+        };
+        def.evaluate = evalRemap;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "dsp.noise";
+        def.category = "DSP";
+        def.label = "Noise";
+        def.description = "Value, sample-and-hold or pink-ish noise as a 0..1 control signal.";
+        def.outputs = {PortDesc{"Value", PortType::Scalar}};
+        def.params = {
+            makeEnumParam("type", "Type", {"Value noise", "Sample & hold", "Pink"}, 0, "Noise"),
+            makeParam("speed", "Speed", 1.0f, 0.01f, 40.0f, 0.01f, "Noise"),
+            makeParam("amount", "Amount", 1.0f, 0.0f, 1.0f, 0.01f, "Noise"),
+            makeIntParam("seed", "Seed", 1, 1, 9999, "Noise"),
+        };
+        def.evaluate = evalNoise;
+        add(std::move(def));
+    }
+
+    // ---- Math ------------------------------------------------------------
+    {
+        NodeDef def;
+        def.kind = "math.constant";
+        def.category = "Math";
+        def.label = "Constant";
+        def.description = "A fixed scalar value, handy for trims, thresholds and scaling.";
+        def.outputs = {PortDesc{"Value", PortType::Scalar}};
+        def.params = {makeParam("value", "Value", 1.0f, -1000.0f, 1000.0f, 0.0f, "Value")};
+        def.evaluate = evalConstant;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.arithmetic";
+        def.category = "Math";
+        def.label = "Arithmetic";
+        def.description =
+            "Add, subtract, multiply, divide, min, max or modulo. Input B falls back to the "
+            "constant when unconnected.";
+        def.inputs = {PortDesc{"A", PortType::Scalar}, PortDesc{"B", PortType::Scalar}};
+        def.outputs = {PortDesc{"Result", PortType::Scalar}};
+        def.params = {
+            makeEnumParam("op", "Operation",
+                          {"Add", "Subtract", "Multiply", "Divide", "Min", "Max", "Modulo"}, 0,
+                          "Operation"),
+            makeParam("bValue", "B (constant)", 0.0f, -64.0f, 64.0f, 0.0f, "Operation"),
+            makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("clampMin", "Clamp min", -64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
+            makeParam("clampMax", "Clamp max", 64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
+        };
+        def.evaluate = evalArithmetic;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.power";
+        def.category = "Math";
+        def.label = "Power";
+        def.description =
+            "Base raised to an exponent. Negative bases keep their sign so the result stays "
+            "usable as a signal - it never turns into NaN.";
+        def.inputs = {PortDesc{"Base", PortType::Scalar}, PortDesc{"Exponent", PortType::Scalar}};
+        def.outputs = {PortDesc{"Result", PortType::Scalar}};
+        def.params = {
+            makeParam("exponent", "Exponent (constant)", 2.0f, -16.0f, 16.0f, 0.0f, "Power"),
+            makeBoolParam("signed", "Keep base sign", true, "Power"),
+            makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("clampMin", "Clamp min", -64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
+            makeParam("clampMax", "Clamp max", 64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
+        };
+        def.evaluate = evalPower;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.exp";
+        def.category = "Math";
+        def.label = "Exponential";
+        def.description = "e^x, 2^x or 10^x with input scaling and output gain/offset.";
+        def.inputs = {PortDesc{"X", PortType::Scalar}};
+        def.outputs = {PortDesc{"Result", PortType::Scalar}};
+        def.params = {
+            makeEnumParam("base", "Base", {"e", "2", "10"}, 0, "Function"),
+            makeParam("inputScale", "Input scale", 1.0f, -16.0f, 16.0f, 0.01f, "Function"),
+            makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("clampMin", "Clamp min", -64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
+            makeParam("clampMax", "Clamp max", 64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
+        };
+        def.evaluate = evalExponential;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.log";
+        def.category = "Math";
+        def.label = "Logarithm";
+        def.description =
+            "Natural, base-2 or base-10 logarithm. Inputs below the floor are clamped so the "
+            "output stays finite.";
+        def.inputs = {PortDesc{"X", PortType::Scalar}};
+        def.outputs = {PortDesc{"Result", PortType::Scalar}};
+        def.params = {
+            makeEnumParam("base", "Base", {"ln", "log2", "log10"}, 0, "Function"),
+            makeParam("floor", "Input floor", 1.0e-4f, 1.0e-9f, 1.0f, 0.0f, "Function"),
+            makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("clampMin", "Clamp min", -64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
+            makeParam("clampMax", "Clamp max", 64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
+        };
+        def.evaluate = evalLogarithm;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.trig";
+        def.category = "Math";
+        def.label = "Trigonometry";
+        def.description = "Sine, cosine and tangent of one input, with frequency, phase and units.";
+        def.inputs = {PortDesc{"X", PortType::Scalar}};
+        def.outputs = {PortDesc{"Sin", PortType::Scalar}, PortDesc{"Cos", PortType::Scalar},
+                       PortDesc{"Tan", PortType::Scalar}};
+        def.params = {
+            makeEnumParam("unit", "Input unit", {"Radians", "Turns", "Degrees"}, 1, "Angle"),
+            makeParam("frequency", "Frequency", 1.0f, -64.0f, 64.0f, 0.0f, "Angle"),
+            makeParam("phase", "Phase", 0.0f, -16.0f, 16.0f, 0.0f, "Angle"),
+            makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
+        };
+        def.evaluate = evalTrig;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.hyperbolic";
+        def.category = "Math";
+        def.label = "Hyperbolic";
+        def.description = "sinh, cosh and tanh of one input. tanh is a soft clipper.";
+        def.inputs = {PortDesc{"X", PortType::Scalar}};
+        def.outputs = {PortDesc{"Sinh", PortType::Scalar}, PortDesc{"Cosh", PortType::Scalar},
+                       PortDesc{"Tanh", PortType::Scalar}};
+        def.params = {
+            makeParam("inputScale", "Input scale", 1.0f, -16.0f, 16.0f, 0.0f, "Function"),
+            makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
+        };
+        def.evaluate = evalHyperbolic;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.inverse_trig";
+        def.category = "Math";
+        def.label = "Inverse Trig";
+        def.description =
+            "arcsin, arccos and arctan. The arcsin/arccos input is clamped to -1..1 and the "
+            "result can be returned in radians, turns or degrees.";
+        def.inputs = {PortDesc{"X", PortType::Scalar}};
+        def.outputs = {PortDesc{"Asin", PortType::Scalar}, PortDesc{"Acos", PortType::Scalar},
+                       PortDesc{"Atan", PortType::Scalar}};
+        def.params = {
+            makeEnumParam("unit", "Output unit", {"Radians", "Turns", "Degrees"}, 0, "Angle"),
+            makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
+            makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
+        };
+        def.evaluate = evalInverseTrig;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.vec2";
+        def.category = "Math";
+        def.label = "Vector2";
+        def.description =
+            "Builds a Vector2 from two scalars and also exposes the components as scalars.";
+        def.inputs = {PortDesc{"X", PortType::Scalar}, PortDesc{"Y", PortType::Scalar}};
+        def.outputs = {PortDesc{"Vector2", PortType::Vec2}, PortDesc{"X", PortType::Scalar},
+                       PortDesc{"Y", PortType::Scalar}};
+        def.params = {
+            makeParam("x", "Default X", 0.0f, -16.0f, 16.0f, 0.0f, "Defaults"),
+            makeParam("y", "Default Y", 0.0f, -16.0f, 16.0f, 0.0f, "Defaults"),
+        };
+        def.evaluate = evalVector2;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.vec3";
+        def.category = "Math";
+        def.label = "Vector3";
+        def.description = "Builds a Vector3, for example an RGB or XYZ triple.";
+        def.inputs = {PortDesc{"X", PortType::Scalar}, PortDesc{"Y", PortType::Scalar},
+                      PortDesc{"Z", PortType::Scalar}};
+        def.outputs = {PortDesc{"Vector3", PortType::Vec3}, PortDesc{"X", PortType::Scalar},
+                       PortDesc{"Y", PortType::Scalar}, PortDesc{"Z", PortType::Scalar}};
+        def.params = {
+            makeParam("x", "Default X", 0.0f, -16.0f, 16.0f, 0.0f, "Defaults"),
+            makeParam("y", "Default Y", 0.0f, -16.0f, 16.0f, 0.0f, "Defaults"),
+            makeParam("z", "Default Z", 0.0f, -16.0f, 16.0f, 0.0f, "Defaults"),
+        };
+        def.evaluate = evalVector3;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.vec4";
+        def.category = "Math";
+        def.label = "Vector4";
+        def.description = "Builds a Vector4, for example an RGBA colour or a matrix row.";
+        def.inputs = {PortDesc{"X", PortType::Scalar}, PortDesc{"Y", PortType::Scalar},
+                      PortDesc{"Z", PortType::Scalar}, PortDesc{"W", PortType::Scalar}};
+        def.outputs = {PortDesc{"Vector4", PortType::Vec4}, PortDesc{"X", PortType::Scalar},
+                       PortDesc{"Y", PortType::Scalar}, PortDesc{"Z", PortType::Scalar},
+                       PortDesc{"W", PortType::Scalar}};
+        def.params = {
+            makeParam("x", "Default X", 0.0f, -16.0f, 16.0f, 0.0f, "Defaults"),
+            makeParam("y", "Default Y", 0.0f, -16.0f, 16.0f, 0.0f, "Defaults"),
+            makeParam("z", "Default Z", 0.0f, -16.0f, 16.0f, 0.0f, "Defaults"),
+            makeParam("w", "Default W", 0.0f, -16.0f, 16.0f, 0.0f, "Defaults"),
+        };
+        def.evaluate = evalVector4;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.matrix";
+        def.category = "Math";
+        def.label = "Matrix";
+        def.description =
+            "Builds a 2x2, 3x3 or 4x4 matrix from up to four Vector4 rows. Unconnected rows "
+            "fall back to the identity row they show.";
+        def.inputs = {PortDesc{"Row 0", PortType::Vec4}, PortDesc{"Row 1", PortType::Vec4},
+                      PortDesc{"Row 2", PortType::Vec4}, PortDesc{"Row 3", PortType::Vec4}};
+        def.outputs = {PortDesc{"Matrix", PortType::Matrix}};
+        def.params = {
+            makeEnumParam("size", "Size", {"2x2", "3x3", "4x4"}, 1, "Size"),
+            makeMatrixParam("matrix", "Matrix", 4),
+        };
+        def.evaluate = evalMatrix;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.determinant";
+        def.category = "Math";
+        def.label = "Determinant";
+        def.description =
+            "Determinant and trace of the top-left 2x2, 3x3 or 4x4 block of a matrix.";
+        def.inputs = {PortDesc{"Matrix", PortType::Matrix}};
+        def.outputs = {PortDesc{"Determinant", PortType::Scalar},
+                       PortDesc{"Trace", PortType::Scalar}};
+        def.params = {makeEnumParam("size", "Size", {"2x2", "3x3", "4x4"}, 1, "Size")};
+        def.evaluate = evalDeterminant;
+        add(std::move(def));
+    }
+
+    // ---- Modulation ------------------------------------------------------
+    {
+        NodeDef def;
+        def.kind = "mod.lfo";
+        def.category = "Modulation";
+        def.label = "LFO";
+        def.description = "Low frequency oscillator, optionally locked to a musical division.";
+        def.inputs = {PortDesc{"Phase", PortType::Scalar, "optional phase offset"}};
+        def.outputs = {PortDesc{"Value", PortType::Scalar}};
+        def.params = {
+            makeEnumParam("shape", "Shape",
+                          {"Sine", "Triangle", "Saw up", "Saw down", "Square", "Random"}, 0,
+                          "Shape"),
+            makeParam("frequency", "Frequency (Hz)", 0.5f, 0.0f, 40.0f, 0.001f, "Shape"),
+            makeParam("phase", "Phase", 0.0f, -1.0f, 1.0f, 0.001f, "Shape"),
+            makeParam("amplitude", "Amplitude", 1.0f, -4.0f, 4.0f, 0.01f, "Output"),
+            makeParam("offset", "Offset", 0.0f, -4.0f, 4.0f, 0.01f, "Output"),
+            makeBoolParam("sync", "Sync to tempo", false, "Tempo"),
+            makeParam("bpm", "Tempo (BPM)", 120.0f, 20.0f, 300.0f, 1.0f, "Tempo"),
+            makeEnumParam("division", "Division", {"1/1", "1/2", "1/4", "1/8", "1/16"}, 1, "Tempo"),
+        };
+        def.evaluate = evalLfo;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "mod.automation";
+        def.category = "Modulation";
+        def.label = "Automation";
+        def.description =
+            "Keyframed curve over the project timeline, edited here in the block. Unipolar maps "
+            "the curve to 0..1, bipolar to -1..1.";
+        def.outputs = {PortDesc{"Value", PortType::Scalar}};
+        Param curve = makeCurveParam("curve", "Curve");
+        def.params = {
+            curve,
+            makeBoolParam("bipolar", "Bipolar (-1..1)", false, "Range"),
+            makeParam("depth", "Depth", 1.0f, 0.0f, 4.0f, 0.01f, "Range"),
+            makeParam("offset", "Offset", 0.0f, -4.0f, 4.0f, 0.01f, "Range"),
+            makeBoolParam("loop", "Loop", false, "Output"),
+            makeParam("loopLength", "Loop length (x timeline)", 1.0f, 0.05f, 1.0f, 0.01f, "Output"),
+            makeBoolParam("smooth", "Smooth", false, "Output"),
+            makeParam("smoothing", "Smoothing", 0.2f, 0.001f, 1.0f, 0.001f, "Output"),
+        };
+        def.evaluate = evalAutomation;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "mod.amount";
+        def.category = "Modulation";
+        def.label = "Amount / VCA";
+        def.description = "Scales a signal by a constant or by a second modulation input.";
+        def.inputs = {PortDesc{"In", PortType::Scalar}, PortDesc{"Amount", PortType::Scalar}};
+        def.outputs = {PortDesc{"Out", PortType::Scalar}};
+        def.params = {
+            makeParam("amount", "Amount", 1.0f, 0.0f, 4.0f, 0.001f, "Amount"),
+            makeParam("gain", "Gain", 1.0f, -8.0f, 8.0f, 0.01f, "Amount"),
+            makeParam("offset", "Offset", 0.0f, -8.0f, 8.0f, 0.01f, "Amount"),
+            makeParam("curve", "Curve", 1.0f, 0.05f, 4.0f, 0.01f, "Shape"),
+            makeIntParam("quantize", "Quantise steps (0 = off)", 0, 0, 64, "Shape"),
+        };
+        def.evaluate = evalAmount;
+        add(std::move(def));
+    }
+
+    // ---- Render ----------------------------------------------------------
+    {
+        NodeDef def;
+        def.kind = "shader.pass";
+        def.category = "Render";
+        def.label = "Shader Pass";
+        def.description =
+            "Fragment shader pass. Point it at a .glsl file (the PulseForge preamble is "
+            "prepended automatically) or pick a built-in effect. Scalar inputs arrive as "
+            "uUser[0..7]; the upstream image arrives as uPrev.";
+        def.inputs = {PortDesc{"Prev", PortType::Image, "upstream image"}};
+        shaderScalarPorts(def.inputs);
+        def.inputs.push_back(PortDesc{"Vector2", PortType::Vec2, "uVector2"});
+        def.inputs.push_back(PortDesc{"Vector3", PortType::Vec3, "uVector3"});
+        def.inputs.push_back(PortDesc{"Vector4", PortType::Vec4, "uVector4"});
+        def.inputs.push_back(PortDesc{"Matrix", PortType::Matrix, "uMatrix"});
+        def.outputs = {PortDesc{"Image", PortType::Image}};
+        std::vector<std::string> builtinOptions = ShaderLibrary::builtinNames();
+        std::vector<Param> params;
+        params.push_back(makeFileParam("shader", "Shader file", "", ".glsl", "Shader"));
+        params.push_back(makeEnumParam("preset", "Built-in effect", builtinOptions, 0, "Shader"));
+        params.push_back(colorParam("colorA", "Colour A", 0x3A6BFF, "Look"));
+        params.push_back(colorParam("colorB", "Colour B", 0xFF4FA3, "Look"));
+        params.push_back(makeParam("scale", "Resolution scale", 1.0f, 0.15f, 2.0f, 0.05f, "Look"));
+        params.push_back(makeBoolParam("useFeedback", "Feedback", false, "Look"));
+        params.push_back(makeParam("feedback", "Feedback amount", 0.6f, 0.0f, 0.98f, 0.01f, "Look"));
+        def.params = std::move(params);
+        def.evaluate = evalShaderPass;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "fx.blend";
+        def.category = "Render";
+        def.label = "Blend";
+        def.description = "Composites two images with the selected blend mode.";
+        def.inputs = {PortDesc{"A", PortType::Image}, PortDesc{"B", PortType::Image}};
+        def.outputs = {PortDesc{"Image", PortType::Image}};
+        def.params = {
+            makeEnumParam("mode", "Mode",
+                          {"Cross fade", "Add", "Screen", "Multiply", "Difference", "Overlay",
+                           "Min", "Max"},
+                          1, "Blend"),
+            makeParam("opacity", "Opacity", 1.0f, 0.0f, 1.0f, 0.01f, "Blend"),
+        };
+        def.evaluate = evalBlend;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "fx.postfx";
+        def.category = "Render";
+        def.label = "Post FX";
+        def.description =
+            "Bloom, chromatic aberration, vignette, grain, scanlines, feedback and grade. "
+            "Scalar inputs override the matching parameter, so modulation blocks can drive it.";
+        def.inputs = {PortDesc{"Image", PortType::Image},
+                      PortDesc{"Bloom", PortType::Scalar},
+                      PortDesc{"Chromatic", PortType::Scalar},
+                      PortDesc{"Vignette", PortType::Scalar},
+                      PortDesc{"Grain", PortType::Scalar},
+                      PortDesc{"Scanlines", PortType::Scalar},
+                      PortDesc{"Feedback", PortType::Scalar},
+                      PortDesc{"Saturation", PortType::Scalar},
+                      PortDesc{"Hue", PortType::Scalar}};
+        def.outputs = {PortDesc{"Image", PortType::Image}};
+        def.params = {
+            makeParam("bloom", "Bloom", 0.35f, 0.0f, 1.0f, 0.01f, "Glow"),
+            makeParam("chromatic", "Chromatic", 0.15f, 0.0f, 1.0f, 0.01f, "Glow"),
+            makeParam("feedback", "Feedback", 0.0f, 0.0f, 0.98f, 0.01f, "Glow"),
+            makeParam("vignette", "Vignette", 0.35f, 0.0f, 1.0f, 0.01f, "Grade"),
+            makeParam("saturation", "Saturation", 1.05f, 0.0f, 2.0f, 0.01f, "Grade"),
+            makeParam("hue", "Hue shift", 0.0f, -1.0f, 1.0f, 0.01f, "Grade"),
+            makeParam("grain", "Grain", 0.08f, 0.0f, 1.0f, 0.01f, "Texture"),
+            makeParam("scanlines", "Scanlines", 0.0f, 0.0f, 1.0f, 0.01f, "Texture"),
+        };
+        def.evaluate = evalPostFx;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "geom.primitives";
+        def.category = "Render";
+        def.label = "Geometry";
+        def.description =
+            "Draws geometric elements on top of an optional image layer. Scale, rotation "
+            "and position can be driven by scalar inputs.";
+        def.inputs = {PortDesc{"Layer", PortType::Image, "optional background"},
+                      PortDesc{"Scale", PortType::Scalar},
+                      PortDesc{"Rotation", PortType::Scalar},
+                      PortDesc{"X", PortType::Scalar},
+                      PortDesc{"Y", PortType::Scalar},
+                      PortDesc{"Position", PortType::Vec2, "overrides X/Y"}};
+        def.outputs = {PortDesc{"Image", PortType::Image}};
+        def.params = {
+            makeEnumParam("shape", "Shape", geometry::shapeNames(), 0, "Shape"),
+            makeIntParam("count", "Count", 64, 2, 512, "Shape"),
+            makeParam("radius", "Radius", 0.28f, 0.01f, 1.5f, 0.005f, "Shape"),
+            makeParam("thickness", "Thickness", 4.0f, 0.5f, 40.0f, 0.5f, "Shape"),
+            makeParam("x", "Position X", 0.5f, -1.0f, 2.0f, 0.005f, "Transform"),
+            makeParam("y", "Position Y", 0.5f, -1.0f, 2.0f, 0.005f, "Transform"),
+            makeParam("rotation", "Rotation (turns)", 0.0f, -2.0f, 2.0f, 0.005f, "Transform"),
+            makeParam("spin", "Spin (turns/s)", 0.0f, -4.0f, 4.0f, 0.005f, "Transform"),
+            makeParam("scaleMod", "Scale mod", 0.5f, -4.0f, 4.0f, 0.01f, "Modulation"),
+            makeParam("rotationMod", "Rotation mod", 0.0f, -4.0f, 4.0f, 0.01f, "Modulation"),
+            makeParam("xMod", "X mod", 0.25f, -4.0f, 4.0f, 0.01f, "Modulation"),
+            makeParam("yMod", "Y mod", 0.0f, -4.0f, 4.0f, 0.01f, "Modulation"),
+            makeParam("reactivity", "Reactivity", 0.5f, -4.0f, 4.0f, 0.01f, "Modulation"),
+            makeIntParam("band", "Band", 0, 0, 255, "Modulation"),
+            colorParam("colorA", "Colour A", 0x59B2FF, "Look"),
+            colorParam("colorB", "Colour B", 0xFF7BD1, "Look"),
+            makeParam("alpha", "Opacity", 1.0f, 0.0f, 1.0f, 0.01f, "Look"),
+            makeBoolParam("additive", "Additive blend", true, "Look"),
+            makeTextParam("text", "Text", "PulseForge", "Text"),
+            makeParam("textSize", "Text size", 72.0f, 8.0f, 400.0f, 1.0f, "Text"),
+        };
+        def.evaluate = evalGeometry;
+        add(std::move(def));
+    }
+
+    // ---- Output ----------------------------------------------------------
+    {
+        NodeDef def;
+        def.kind = "out.video";
+        def.category = "Output";
+        def.label = "Video Output";
+        def.description = "Terminal block: whatever is connected here is rendered and exported.";
+        def.inputs = {PortDesc{"Image", PortType::Image}};
+        def.params = {};
+        def.evaluate = evalOutput;
+        def.isSink = true;
+        add(std::move(def));
+    }
+}
+
+}  // namespace pf

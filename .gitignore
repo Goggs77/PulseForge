@@ -1,0 +1,11 @@
+build/
+build_*/
+.smoke/
+*.user
+
+# Diagnostic output
+build/bin/*.png
+build/bin/*.wav
+build/bin/*.mp4
+build/bin/*.webm
+build/bin/*.pforge
