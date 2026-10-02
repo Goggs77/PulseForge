@@ -133,7 +133,7 @@ const float *AnalysisData::spectrumRow(double time) const {
 // ---------------------------------------------------------------------------
 
 Param makeParam(const std::string &key, const std::string &label, float value, float minValue,
-                float maxValue, float step, const std::string &group) {
+                float maxValue, float step, const std::string &group, bool logarithmic) {
     Param p;
     p.key = key;
     p.label = label;
@@ -143,6 +143,7 @@ Param makeParam(const std::string &key, const std::string &label, float value, f
     p.maxValue = maxValue;
     p.step = step;
     p.group = group;
+    p.logarithmic = logarithmic;
     return p;
 }
 

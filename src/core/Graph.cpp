@@ -88,16 +88,16 @@ bool Graph::canConnect(int fromNode, int fromPort, int toNode, int toPort, std::
         if (why) *why = "block definition missing";
         return false;
     }
-    if (fromPort < 0 || fromPort >= static_cast<int>(source->def->outputs.size())) {
+    if (fromPort < 0 || fromPort >= static_cast<int>(source->outputPorts().size())) {
         if (why) *why = "bad source port";
         return false;
     }
-    if (toPort < 0 || toPort >= static_cast<int>(target->def->inputs.size())) {
+    if (toPort < 0 || toPort >= static_cast<int>(target->inputPorts().size())) {
         if (why) *why = "bad target port";
         return false;
     }
-    const PortType from = source->def->outputs[static_cast<size_t>(fromPort)].type;
-    const PortType to = target->def->inputs[static_cast<size_t>(toPort)].type;
+    const PortType from = source->outputPorts()[static_cast<size_t>(fromPort)].type;
+    const PortType to = target->inputPorts()[static_cast<size_t>(toPort)].type;
     if (!portTypeCompatible(from, to)) {
         if (why) {
             *why = std::string("cannot connect ") + portTypeName(from) + " to " + portTypeName(to);
@@ -203,9 +203,10 @@ bool Graph::evaluate(EvalContext &ctx) {
         if (!node || !node->def) continue;
         if (!node->enabled) continue;
 
-        const NodeDef &def = *node->def;
-        std::vector<Value> inputs(def.inputs.size());
-        for (size_t port = 0; port < def.inputs.size(); ++port) {
+        const std::vector<PortDesc> &inputPorts = node->inputPorts();
+        const std::vector<PortDesc> &outputPorts = node->outputPorts();
+        std::vector<Value> inputs(inputPorts.size());
+        for (size_t port = 0; port < inputPorts.size(); ++port) {
             const Link *link = findInputLink(id, static_cast<int>(port));
             if (!link) continue;
             const Node *source = find(link->fromNode);
@@ -214,11 +215,12 @@ bool Graph::evaluate(EvalContext &ctx) {
                 // Widening (Vector2 -> Vector3/4) happens here so the type system
                 // stays simple everywhere else.
                 inputs[port] = convertValue(source->outputs[static_cast<size_t>(link->fromPort)],
-                                            def.inputs[port].type);
+                                            inputPorts[port].type);
             }
         }
 
-        node->outputs.assign(def.outputs.size(), Value{});
+        node->outputs.assign(outputPorts.size(), Value{});
+        const NodeDef &def = *node->def;
         if (!def.evaluate) continue;
 
         const double start = GetTime();

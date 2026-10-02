@@ -414,6 +414,96 @@ std::vector<std::string> ShaderLibrary::builtinNames() {
     return names;
 }
 
+std::vector<std::string> ShaderLibrary::effectNames() {
+    std::vector<std::string> names;
+    for (const auto &entry : kBuiltins) {
+        // The last entries are the composite helpers other blocks call directly.
+        if (std::strcmp(entry.name, "blend") == 0 || std::strcmp(entry.name, "postfx") == 0) {
+            continue;
+        }
+        names.emplace_back(entry.name);
+    }
+    return names;
+}
+
+std::vector<ShaderInput> ShaderLibrary::scanInputs(const std::string &source) {
+    std::vector<ShaderInput> inputs;
+    auto uses = [&](const char *token) { return source.find(token) != std::string::npos; };
+
+    // Scalar slots keep their uUser[i] numbering so links survive a shader swap.
+    std::vector<int> userSlots;
+    size_t pos = 0;
+    while ((pos = source.find("uUser[", pos)) != std::string::npos) {
+        size_t cursor = pos + 6;
+        int index = 0;
+        bool digits = false;
+        while (cursor < source.size() && source[cursor] >= '0' && source[cursor] <= '9') {
+            index = index * 10 + (source[cursor] - '0');
+            digits = true;
+            ++cursor;
+        }
+        if (digits && cursor < source.size() && source[cursor] == ']' && index >= 0 && index < 8) {
+            if (std::find(userSlots.begin(), userSlots.end(), index) == userSlots.end()) {
+                userSlots.push_back(index);
+            }
+        }
+        pos += 6;
+    }
+    std::sort(userSlots.begin(), userSlots.end());
+
+    inputs.push_back(ShaderInput{"uPrev", "uPrev", PortType::Image});
+    if (uses("uInput2")) inputs.push_back(ShaderInput{"uInput2", "uInput2", PortType::Image});
+    for (int index : userSlots) {
+        const std::string label = "uUser[" + std::to_string(index) + "]";
+        inputs.push_back(ShaderInput{label, label, PortType::Scalar});
+    }
+    if (uses("uColorA")) inputs.push_back(ShaderInput{"uColorA", "uColorA", PortType::Color});
+    if (uses("uColorB")) inputs.push_back(ShaderInput{"uColorB", "uColorB", PortType::Color});
+    if (uses("uVector2")) inputs.push_back(ShaderInput{"uVector2", "uVector2", PortType::Vec2});
+    if (uses("uVector3")) inputs.push_back(ShaderInput{"uVector3", "uVector3", PortType::Vec3});
+    if (uses("uVector4")) inputs.push_back(ShaderInput{"uVector4", "uVector4", PortType::Vec4});
+    if (uses("uMatrix")) inputs.push_back(ShaderInput{"uMatrix", "uMatrix", PortType::Matrix});
+    return inputs;
+}
+
+bool ShaderLibrary::readSource(const std::string &reference, std::string *source,
+                               std::string *error) const {
+    if (source) source->clear();
+    if (reference.empty()) {
+        if (error) *error = "no shader selected";
+        return false;
+    }
+    if (isBuiltinReference(reference)) {
+        const std::string name = builtinNameFromReference(reference);
+        for (const auto &entry : kBuiltins) {
+            if (name == entry.name) {
+                if (source) *source = entry.body;
+                return true;
+            }
+        }
+        if (error) *error = "unknown built-in shader: " + name;
+        return false;
+    }
+    const std::string path = resolve(reference);
+    std::ifstream file(path.c_str(), std::ios::binary);
+    if (!file.good()) {
+        if (error) *error = "cannot open shader: " + path;
+        return false;
+    }
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    if (source) *source = buffer.str();
+    return true;
+}
+
+bool ShaderLibrary::describeInputs(const std::string &reference, std::vector<ShaderInput> *inputs,
+                                   std::string *error) const {
+    std::string source;
+    if (!readSource(reference, &source, error)) return false;
+    if (inputs) *inputs = scanInputs(source);
+    return true;
+}
+
 long long ShaderLibrary::fileMtime(const std::string &path) {
     struct stat info;
     if (stat(path.c_str(), &info) != 0) return 0;

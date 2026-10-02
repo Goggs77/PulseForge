@@ -203,6 +203,10 @@ struct Param {
     float minValue = 0.0f;
     float maxValue = 1.0f;
     float step = 0.0f;       // 0 = continuous
+    // Frequency-style parameters: the slider tracks logarithmically and the
+    // value readout is a rounded integer, which matches how the analysis
+    // itself maps Hz.
+    bool logarithmic = false;
 
     bool boolean = false;
     Color color = WHITE;
@@ -224,7 +228,8 @@ struct Param {
 };
 
 Param makeParam(const std::string &key, const std::string &label, float value, float minValue,
-                float maxValue, float step = 0.0f, const std::string &group = std::string());
+                float maxValue, float step = 0.0f, const std::string &group = std::string(),
+                bool logarithmic = false);
 Param makeIntParam(const std::string &key, const std::string &label, int value, int minValue,
                    int maxValue, const std::string &group = std::string());
 Param makeBoolParam(const std::string &key, const std::string &label, bool value,

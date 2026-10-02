@@ -9,6 +9,7 @@
 #include "render/Geometry.h"
 #include "render/Palette.h"
 #include "render/Renderer.h"
+#include "render/ShaderLibrary.h"
 
 namespace pf {
 
@@ -588,53 +589,51 @@ void evalAmount(Node &node, EvalContext &ctx, const std::vector<Value> &in, std:
 // Render
 // ---------------------------------------------------------------------------
 
-void evalShaderPass(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+// Spectrum: Analysis in, Image out. The built-in effects read the analysis
+// textures the renderer fills in every frame, so this block only needs to know
+// that an analysis is connected; its parameters can be driven by the Scale,
+// Feedback and Colour inputs.
+void evalSpectrum(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                  std::vector<Value> &out) {
     if (!ctx.renderer || !ctx.shaders) return;
-    const float scale = std::clamp(node.pfloat("scale", 1.0f), 0.15f, 2.0f);
-    const int width = std::max(2, static_cast<int>(ctx.width * scale));
-    const int height = std::max(2, static_cast<int>(ctx.height * scale));
-
-    const std::string file = node.pstr("shader");
-    Shader *shader = nullptr;
-    std::string error;
-    if (!file.empty()) shader = ctx.shaders->get(file, &error);
-    if (!shader) {
-        const int preset = node.pint("preset", 0);
-        const std::vector<std::string> builtins = ShaderLibrary::builtinNames();
-        const int index = std::clamp(preset, 0, static_cast<int>(builtins.size()) - 1);
-        shader = ctx.shaders->builtin(builtins[static_cast<size_t>(index)]);
+    const bool connected = !in.empty() && in[0].type == PortType::Analysis;
+    if (!connected) {
+        node.status = "connect an Analysis input";
+        return;
     }
+    if (!in[0].analysis) {
+        node.status = "no audio loaded";
+        return;
+    }
+    const std::vector<std::string> presets = ShaderLibrary::effectNames();
+    const int index = std::clamp(node.pint("preset", 0), 0,
+                                 std::max(0, static_cast<int>(presets.size()) - 1));
+    Shader *shader = ctx.shaders->builtin(presets[static_cast<size_t>(index)]);
     if (!shader) {
         node.status = ctx.shaders->lastError();
-        out[0] = in[0];  // pass the input through when the shader fails
         return;
     }
     node.status.clear();
 
+    // Modulation inputs scale the parameters they are named after.
+    const bool scaleConnected = in.size() > 1 && in[1].type == PortType::Scalar;
+    const bool feedbackConnected = in.size() > 2 && in[2].type == PortType::Scalar;
+    float scale = node.pfloat("scale", 1.0f);
+    if (scaleConnected) scale *= std::max(0.0f, 1.0f + in[1].scalar);
+    scale = std::clamp(scale, 0.15f, 4.0f);
+    float feedbackAmount = node.pfloat("feedback", 0.6f);
+    if (feedbackConnected) feedbackAmount += in[2].scalar * 0.5f;
+    feedbackAmount = std::clamp(feedbackAmount, 0.0f, 0.98f);
+    Color colorA = node.pcolor("colorA");
+    Color colorB = node.pcolor("colorB");
+    if (in.size() > 3 && in[3].type == PortType::Color) colorA = in[3].color;
+    if (in.size() > 4 && in[4].type == PortType::Color) colorB = in[4].color;
+
+    const int width = std::max(2, static_cast<int>(ctx.width * scale));
+    const int height = std::max(2, static_cast<int>(ctx.height * scale));
+
     float user[8] = {0};
-    for (int i = 0; i < 8; ++i) user[i] = scalarFrom(in, static_cast<size_t>(i) + 1);
-
-    ShaderVectorUniforms vectors;
-    if (in.size() > 9 && in[9].type == PortType::Vec2) {
-        vectors.vec2 = in[9].vec2;
-        vectors.useVec2 = true;
-    }
-    if (in.size() > 10 && in[10].type == PortType::Vec3) {
-        vectors.vec3 = in[10].vec3;
-        vectors.useVec3 = true;
-    }
-    if (in.size() > 11 && in[11].type == PortType::Vec4) {
-        vectors.vec4 = in[11].vec4;
-        vectors.useVec4 = true;
-    }
-    if (in.size() > 12 && in[12].type == PortType::Matrix) {
-        vectors.matrix = in[12].matrix;
-        vectors.useMatrix = true;
-    }
-
-    Texture2D prev = textureFrom(in, 0);
     Texture2D feedback{};
-    const float feedbackAmount = node.pbool("useFeedback", false) ? node.pfloat("feedback", 0.6f) : 0.0f;
     ImageBufferPtr feedbackTarget;
     if (node.pbool("useFeedback", false)) {
         feedbackTarget = ctx.renderer->persistent(node.id, width, height);
@@ -650,10 +649,103 @@ void evalShaderPass(Node &node, EvalContext &ctx, const std::vector<Value> &in, 
         return;
     }
     ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
-    ctx.renderer->drawShaderPass(shader, ctx, prev, Texture2D{}, feedback, user, 8,
-                                 node.pcolor("colorA"), node.pcolor("colorB"), vectors);
+    ctx.renderer->drawShaderPass(shader, ctx, Texture2D{}, Texture2D{}, feedback, user, 8, colorA,
+                                 colorB, ShaderVectorUniforms{});
     ctx.renderer->endTarget();
 
+    if (feedbackTarget) {
+        ctx.renderer->beginTarget(feedbackTarget, false, BLANK);
+        ctx.renderer->blit(target);
+        ctx.renderer->endTarget();
+    }
+    out[0] = Value::makeImage(target);
+}
+
+// Shader: applies a .glsl file to the incoming image. The node's ports are
+// derived from that file, so the uniforms are bound by port name.
+void evalShader(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                std::vector<Value> &out) {
+    if (!ctx.renderer || !ctx.shaders) return;
+    const std::string file = node.pstr("shader");
+    auto passThrough = [&]() {
+        if (!in.empty() && in[0].image) out[0] = in[0];
+    };
+    if (file.empty()) {
+        node.status = "no .glsl file selected";
+        passThrough();
+        return;
+    }
+    std::string error;
+    Shader *shader = ctx.shaders->get(file, &error);
+    if (!shader) {
+        // Never fall back silently to a preset: the block says what went wrong.
+        node.status = error.empty() ? ctx.shaders->lastError() : error;
+        passThrough();
+        return;
+    }
+    node.status.clear();
+
+    const std::vector<PortDesc> &ports = node.inputPorts();
+    float user[8] = {0};
+    ShaderVectorUniforms vectors;
+    Color colorA = node.pcolor("colorA");
+    Color colorB = node.pcolor("colorB");
+    Texture2D prev{};
+    Texture2D input2{};
+    for (size_t port = 0; port < ports.size() && port < in.size(); ++port) {
+        const std::string &name = ports[port].name;
+        if (port == 0 && in[port].image) {
+            prev = in[port].image->texture.texture;
+            continue;
+        }
+        if (name == "uInput2" && in[port].image) {
+            input2 = in[port].image->texture.texture;
+        } else if (name.rfind("uUser[", 0) == 0 && in[port].type == PortType::Scalar) {
+            const int slot = std::atoi(name.c_str() + 6);
+            if (slot >= 0 && slot < 8) user[slot] = in[port].scalar;
+        } else if (name == "uColorA" && in[port].type == PortType::Color) {
+            colorA = in[port].color;
+        } else if (name == "uColorB" && in[port].type == PortType::Color) {
+            colorB = in[port].color;
+        } else if (name == "uVector2" && in[port].type == PortType::Vec2) {
+            vectors.vec2 = in[port].vec2;
+            vectors.useVec2 = true;
+        } else if (name == "uVector3" && in[port].type == PortType::Vec3) {
+            vectors.vec3 = in[port].vec3;
+            vectors.useVec3 = true;
+        } else if (name == "uVector4" && in[port].type == PortType::Vec4) {
+            vectors.vec4 = in[port].vec4;
+            vectors.useVec4 = true;
+        } else if (name == "uMatrix" && in[port].type == PortType::Matrix) {
+            vectors.matrix = in[port].matrix;
+            vectors.useMatrix = true;
+        }
+    }
+
+    float scale = std::clamp(node.pfloat("scale", 1.0f), 0.15f, 4.0f);
+    const int width = std::max(2, static_cast<int>(ctx.width * scale));
+    const int height = std::max(2, static_cast<int>(ctx.height * scale));
+    const float feedbackAmount =
+        node.pbool("useFeedback", false) ? std::clamp(node.pfloat("feedback", 0.6f), 0.0f, 0.98f)
+                                         : 0.0f;
+    (void)feedbackAmount;  // the shader reads uFeedback and decides the mix itself
+    Texture2D feedback{};
+    ImageBufferPtr feedbackTarget;
+    if (node.pbool("useFeedback", false)) {
+        feedbackTarget = ctx.renderer->persistent(node.id, width, height);
+        if (feedbackTarget) feedback = feedbackTarget->texture.texture;
+    }
+
+    ImageBufferPtr target = ctx.renderer->acquire(width, height);
+    if (!target) {
+        node.status = "out of render targets";
+        passThrough();
+        return;
+    }
+    ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+    ctx.renderer->drawShaderPass(shader, ctx, prev, input2, feedback, user, 8, colorA, colorB,
+                                 vectors);
+    ctx.renderer->endTarget();
     if (feedbackTarget) {
         ctx.renderer->beginTarget(feedbackTarget, false, BLANK);
         ctx.renderer->blit(target);
@@ -826,7 +918,39 @@ const NodeDef *Registry::find(const std::string &kind) const {
     for (const auto &def : definitions_) {
         if (def.kind == kind) return &def;
     }
+    const std::string modern = modernKindFor(kind);
+    if (!modern.empty() && modern != kind) return find(modern);
     return nullptr;
+}
+
+std::string Registry::modernKindFor(const std::string &kind) {
+    // "Shader Pass" was split into a built-in Spectrum generator and a Shader
+    // block that applies a .glsl file. Old projects are migrated on load; the
+    // generic alias keeps anything else referencing the old name working.
+    if (kind == "shader.pass") return "render.spectrum";
+    return kind;
+}
+
+bool Registry::applyShaderPorts(Node &node, const ShaderLibrary &shaders, std::string *error) {
+    if (node.kind != "render.shader") return false;
+    const std::string file = node.pstr("shader");
+    if (file.empty()) {
+        node.clearInputPorts();  // the definition default: a single uPrev image
+        return true;
+    }
+    std::vector<ShaderInput> inputs;
+    if (!shaders.describeInputs(file, &inputs, error)) {
+        node.clearInputPorts();
+        return false;
+    }
+    std::vector<PortDesc> ports;
+    ports.reserve(inputs.size());
+    for (const ShaderInput &input : inputs) {
+        ports.push_back(PortDesc{input.name, input.type, input.uniform});
+    }
+    if (ports.empty()) ports.push_back(PortDesc{"uPrev", PortType::Image, "uPrev"});
+    node.setInputPorts(std::move(ports));
+    return true;
 }
 
 std::vector<const NodeDef *> Registry::byCategory(const std::string &category) const {
@@ -930,8 +1054,9 @@ void Registry::registerBuiltins() {
         def.inputs = {PortDesc{"Analysis", PortType::Analysis}};
         def.outputs = {PortDesc{"Value", PortType::Scalar}};
         def.params = {
-            makeParam("lowHz", "Low (Hz)", 40.0f, 20.0f, 16000.0f, 1.0f, "Band"),
-            makeParam("highHz", "High (Hz)", 250.0f, 21.0f, 20000.0f, 1.0f, "Band"),
+            // Logarithmic: the ear and the analysis bands are both log-spaced.
+            makeParam("lowHz", "Low (Hz)", 40.0f, 20.0f, 16000.0f, 1.0f, "Band", true),
+            makeParam("highHz", "High (Hz)", 250.0f, 21.0f, 20000.0f, 1.0f, "Band", true),
             makeEnumParam("mode", "Mode", {"Average", "Peak", "Sum"}, 0, "Band"),
             makeParam("gain", "Gain", 1.0f, 0.0f, 8.0f, 0.01f, "Shape"),
             makeParam("curve", "Curve", 1.0f, 0.05f, 4.0f, 0.01f, "Shape"),
@@ -1306,31 +1431,50 @@ void Registry::registerBuiltins() {
     // ---- Render ----------------------------------------------------------
     {
         NodeDef def;
-        def.kind = "shader.pass";
+        def.kind = "render.spectrum";
         def.category = "Render";
-        def.label = "Shader Pass";
+        def.label = "Spectrum";
         def.description =
-            "Fragment shader pass. Point it at a .glsl file (the PulseForge preamble is "
-            "prepended automatically) or pick a built-in effect. Scalar inputs arrive as "
-            "uUser[0..7]; the upstream image arrives as uPrev.";
-        def.inputs = {PortDesc{"Prev", PortType::Image, "upstream image"}};
-        shaderScalarPorts(def.inputs);
-        def.inputs.push_back(PortDesc{"Vector2", PortType::Vec2, "uVector2"});
-        def.inputs.push_back(PortDesc{"Vector3", PortType::Vec3, "uVector3"});
-        def.inputs.push_back(PortDesc{"Vector4", PortType::Vec4, "uVector4"});
-        def.inputs.push_back(PortDesc{"Matrix", PortType::Matrix, "uMatrix"});
+            "Draws the spectrum, waveform or spectrogram of an Analysis input as an Image "
+            "with one of the built-in effects. The Scale, Feedback and Colour inputs "
+            "modulate the matching parameters, so any modulation block can drive them.";
+        def.inputs = {PortDesc{"Analysis", PortType::Analysis, "spectrum source"},
+                      PortDesc{"Scale", PortType::Scalar, "modulates Resolution scale"},
+                      PortDesc{"Feedback", PortType::Scalar, "modulates Feedback amount"},
+                      PortDesc{"Colour A", PortType::Color, "overrides Colour A"},
+                      PortDesc{"Colour B", PortType::Color, "overrides Colour B"}};
         def.outputs = {PortDesc{"Image", PortType::Image}};
-        std::vector<std::string> builtinOptions = ShaderLibrary::builtinNames();
+        std::vector<std::string> builtinOptions = ShaderLibrary::effectNames();
         std::vector<Param> params;
-        params.push_back(makeFileParam("shader", "Shader file", "", ".glsl", "Shader"));
-        params.push_back(makeEnumParam("preset", "Built-in effect", builtinOptions, 0, "Shader"));
+        params.push_back(makeEnumParam("preset", "Built-in effect", builtinOptions, 0, "Effect"));
         params.push_back(colorParam("colorA", "Colour A", 0x3A6BFF, "Look"));
         params.push_back(colorParam("colorB", "Colour B", 0xFF4FA3, "Look"));
         params.push_back(makeParam("scale", "Resolution scale", 1.0f, 0.15f, 2.0f, 0.05f, "Look"));
         params.push_back(makeBoolParam("useFeedback", "Feedback", false, "Look"));
         params.push_back(makeParam("feedback", "Feedback amount", 0.6f, 0.0f, 0.98f, 0.01f, "Look"));
         def.params = std::move(params);
-        def.evaluate = evalShaderPass;
+        def.evaluate = evalSpectrum;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "render.shader";
+        def.category = "Render";
+        def.label = "Shader";
+        def.description =
+            "Applies a .glsl fragment shader to the incoming Image. The input ports follow "
+            "the uniforms the file actually uses: uPrev, uInput2, uUser[0..7], uColorA/B, "
+            "uVector2/3/4 and uMatrix. The PulseForge preamble is prepended automatically.";
+        def.inputs = {PortDesc{"uPrev", PortType::Image, "upstream image"}};
+        def.outputs = {PortDesc{"Image", PortType::Image}};
+        def.params = {
+            makeFileParam("shader", "Shader file", "", ".glsl", "Shader"),
+            colorParam("colorA", "Colour A", 0x3A6BFF, "Look"),
+            colorParam("colorB", "Colour B", 0xFF4FA3, "Look"),
+            makeParam("scale", "Resolution scale", 1.0f, 0.15f, 2.0f, 0.05f, "Look"),
+            makeBoolParam("useFeedback", "Feedback", false, "Look"),
+        };
+        def.evaluate = evalShader;
         add(std::move(def));
     }
     {

@@ -11,6 +11,7 @@
 #include <string>
 
 #include "core/Project.h"
+#include "core/Registry.h"
 #include "dsp/Analysis.h"
 #include "dsp/AudioClip.h"
 #include "raylib.h"
@@ -81,17 +82,23 @@ int main(int argc, char **argv) {
     Graph &graph = project.graph;
 
     if (stage == 10) {
-        // solid red shader: proves the shader pass renders at all
+        // solid red spectrum: proves an Image generator renders at all
         graph.clear();
-        Node *pass = graph.addNode("shader.pass", 400, 200);
+        Node *audioNode = graph.addNode("src.audio", 40, 200);
+        Node *analyzer = graph.addNode("dsp.analyze", 240, 200);
+        Node *pass = graph.addNode("render.spectrum", 480, 200);
         pass->setInt("preset", 1);  // solid
         pass->setColor("colorA", Color{255, 40, 40, 255});
         Node *output = graph.addNode("out.video", 700, 200);
+        graph.connect(audioNode->id, 0, analyzer->id, 0);
+        graph.connect(analyzer->id, 0, pass->id, 0);  // Analysis
         graph.connect(pass->id, 0, output->id, 0);
     } else if (stage == 11) {
         // solid red -> geometry (no layer) -> output
         graph.clear();
-        Node *pass = graph.addNode("shader.pass", 400, 200);
+        Node *audioNode = graph.addNode("src.audio", 40, 200);
+        Node *analyzer = graph.addNode("dsp.analyze", 240, 200);
+        Node *pass = graph.addNode("render.spectrum", 480, 200);
         pass->setInt("preset", 1);
         pass->setColor("colorA", Color{255, 40, 40, 255});
         Node *geometry = graph.addNode("geom.primitives", 650, 200);
@@ -99,21 +106,27 @@ int main(int argc, char **argv) {
         geometry->setColor("colorA", Color{0, 0, 255, 255});
         geometry->setColor("colorB", Color{0, 0, 255, 255});
         Node *output = graph.addNode("out.video", 900, 200);
+        graph.connect(audioNode->id, 0, analyzer->id, 0);
+        graph.connect(analyzer->id, 0, pass->id, 0);
         graph.connect(pass->id, 0, geometry->id, 0);
         graph.connect(geometry->id, 0, output->id, 0);
     } else if (stage == 12) {
         // solid red -> postfx -> output
         graph.clear();
-        Node *pass = graph.addNode("shader.pass", 400, 200);
+        Node *audioNode = graph.addNode("src.audio", 40, 200);
+        Node *analyzer = graph.addNode("dsp.analyze", 240, 200);
+        Node *pass = graph.addNode("render.spectrum", 480, 200);
         pass->setInt("preset", 1);
         pass->setColor("colorA", Color{255, 40, 40, 255});
         Node *post = graph.addNode("fx.postfx", 650, 200);
         Node *output = graph.addNode("out.video", 900, 200);
+        graph.connect(audioNode->id, 0, analyzer->id, 0);
+        graph.connect(analyzer->id, 0, pass->id, 0);
         graph.connect(pass->id, 0, post->id, 0);
         graph.connect(post->id, 0, output->id, 0);
     } else if (stage == 13) {
         for (auto &node : project.graph.nodes) {
-            if (node.kind == "shader.pass") node.setInt("preset", 1);  // solid
+            if (node.kind == "render.spectrum") node.setInt("preset", 1);  // solid
         }
     } else if (stage == 14) {
         for (auto &node : project.graph.nodes) {
@@ -128,7 +141,7 @@ int main(int argc, char **argv) {
         // default project with geometry bypassed entirely: post <- pass
         int passId = 0;
         for (const auto &node : project.graph.nodes) {
-            if (node.kind == "shader.pass") passId = node.id;
+            if (node.kind == "render.spectrum") passId = node.id;
         }
         for (const auto &node : project.graph.nodes) {
             if (node.kind == "fx.postfx") {
@@ -139,13 +152,13 @@ int main(int argc, char **argv) {
     } else if (stage == 6) {
         // default project, but with the shader pass feedback disabled
         for (auto &node : project.graph.nodes) {
-            if (node.kind == "shader.pass") node.setBool("useFeedback", false);
+            if (node.kind == "render.spectrum") node.setBool("useFeedback", false);
         }
     } else if (stage == 7) {
         // default project, but the geometry block is bypassed
         const int passId = [&]() {
             for (const auto &node : project.graph.nodes) {
-                if (node.kind == "shader.pass") return node.id;
+                if (node.kind == "render.spectrum") return node.id;
             }
             return 0;
         }();
@@ -164,19 +177,26 @@ int main(int argc, char **argv) {
     }
 
     if (stage == 20) {
-        // exercises the .glsl file path and the shared preamble
+        // exercises the Shader block: .glsl file, derived ports and the preamble
         graph.clear();
         Node *audioNode = graph.addNode("src.audio", 40, 200);
         Node *analyzer = graph.addNode("dsp.analyze", 240, 200);
-        Node *pass = graph.addNode("shader.pass", 480, 120);
+        Node *pass = graph.addNode("render.shader", 480, 120);
         pass->setText("shader", "assets/shaders/spiral_tunnel.glsl");
         pass->setBool("useFeedback", true);
-        pass->setFloat("feedback", 0.6f);
         pass->setColor("colorA", Color{60, 120, 255, 255});
         pass->setColor("colorB", Color{255, 80, 180, 255});
+        std::string shaderError;
+        Registry::applyShaderPorts(*pass, renderer.shaders(), &shaderError);
         Node *output = graph.addNode("out.video", 760, 160);
         graph.connect(audioNode->id, 0, analyzer->id, 0);
-        graph.connect(analyzer->id, 3, pass->id, 1);
+        // spiral_tunnel glsl reads uUser[0]; the port list was derived from it.
+        for (size_t i = 0; i < pass->inputPorts().size(); ++i) {
+            if (pass->inputPorts()[i].name == "uUser[0]") {
+                graph.connect(analyzer->id, 0, pass->id, static_cast<int>(i));
+                break;
+            }
+        }
         graph.connect(pass->id, 0, output->id, 0);
     }
 
@@ -184,13 +204,12 @@ int main(int argc, char **argv) {
         graph.clear();
         Node *audioNode = graph.addNode("src.audio", 40, 200);
         Node *analyzer = graph.addNode("dsp.analyze", 240, 200);
-        Node *pass = graph.addNode("shader.pass", 480, 120);
+        Node *pass = graph.addNode("render.spectrum", 480, 120);
         pass->setInt("preset", 3);
         pass->setColor("colorA", Color{60, 120, 255, 255});
         pass->setColor("colorB", Color{255, 60, 170, 255});
         graph.connect(audioNode->id, 0, analyzer->id, 0);
-        graph.connect(analyzer->id, 3, pass->id, 1);
-        graph.connect(analyzer->id, 4, pass->id, 2);
+        graph.connect(analyzer->id, 0, pass->id, 0);  // Analysis
         Node *tail = pass;
         if (stage >= 1) {
             Node *geometry = graph.addNode("geom.primitives", 720, 260);
@@ -205,8 +224,8 @@ int main(int argc, char **argv) {
             tail = post;
         }
         if (stage == 4 || stage == 5) {
-            Node *chain = graph.addNode("shader.pass", 960, 300);
-            chain->setInt("preset", 0);  // passthrough builtin
+            // A Shader block without a file passes the image straight through.
+            Node *chain = graph.addNode("render.shader", 960, 300);
             graph.connect(tail->id, 0, chain->id, 0);
             tail = chain;
         }

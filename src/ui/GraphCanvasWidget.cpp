@@ -22,8 +22,8 @@ float portDotRadius() { return ui::s(6.0f); }
 float footerHeight() { return ui::s(18.0f); }
 
 float nodeTotalHeight(const Node &node) {
-    const float rows = std::max(1.0f, std::max(static_cast<float>(node.def->inputs.size()),
-                                                static_cast<float>(node.def->outputs.size())));
+    const float rows = std::max(1.0f, std::max(static_cast<float>(node.inputPorts().size()),
+                                                static_cast<float>(node.outputPorts().size())));
     // Blocks with live content reserve extra body space between the ports and
     // the footer for it.
     return headerHeight() + rows * portRowHeight() + ui::s(nodeVisualHeight(node)) + footerHeight();
@@ -31,16 +31,16 @@ float nodeTotalHeight(const Node &node) {
 
 // Fraction of the block height taken by the port rows.
 float portAreaFraction(const Node &node) {
-    const float rows = std::max(1.0f, std::max(static_cast<float>(node.def->inputs.size()),
-                                                static_cast<float>(node.def->outputs.size())));
+    const float rows = std::max(1.0f, std::max(static_cast<float>(node.inputPorts().size()),
+                                                static_cast<float>(node.outputPorts().size())));
     return (rows * portRowHeight()) / nodeTotalHeight(node);
 }
 
 float visualFraction(const Node &node) { return ui::s(nodeVisualHeight(node)) / nodeTotalHeight(node); }
 
 float portRows(const Node &node) {
-    const size_t inputs = node.def ? node.def->inputs.size() : 0;
-    const size_t outputs = node.def ? node.def->outputs.size() : 0;
+    const size_t inputs = node.def ? node.inputPorts().size() : 0;
+    const size_t outputs = node.def ? node.outputPorts().size() : 0;
     return static_cast<float>(std::max<size_t>(1, std::max(inputs, outputs)));
 }
 
@@ -175,7 +175,9 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
     };
 
     // ---- interaction: pan and zoom ---------------------------------------
-    if (inside && !ui::popupOpen()) {
+    // A dialog or popup owns the input; without this the wheel zoomed the graph
+    // while one was open.
+    if (inside && !ui::inputBlocked()) {
         const float wheel = GetMouseWheelMove();
         if (wheel != 0.0f && !IsKeyDown(KEY_LEFT_CONTROL)) {
             const Vector2 before = screenToWorld(mouse);
@@ -211,7 +213,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
             const Rectangle box{worldToScreen(Vector2{world.x, world.y}).x,
                                 worldToScreen(Vector2{world.x, world.y}).y, world.width * view.zoom,
                                 world.height * view.zoom};
-            for (size_t i = 0; i < node.def->inputs.size(); ++i) {
+            for (size_t i = 0; i < node.inputPorts().size(); ++i) {
                 const Vector2 position = inputPortPosition(box, node, static_cast<int>(i));
                 if (ui::distance(position, mouse) < portRadius(box) + 4.0f) {
                     state.canvas.hoveredPortNode = node.id;
@@ -222,7 +224,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                 }
             }
             if (overPort) break;
-            for (size_t i = 0; i < node.def->outputs.size(); ++i) {
+            for (size_t i = 0; i < node.outputPorts().size(); ++i) {
                 const Vector2 position = outputPortPosition(box, node, static_cast<int>(i));
                 if (ui::distance(position, mouse) < portRadius(box) + 4.0f) {
                     state.canvas.hoveredPortNode = node.id;
@@ -257,7 +259,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                       worldToScreen(Vector2{toBox.x, toBox.y}).y, toBox.width * view.zoom,
                       toBox.height * view.zoom},
             *to, link.toPort);
-        const PortType type = from->def->outputs[static_cast<size_t>(link.fromPort)].type;
+        const PortType type = from->outputPorts()[static_cast<size_t>(link.fromPort)].type;
         Color color = portTypeColor(type);
         const bool highlight = state.canvas.hoveredPortNode == to->id &&
                                state.canvas.hoveredPortIndex == link.toPort;
@@ -297,8 +299,8 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
         }
 
         // inputs
-        for (size_t i = 0; i < node.def->inputs.size(); ++i) {
-            const PortDesc &port = node.def->inputs[i];
+        for (size_t i = 0; i < node.inputPorts().size(); ++i) {
+            const PortDesc &port = node.inputPorts()[i];
             const Vector2 position = inputPortPosition(box, node, static_cast<int>(i));
             const bool connected = graph.findInputLink(node.id, static_cast<int>(i)) != nullptr;
             DrawCircleV(position, portRadius(box),
@@ -313,8 +315,8 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
         }
         // outputs (drawn from the bottom up so the first output is highest)
         const float rows = portRows(node);
-        for (size_t i = 0; i < node.def->outputs.size(); ++i) {
-            const PortDesc &port = node.def->outputs[i];
+        for (size_t i = 0; i < node.outputPorts().size(); ++i) {
+            const PortDesc &port = node.outputPorts()[i];
             const Vector2 position = outputPortPosition(box, node, static_cast<int>(i));
             const bool connected = [&]() {
                 for (const Link &link : graph.links) {
@@ -368,7 +370,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
     }
 
     // ---- drag / connect ---------------------------------------------------
-    if (inside && !ui::popupOpen()) {
+    if (inside && !ui::inputBlocked()) {
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !state.canvas.panning) {
             if (overPort && state.canvas.hoveredPortNode > 0 && !state.canvas.hoveredPortIsInput) {
                 state.canvas.draggingLink = true;
@@ -432,7 +434,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
             const Vector2 origin = worldToScreen(Vector2{box.x, box.y});
             const Rectangle screenBox{origin.x, origin.y, box.width * view.zoom, box.height * view.zoom};
             const Vector2 start = outputPortPosition(screenBox, *from, state.canvas.linkFromPort);
-            const PortType type = from->def->outputs[static_cast<size_t>(state.canvas.linkFromPort)].type;
+            const PortType type = from->outputPorts()[static_cast<size_t>(state.canvas.linkFromPort)].type;
             drawBezier(start, mouse, palette::withAlpha(portTypeColor(type), 0.9f), 2.5f);
         }
     }
@@ -456,7 +458,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
         const Node *node = graph.find(state.canvas.hoveredPortNode);
         if (node) {
             const bool isInput = state.canvas.hoveredPortIsInput;
-            const std::vector<PortDesc> &ports = isInput ? node->def->inputs : node->def->outputs;
+            const std::vector<PortDesc> &ports = isInput ? node->inputPorts() : node->outputPorts();
             const int index = state.canvas.hoveredPortIndex;
             if (index >= 0 && index < static_cast<int>(ports.size())) {
                 char text[160];

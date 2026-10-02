@@ -74,6 +74,22 @@ public:
 
     const NodeDef *def = nullptr;
     std::vector<Param> params;
+    // Blocks whose ports follow their configuration (a Shader block exposes the
+    // uniforms its .glsl file uses) resolve them here; when empty, the ports of
+    // the definition apply.
+    std::vector<PortDesc> dynamicInputs;
+
+    const std::vector<PortDesc> &inputPorts() const {
+        static const std::vector<PortDesc> none;
+        if (!dynamicInputs.empty()) return dynamicInputs;
+        return def ? def->inputs : none;
+    }
+    const std::vector<PortDesc> &outputPorts() const {
+        static const std::vector<PortDesc> none;
+        return def ? def->outputs : none;
+    }
+    void setInputPorts(std::vector<PortDesc> ports) { dynamicInputs = std::move(ports); }
+    void clearInputPorts() { dynamicInputs.clear(); }
 
     // Results of the most recent evaluation (valid for the current frame only).
     std::vector<Value> outputs;
