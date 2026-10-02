@@ -51,6 +51,14 @@ void drawText(Rectangle bounds, const char *text, float size, Color color,
               Align align = Align::Left, bool bold = false);
 void drawTextClipped(Rectangle bounds, const char *text, float size, Color color,
                      Align align = Align::Left, bool bold = false);
+// Word-wrapped paragraphs: the height is measured with the same font atlas the
+// text is drawn with, so callers can reserve exactly the space they need
+// instead of guessing (which used to clip longer text). `lineHeight` <= 0 picks
+// a value from the font size.
+float textWrappedHeight(const char *text, float size, float width, float lineHeight = 0.0f,
+                        bool bold = false);
+float drawTextWrapped(Rectangle bounds, const char *text, float size, Color color,
+                      float lineHeight = 0.0f, bool bold = false);
 
 bool hovered(Rectangle r);
 void panel(Rectangle r, const char *title = nullptr);
@@ -62,7 +70,7 @@ bool toggleButton(Rectangle r, const char *label, bool active, const char *toolt
 bool smallButton(Rectangle r, const char *label, bool active = false);
 
 bool slider(Rectangle r, const char *label, float *value, float lo, float hi, float step = 0.0f,
-            const char *format = "%.2f", int stableId = 0);
+            const char *format = "%.2f", int stableId = 0, bool logarithmic = false);
 bool intSlider(Rectangle r, const char *label, int *value, int lo, int hi, int stableId = 0);
 // Commit-on-enter numeric entry with stepper buttons; used for exact values such
 // as the video resolution, where a slider is the wrong control.

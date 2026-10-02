@@ -229,6 +229,13 @@ public:
     Parser(const std::string &text, std::string *error) : text_(text), error_(error) {}
 
     bool run(Value &out) {
+        // Editors on Windows happily prefix a UTF-8 byte order mark; skip it so
+        // a hand-edited project still loads instead of failing at byte 0.
+        if (text_.size() >= 3 && static_cast<unsigned char>(text_[0]) == 0xEF &&
+            static_cast<unsigned char>(text_[1]) == 0xBB &&
+            static_cast<unsigned char>(text_[2]) == 0xBF) {
+            pos_ = 3;
+        }
         skipWhitespace();
         if (!parseValue(out)) return false;
         skipWhitespace();

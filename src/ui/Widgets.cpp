@@ -1,12 +1,14 @@
 #include "ui/Widgets.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "render/Palette.h"
+#include "core/TextEdit.h"
 
 namespace pf::ui {
 
@@ -28,10 +30,8 @@ struct PopupDrawScope {
     ~PopupDrawScope() { gDrawingPopup = false; }
 };
 
-// Double-click tracking for slider value editing, keyed by widget id.
+// Double-click tracking (slider value editing, word selection), keyed by widget id.
 std::unordered_map<int, double> gLastClickTime;
-int gSliderEditId = -1;
-std::string gSliderEditBuffer;
 
 enum class PopupKind { None, List, Color };
 struct PopupState {
@@ -100,11 +100,6 @@ Texture2D &colorWheelTexture() {
 }
 PopupState gPopup;
 
-int gEditingId = -1;
-std::string gEditBuffer;
-int gIntEditId = -1;
-std::string gIntEditBuffer;
-
 bool pointIn(Rectangle r, Vector2 p) {
     return p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height;
 }
@@ -119,16 +114,251 @@ Color screenTint(Color base, bool isHovered, bool isHeld) {
     return base;
 }
 
-// Shared text-entry state machine; `buffer` holds the in-progress string.
-void editKeys(std::string &buffer, bool &commit, bool &cancel) {
+// ---------------------------------------------------------------------------
+// Single-line text editing
+// ---------------------------------------------------------------------------
+// Every text entry in the app - plain fields, the numeric fields and the
+// slider's inline value editor - shares this one editor, so caret movement,
+// selection, clipboard handling and horizontal scrolling behave like a normal
+// input box everywhere. Indices are byte offsets that always sit on a UTF-8
+// character boundary.
+struct ActiveEdit {
+    pf::TextEditState state;  // caret/selection/buffer, shared with the tests
+    int id = -1;              // widget that owns the edit, -1 when idle
+    float scroll = 0.0f;      // horizontal scroll in pixels
+    bool dragging = false;    // mouse drag selection in progress
+
+    bool active() const { return id >= 0; }
+};
+
+ActiveEdit gEdit;
+// Survives even when the OS clipboard is unavailable.
+std::string gEditClipboard;
+
+// Keyboards do not auto-repeat raylib's IsKeyPressed, so held caret keys would
+// move one step per press. This adds the usual delay-then-repeat behaviour.
+bool keyRepeats(int key) {
+    static int heldKey = 0;
+    static double nextRepeat = 0.0;
+    const double now = GetTime();
+    if (IsKeyPressed(key)) {
+        heldKey = key;
+        nextRepeat = now + 0.42;
+        return true;
+    }
+    if (IsKeyDown(key) && heldKey == key && now >= nextRepeat) {
+        nextRepeat = now + 0.05;
+        return true;
+    }
+    if (!IsKeyDown(key) && heldKey == key) heldKey = 0;
+    return false;
+}
+
+std::string codepointToUtf8(int codepoint) {
+    std::string out;
+    if (codepoint < 0x80) {
+        out.push_back(static_cast<char>(codepoint));
+    } else if (codepoint < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else if (codepoint < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    }
+    return out;
+}
+
+void textEditBegin(int id, const std::string &value, int caretIndex) {
+    gEdit.id = id;
+    gEdit.state.begin(value, caretIndex);
+    gEdit.scroll = 0.0f;
+    gEdit.dragging = false;
+    setKeyboardCaptured(true);
+}
+
+void textEditEnd() {
+    gEdit.id = -1;
+    gEdit.state.clear();
+    gEdit.dragging = false;
+    gEdit.scroll = 0.0f;
+    setKeyboardCaptured(false);
+}
+
+// Runs the keyboard for the active edit. Returns true when the edit finished
+// this frame; *commit tells whether the value should be kept or dropped.
+bool textEditUpdate(bool *commit) {
+    *commit = false;
+    if (!gEdit.active()) return false;
+    pf::TextEditKeys keys;
+    keys.shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    keys.ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    keys.left = keyRepeats(KEY_LEFT);
+    keys.right = keyRepeats(KEY_RIGHT);
+    keys.home = keyRepeats(KEY_HOME);
+    keys.end = keyRepeats(KEY_END);
+    keys.backspace = keyRepeats(KEY_BACKSPACE);
+    keys.eraseForward = keyRepeats(KEY_DELETE);
+    keys.selectAll = keys.ctrl && IsKeyPressed(KEY_A);
+    keys.copy = keys.ctrl && IsKeyPressed(KEY_C);
+    keys.cut = keys.ctrl && IsKeyPressed(KEY_X);
+    keys.paste = keys.ctrl && IsKeyPressed(KEY_V);
+    keys.commit = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
+    keys.cancel = IsKeyPressed(KEY_ESCAPE);
+    if (keys.paste) {
+        if (const char *clipboard = GetClipboardText()) keys.clipboard = clipboard;
+        if (keys.clipboard.empty()) keys.clipboard = gEditClipboard;
+    }
     int codepoint = GetCharPressed();
     while (codepoint > 0) {
-        if (codepoint >= 32 && codepoint < 127) buffer.push_back(static_cast<char>(codepoint));
+        if (codepoint >= 32) keys.typed += codepointToUtf8(codepoint);
         codepoint = GetCharPressed();
     }
-    if (IsKeyPressed(KEY_BACKSPACE) && !buffer.empty()) buffer.pop_back();
-    commit = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
-    cancel = IsKeyPressed(KEY_ESCAPE);
+
+    const pf::TextEditApplied applied = pf::applyTextEditKeys(gEdit.state, keys);
+    if (applied.copied) {
+        gEditClipboard = applied.clipboard;
+        SetClipboardText(gEditClipboard.c_str());
+    }
+    *commit = applied.commit;
+    return applied.finished;
+}
+
+// Left edge of the text inside the field, honouring centring and scrolling.
+float textEditOrigin(const Rectangle &field, float size, bool centered, float inset) {
+    const float textW = textWidth(gEdit.state.text().c_str(), size);
+    const float inner = std::max(6.0f, field.width - inset * 2.0f);
+    if (textW <= inner) {
+        return centered ? field.x + (field.width - textW) * 0.5f : field.x + inset;
+    }
+    return field.x + inset - gEdit.scroll;
+}
+
+int textEditIndexAt(float x, float origin, float size) {
+    const std::string &text = gEdit.state.text();
+    int best = 0;
+    float bestDistance = 1.0e9f;
+    for (int i = 0; i <= static_cast<int>(text.size()); ++i) {
+        if (!pf::textIndexOnBoundary(text, i)) continue;
+        const float px = origin + textWidth(text.substr(0, static_cast<size_t>(i)).c_str(), size);
+        const float distance = std::fabs(px - x);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// Starts or continues an edit in this field and puts the caret under the mouse.
+void textEditPressAt(int id, const std::string &value, const Rectangle &field, float size,
+                     bool centered, bool alreadyEditing) {
+    if (!alreadyEditing) textEditBegin(id, value, static_cast<int>(value.size()));
+    const float inset = s(6.0f);
+    const int index = textEditIndexAt(GetMousePosition().x, textEditOrigin(field, size, centered, inset),
+                                      size);
+    const bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    const double now = GetTime();
+    const auto it = gLastClickTime.find(id);
+    const bool doubleClick = it != gLastClickTime.end() && now - it->second < 0.35;
+    gLastClickTime[id] = now;
+    if (doubleClick) {
+        gEdit.state.selectWordAt(index);
+    } else {
+        gEdit.state.setCaret(index, shift);
+    }
+    gEdit.dragging = true;
+}
+
+void textEditDrag(const Rectangle &field, float size, bool centered) {
+    if (!gEdit.dragging) return;
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        gEdit.dragging = false;
+        return;
+    }
+    gEdit.state.setCaret(textEditIndexAt(GetMousePosition().x,
+                                         textEditOrigin(field, size, centered, s(6.0f)), size),
+                         true);
+}
+
+// Paints the buffer with selection highlight, caret and horizontal scrolling.
+void textEditDraw(const Rectangle &field, float size, Color color, bool centered,
+                  const char *placeholder = nullptr, Color placeholderColor = WHITE) {
+    const Theme &t = theme();
+    const float inset = s(6.0f);
+    const Rectangle inner{field.x + inset, field.y, std::max(6.0f, field.width - inset * 2.0f),
+                          field.height};
+    const std::string &text = gEdit.state.text();
+    const float textW = textWidth(text.c_str(), size);
+    if (textW <= inner.width) {
+        gEdit.scroll = 0.0f;
+    } else {
+        const float caretOffset =
+            textWidth(text.substr(0, static_cast<size_t>(gEdit.state.caret())).c_str(), size);
+        if (caretOffset - gEdit.scroll > inner.width) gEdit.scroll = caretOffset - inner.width;
+        if (caretOffset - gEdit.scroll < 0.0f) gEdit.scroll = caretOffset;
+        gEdit.scroll = std::clamp(gEdit.scroll, 0.0f, textW - inner.width);
+    }
+    const float origin = textEditOrigin(field, size, centered, inset);
+    BeginScissorMode(static_cast<int>(inner.x), static_cast<int>(inner.y),
+                     static_cast<int>(inner.width), static_cast<int>(inner.height));
+    if (text.empty() && placeholder && *placeholder) {
+        drawText(Rectangle{inner.x, inner.y, inner.width, inner.height}, placeholder, size,
+                 placeholderColor);
+    } else {
+        if (gEdit.state.hasSelection()) {
+            const float x0 = origin +
+                             textWidth(text.substr(0, static_cast<size_t>(
+                                                           gEdit.state.selectionMin()))
+                                           .c_str(),
+                                       size);
+            const float x1 = origin +
+                             textWidth(text.substr(0, static_cast<size_t>(
+                                                           gEdit.state.selectionMax()))
+                                           .c_str(),
+                                       size);
+            DrawRectangle(static_cast<int>(std::floor(x0)),
+                          static_cast<int>(field.y + s(3.0f)),
+                          static_cast<int>(std::max(1.0f, x1 - x0)),
+                          static_cast<int>(field.height - s(6.0f)),
+                          palette::withAlpha(t.accent, 0.45f));
+        }
+        drawText(Rectangle{origin, field.y, std::max(textW, 1.0f), field.height}, text.c_str(),
+                 size, color);
+        if (std::fmod(static_cast<float>(gCaretBlink), 1.0f) < 0.5f) {
+            const float caretX =
+                origin + textWidth(
+                             text.substr(0, static_cast<size_t>(gEdit.state.caret())).c_str(), size);
+            DrawRectangle(static_cast<int>(std::round(caretX)),
+                          static_cast<int>(field.y + s(3.0f)), 1,
+                          static_cast<int>(field.height - s(6.0f)), t.text);
+        }
+    }
+    EndScissorMode();
+}
+
+// Values typed into the numeric fields are applied as they are typed, guarded
+// against half-finished input like "-" or "1.", so switching focus cannot lose
+// or misplace a value.
+bool numericBufferReady(const std::string &buffer) {
+    return !buffer.empty() && buffer != "-" && buffer != "+" && buffer != "." && buffer != "-." &&
+           buffer != "+.";
+}
+
+// Strips a unit suffix ("40 Hz", "1.20x") so the inline editor shows a number.
+std::string editableNumber(const std::string &display) {
+    std::string value = display;
+    while (!value.empty()) {
+        const char c = value.back();
+        if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E') break;
+        value.pop_back();
+    }
+    return value;
 }
 
 }  // namespace
@@ -152,12 +382,7 @@ int widgetId(int nodeId, const char *key) {
 
 void cancelEdits() {
     gActiveSlider = -1;
-    gSliderEditId = -1;
-    gSliderEditBuffer.clear();
-    gEditingId = -1;
-    gEditBuffer.clear();
-    gIntEditId = -1;
-    gIntEditBuffer.clear();
+    textEditEnd();
     gCurveDragWidget = -1;
     gCurveDragKey = -1;
     if (gPopup.kind != PopupKind::None) {
@@ -165,7 +390,6 @@ void cancelEdits() {
         gPopup.hasListResult = false;
         gPopup.hasColorResult = false;
     }
-    setKeyboardCaptured(false);
 }
 
 void setModal(bool blocked) { gModal = blocked; }
@@ -190,6 +414,87 @@ float textWidth(const char *text, float size, bool bold) {
     const float base = f.baseSize > 0 ? static_cast<float>(f.baseSize) : 10.0f;
     const float scaled = size * theme().uiScale;
     return MeasureTextEx(f, text, scaled, scaled / base).x;
+}
+
+namespace {
+
+// Greedy word wrap measured with the atlas the text is drawn with. Words longer
+// than the line are hard-broken so nothing can overflow sideways.
+std::vector<std::string> wrapLines(const std::string &text, float size, float maxWidth,
+                                   bool bold) {
+    std::vector<std::string> lines;
+    if (maxWidth <= 0.0f) {
+        lines.push_back(text);
+        return lines;
+    }
+    std::string line;
+    std::string word;
+    auto fits = [&](const std::string &value) {
+        return textWidth(value.c_str(), size, bold) <= maxWidth;
+    };
+    auto flushWord = [&]() {
+        if (word.empty()) return;
+        const std::string candidate = line.empty() ? word : line + " " + word;
+        if (fits(candidate)) {
+            line = candidate;
+            word.clear();
+            return;
+        }
+        if (!line.empty()) {
+            lines.push_back(line);
+            line.clear();
+        }
+        std::string rest = word;
+        while (!fits(rest) && rest.size() > 1) {
+            size_t take = rest.size();
+            while (take > 1 && !fits(rest.substr(0, take))) --take;
+            lines.push_back(rest.substr(0, take));
+            rest = rest.substr(take);
+        }
+        line = rest;
+        word.clear();
+    };
+    for (char c : text) {
+        if (c == '\n') {
+            flushWord();
+            lines.push_back(line);
+            line.clear();
+        } else if (c == ' ' || c == '\t') {
+            flushWord();
+        } else {
+            word.push_back(c);
+        }
+    }
+    flushWord();
+    if (!line.empty() || lines.empty()) lines.push_back(line);
+    return lines;
+}
+
+float resolvedLineHeight(float size, float lineHeight) {
+    if (lineHeight > 0.0f) return lineHeight;
+    return size * theme().uiScale * 1.42f;
+}
+
+}  // namespace
+
+float textWrappedHeight(const char *text, float size, float width, float lineHeight, bool bold) {
+    if (!text || !*text) return 0.0f;
+    const std::vector<std::string> lines = wrapLines(text, size, width, bold);
+    return static_cast<float>(lines.size()) * resolvedLineHeight(size, lineHeight);
+}
+
+float drawTextWrapped(Rectangle bounds, const char *text, float size, Color color,
+                      float lineHeight, bool bold) {
+    if (!text || !*text) return 0.0f;
+    const float step = resolvedLineHeight(size, lineHeight);
+    const std::vector<std::string> lines = wrapLines(text, size, bounds.width, bold);
+    float y = bounds.y;
+    for (const std::string &line : lines) {
+        drawText(Rectangle{bounds.x, y, bounds.width, step}, line.c_str(), size, color,
+                 Align::Left, bold);
+        y += step;
+    }
+    return static_cast<float>(lines.size()) * step;
 }
 
 void drawText(Rectangle bounds, const char *text, float size, Color color, Align align, bool bold) {
@@ -303,17 +608,31 @@ bool smallButton(Rectangle r, const char *label, bool active) {
 // ---------------------------------------------------------------------------
 
 bool slider(Rectangle r, const char *label, float *value, float lo, float hi, float step,
-            const char *format, int stableId) {
+            const char *format, int stableId, bool logarithmic) {
     const Theme &t = theme();
     const int id = stableId != 0 ? stableId : nextId();
     const Vector2 mouse = GetMousePosition();
     const bool interactive = !inputBlocked();
+    // Frequency controls are mapped logarithmically: on a 20 Hz..20 kHz range a
+    // linear track squeezes everything below 1 kHz into the first 5 %.
+    const bool logTrack = logarithmic && lo > 0.0f && hi > lo;
+    auto toFraction = [&](float v) {
+        if (hi <= lo) return 0.0f;
+        if (!logTrack) return std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f);
+        return std::clamp((std::log(std::clamp(v, lo, hi)) - std::log(lo)) /
+                              (std::log(hi) - std::log(lo)),
+                          0.0f, 1.0f);
+    };
+    auto fromFraction = [&](float position) {
+        if (!logTrack) return lo + position * (hi - lo);
+        return std::exp(std::log(lo) + position * (std::log(hi) - std::log(lo)));
+    };
     // When a label is supplied it owns the left part of the row, so the knob can
     // never sit on top of the text.
     const float labelWidth = (label && *label) ? r.width * 0.42f : 0.0f;
     const Rectangle trackArea{r.x + labelWidth, r.y, r.width - labelWidth, r.height};
     const bool isHovered = interactive && pointIn(trackArea, mouse);
-    const bool editing = gSliderEditId == id;
+    const bool editing = gEdit.active() && gEdit.id == id;
     const float before = *value;
 
     // Double-clicking anywhere on the row switches to typing the value, whatever
@@ -322,31 +641,33 @@ bool slider(Rectangle r, const char *label, float *value, float lo, float hi, fl
         const double now = GetTime();
         const auto it = gLastClickTime.find(id);
         if (it != gLastClickTime.end() && now - it->second < 0.35) {
-            gSliderEditId = id;
-            gSliderEditBuffer.assign(TextFormat(format, static_cast<double>(*value)));
-            setKeyboardCaptured(true);
+            const std::string shown(TextFormat(format, static_cast<double>(*value)));
+            const std::string start = editableNumber(shown);
+            textEditBegin(id, start, static_cast<int>(start.size()));
             gLastClickTime.erase(it);
         } else {
             gLastClickTime[id] = now;
         }
     }
 
-    if (editing) {
-        bool commit = false, cancel = false;
-        editKeys(gSliderEditBuffer, commit, cancel);
-        // Apply as you type so switching away mid-edit cannot lose or copy the
-        // value into some other block's slider.
-        if (!gSliderEditBuffer.empty() && gSliderEditBuffer != "-" &&
-            gSliderEditBuffer != "." && gSliderEditBuffer != "-.") {
-            *value = std::clamp(static_cast<float>(std::atof(gSliderEditBuffer.c_str())),
+    // Clicking anywhere else ends the inline edit, keeping what was typed.
+    if (editing && interactive && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !pointIn(r, mouse)) {
+        textEditEnd();
+    }
+    if (editing && gEdit.active() && gEdit.id == id) {
+        // Applied as it is typed so switching away mid-edit cannot lose or copy
+        // the value into some other block's slider.
+        if (numericBufferReady(gEdit.state.text())) {
+            *value = std::clamp(static_cast<float>(std::atof(gEdit.state.text().c_str())),
                                 std::min(lo, hi), std::max(lo, hi));
         }
-        if (commit) {
-            gSliderEditId = -1;
-            setKeyboardCaptured(false);
-        } else if (cancel) {
-            gSliderEditId = -1;
-            setKeyboardCaptured(false);
+        bool commit = false;
+        if (textEditUpdate(&commit)) {
+            if (!commit) {
+                *value = std::clamp(static_cast<float>(std::atof(gEdit.state.original().c_str())),
+                                    std::min(lo, hi), std::max(lo, hi));
+            }
+            textEditEnd();
         }
     }
 
@@ -359,12 +680,12 @@ bool slider(Rectangle r, const char *label, float *value, float lo, float hi, fl
     if (dragging) {
         const float position =
             std::clamp((mouse.x - trackArea.x) / std::max(1.0f, trackArea.width), 0.0f, 1.0f);
-        float next = lo + position * (hi - lo);
+        float next = fromFraction(position);
         if (step > 0.0f) next = std::round(next / step) * step;
         *value = std::clamp(next, std::min(lo, hi), std::max(lo, hi));
     }
 
-    const float fraction = (hi > lo) ? std::clamp((*value - lo) / (hi - lo), 0.0f, 1.0f) : 0.0f;
+    const float fraction = toFraction(*value);
     const float trackHeight = s(18.0f);
     const Rectangle track{trackArea.x, r.y + (r.height - trackHeight) * 0.5f, trackArea.width,
                           trackHeight};
@@ -378,23 +699,27 @@ bool slider(Rectangle r, const char *label, float *value, float lo, float hi, fl
     if (label && *label) {
         drawTextClipped(Rectangle{r.x, r.y, labelWidth - 8.0f, r.height}, label, 12.0f, t.text);
     }
+    const bool stillEditing = gEdit.active() && gEdit.id == id;
     const std::string valueText =
-        editing ? gSliderEditBuffer
-                : std::string(TextFormat(format, static_cast<double>(*value)));
+        stillEditing ? gEdit.state.text()
+                     : std::string(TextFormat(format, static_cast<double>(*value)));
     // The value sits on the filled part of the track when it is large and on the
     // empty part when it is small; pick the ink for whichever it lands on, so it
     // stays dark on a light theme and light on a dark theme.
     const float valueTextWidth = textWidth(valueText.c_str(), 11.0f);
     const bool overFill = fraction * track.width + valueTextWidth >= track.width;
     const Color valueInk = overFill ? readableOn(t.accent) : t.text;
-    if (editing) {
+    if (stillEditing) {
         DrawRectangleRounded(Rectangle{track.x, track.y, track.width, track.height},
                              roundness(track, track.height * 0.5f), 6, t.panelRaised);
         DrawRectangleRoundedLines(Rectangle{track.x, track.y, track.width, track.height},
                                   roundness(track, track.height * 0.5f), 6, t.accent);
+        // The shared editor supplies the caret, selection and scrolling here too.
+        textEditDraw(track, 11.0f, t.text, true);
+    } else {
+        drawTextClipped(Rectangle{track.x + 6.0f, track.y, track.width - 12.0f, trackHeight},
+                        valueText.c_str(), 11.0f, valueInk, Align::Right);
     }
-    drawTextClipped(Rectangle{track.x + 6.0f, track.y, track.width - 12.0f, trackHeight},
-                    valueText.c_str(), 11.0f, editing ? t.text : valueInk, Align::Right);
     return *value != before;
 }
 
@@ -426,45 +751,43 @@ bool intField(Rectangle r, int *value, int lo, int hi, int stableId) {
         changed = true;
     }
 
-    const bool editing = gIntEditId == id;
+    const bool editing = gEdit.active() && gEdit.id == id;
     if (interactive && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         if (pointIn(field, GetMousePosition())) {
-            if (!editing) {
-                gIntEditId = id;
-                gIntEditBuffer = std::to_string(*value);
-                setKeyboardCaptured(true);
-            }
+            textEditPressAt(id, std::to_string(*value), field, 12.0f, true, editing);
         } else if (editing) {
-            const int parsed = std::clamp(std::atoi(gIntEditBuffer.c_str()), lo, hi);
+            const int parsed = std::clamp(std::atoi(gEdit.state.text().c_str()), lo, hi);
             if (parsed != *value) {
                 *value = parsed;
                 changed = true;
             }
-            gIntEditId = -1;
-            setKeyboardCaptured(false);
+            textEditEnd();
         }
     }
-    if (editing) {
-        bool commit = false, cancel = false;
-        editKeys(gIntEditBuffer, commit, cancel);
-        if (commit || cancel) {
-            if (commit && !gIntEditBuffer.empty()) {
-                const int parsed = std::clamp(std::atoi(gIntEditBuffer.c_str()), lo, hi);
-                if (parsed != *value) {
-                    *value = parsed;
-                    changed = true;
-                }
+    if (editing && gEdit.active() && gEdit.id == id) {
+        textEditDrag(field, 12.0f, true);
+        if (numericBufferReady(gEdit.state.text())) {
+            const int parsed = std::clamp(std::atoi(gEdit.state.text().c_str()), lo, hi);
+            if (parsed != *value) {
+                *value = parsed;
+                changed = true;
             }
-            gIntEditId = -1;
-            setKeyboardCaptured(false);
+        }
+        bool commit = false;
+        if (textEditUpdate(&commit)) {
+            if (!commit) *value = std::clamp(std::atoi(gEdit.state.original().c_str()), lo, hi);
+            textEditEnd();
         }
     }
 
     DrawRectangleRounded(field, roundness(field, s(4.0f)), 5, editing ? palette::modulate(t.panelAlt, 1.06f) : t.panelAlt);
     DrawRectangleRoundedLines(field, roundness(field, s(4.0f)), 5, editing ? t.accent : t.border);
-    const std::string shown = editing ? gIntEditBuffer : std::to_string(*value);
-    drawTextClipped(Rectangle{field.x + 6.0f, field.y, field.width - 12.0f, field.height},
-                    shown.c_str(), 12.0f, t.text, Align::Center);
+    if (editing && gEdit.active() && gEdit.id == id) {
+        textEditDraw(field, 12.0f, t.text, true);
+    } else {
+        drawTextClipped(Rectangle{field.x + 6.0f, field.y, field.width - 12.0f, field.height},
+                        std::to_string(*value).c_str(), 12.0f, t.text, Align::Center);
+    }
     return changed;
 }
 
@@ -537,52 +860,47 @@ bool dropdown(Rectangle r, int *value, const std::vector<std::string> &options,
 bool textField(Rectangle r, std::string *value, const char *placeholder, int stableId) {
     const Theme &t = theme();
     const int id = stableId != 0 ? stableId : nextId();
-    const bool editing = gEditingId == id;
     const bool interactive = !inputBlocked();
     const bool isHovered = interactive && hovered(r);
+    const bool editing = gEdit.active() && gEdit.id == id;
     if (interactive && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         if (isHovered) {
-            if (!editing) {
-                gEditingId = id;
-                gEditBuffer = *value;
-                setKeyboardCaptured(true);
-            }
+            textEditPressAt(id, *value, r, 12.0f, false, editing);
         } else if (editing) {
-            *value = gEditBuffer;
-            gEditingId = -1;
-            setKeyboardCaptured(false);
+            *value = gEdit.state.text();
+            textEditEnd();
         }
     }
-    if (editing) {
-        bool commit = false, cancel = false;
-        editKeys(gEditBuffer, commit, cancel);
-        if (commit) {
-            *value = gEditBuffer;
-            gEditingId = -1;
-            setKeyboardCaptured(false);
-        } else if (cancel) {
-            gEditBuffer = *value;
-            gEditingId = -1;
-            setKeyboardCaptured(false);
+    bool changed = false;
+    // The press above may have just ended this edit (clicking outside commits);
+    // running the block again would copy the cleared buffer back into the value.
+    if (editing && gEdit.active() && gEdit.id == id) {
+        textEditDrag(r, 12.0f, false);
+        bool commit = false;
+        if (textEditUpdate(&commit)) {
+            // Escape restores the text the field had when editing started.
+            changed = *value != (commit ? gEdit.state.text() : gEdit.state.original());
+            *value = commit ? gEdit.state.text() : gEdit.state.original();
+            textEditEnd();
+        } else {
+            changed = *value != gEdit.state.text();
+            *value = gEdit.state.text();  // live, so Enter is not needed to keep typing
         }
     }
-    const bool changed = editing && gEditingId != -1 && *value != gEditBuffer;
-    if (editing && gEditingId == id) *value = gEditBuffer;
 
     DrawRectangleRounded(r, roundness(r, s(5.0f)), 6, editing ? palette::modulate(t.panelAlt, 1.06f) : t.panelAlt);
     DrawRectangleRoundedLines(r, roundness(r, s(5.0f)), 6, editing ? t.accent : t.border);
-    const std::string &shown = (editing && gEditingId == id) ? gEditBuffer : *value;
-    if (shown.empty() && placeholder) {
-        drawTextClipped(Rectangle{r.x + 8.0f, r.y, r.width - 16.0f, r.height}, placeholder, 12.0f,
-                        palette::withAlpha(t.textDim, 0.85f));
+    if (editing && gEdit.active() && gEdit.id == id) {
+        textEditDraw(r, 12.0f, t.text, false, placeholder,
+                     palette::withAlpha(t.textDim, 0.85f));
     } else {
-        drawTextClipped(Rectangle{r.x + 8.0f, r.y, r.width - 16.0f, r.height}, shown.c_str(), 12.0f,
-                        t.text);
-    }
-    if (editing && gEditingId == id && std::fmod(static_cast<float>(gCaretBlink), 1.0f) < 0.5f) {
-        const float caretX = r.x + 8.0f + textWidth(shown.c_str(), 12.0f);
-        DrawRectangle(static_cast<int>(caretX), static_cast<int>(r.y + 4.0f), 1,
-                      static_cast<int>(r.height - 8.0f), t.text);
+        if (value->empty() && placeholder) {
+            drawTextClipped(Rectangle{r.x + 8.0f, r.y, r.width - 16.0f, r.height}, placeholder,
+                            12.0f, palette::withAlpha(t.textDim, 0.85f));
+        } else {
+            drawTextClipped(Rectangle{r.x + 8.0f, r.y, r.width - 16.0f, r.height}, value->c_str(),
+                            12.0f, t.text);
+        }
     }
     return changed;
 }
@@ -636,32 +954,30 @@ bool floatField(Rectangle r, float *value, float lo, float hi, const char *forma
     const Theme &t = theme();
     const int id = stableId != 0 ? stableId : nextId();
     const bool interactive = !inputBlocked();
-    static int gFloatEditId = -1;
-    static std::string gFloatEditBuffer;
-    const bool editing = gFloatEditId == id;
+    const bool editing = gEdit.active() && gEdit.id == id;
 
     if (interactive && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         if (hovered(r)) {
-            if (!editing) {
-                gFloatEditId = id;
-                gFloatEditBuffer = TextFormat(format, static_cast<double>(*value));
-                setKeyboardCaptured(true);
-            }
+            textEditPressAt(id, std::string(TextFormat(format, static_cast<double>(*value))), r,
+                            11.5f, true, editing);
         } else if (editing) {
-            *value = std::clamp(static_cast<float>(std::atof(gFloatEditBuffer.c_str())), lo, hi);
-            gFloatEditId = -1;
-            setKeyboardCaptured(false);
+            if (numericBufferReady(gEdit.state.text())) {
+                *value = std::clamp(static_cast<float>(std::atof(gEdit.state.text().c_str())), lo, hi);
+            }
+            textEditEnd();
         }
     }
-    if (editing) {
-        bool commit = false, cancel = false;
-        editKeys(gFloatEditBuffer, commit, cancel);
-        if (commit || cancel) {
-            if (commit) {
-                *value = std::clamp(static_cast<float>(std::atof(gFloatEditBuffer.c_str())), lo, hi);
+    if (editing && gEdit.active() && gEdit.id == id) {
+        textEditDrag(r, 11.5f, true);
+        if (numericBufferReady(gEdit.state.text())) {
+            *value = std::clamp(static_cast<float>(std::atof(gEdit.state.text().c_str())), lo, hi);
+        }
+        bool commit = false;
+        if (textEditUpdate(&commit)) {
+            if (!commit) {
+                *value = std::clamp(static_cast<float>(std::atof(gEdit.state.original().c_str())), lo, hi);
             }
-            gFloatEditId = -1;
-            setKeyboardCaptured(false);
+            textEditEnd();
         }
     }
 
@@ -669,10 +985,13 @@ bool floatField(Rectangle r, float *value, float lo, float hi, const char *forma
     DrawRectangleRounded(r, roundness(r, s(4.0f)), 5,
                          editing ? palette::modulate(t.panelAlt, 1.06f) : t.panelAlt);
     DrawRectangleRoundedLines(r, roundness(r, s(4.0f)), 5, editing ? t.accent : t.border);
-    const std::string shown =
-        editing ? gFloatEditBuffer : std::string(TextFormat(format, static_cast<double>(*value)));
-    drawTextClipped(Rectangle{r.x + s(5.0f), r.y, r.width - s(10.0f), r.height}, shown.c_str(),
-                    11.5f, t.text, Align::Center);
+    if (editing && gEdit.active() && gEdit.id == id) {
+        textEditDraw(r, 11.5f, t.text, true);
+    } else {
+        const std::string shown(TextFormat(format, static_cast<double>(*value)));
+        drawTextClipped(Rectangle{r.x + s(5.0f), r.y, r.width - s(10.0f), r.height}, shown.c_str(),
+                        11.5f, t.text, Align::Center);
+    }
     return *value != before;
 }
 
