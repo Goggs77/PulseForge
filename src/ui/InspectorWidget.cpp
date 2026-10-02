@@ -159,9 +159,13 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
         default:
             ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f},
                                 param.label.c_str(), 12.0f, t.textDim);
+            // Logarithmic parameters are frequencies: the track follows the way
+            // the ear (and the analysis) divides the spectrum, and the readout is
+            // a whole number of Hz instead of scientific notation.
+            const char *valueFormat = param.logarithmic ? "%.0f Hz" : "%.3g";
             if (ui::slider(Rectangle{cursor.x, cursor.y + 14.0f, cursor.width, kRow()}, nullptr,
-                           &param.value, param.minValue, param.maxValue, param.step, "%.3g",
-                           ui::widgetId(node.id, param.key.c_str()))) {
+                           &param.value, param.minValue, param.maxValue, param.step, valueFormat,
+                           ui::widgetId(node.id, param.key.c_str()), param.logarithmic)) {
                 state.project.dirty = true;
             }
             cursor.y += kRow() + 18.0f;
@@ -171,16 +175,17 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
 
 void drawDescription(Rectangle &cursor, const std::string &description) {
     const ui::Theme &t = ui::theme();
-    // CrystalGUI's word-wrapping text helper does the layout for us.
-    const float lineHeight = ui::s(18.0f);
-    const float width = cursor.width;
-    const int approxLines =
-        static_cast<int>(description.size() / std::max(18.0f, width / 7.4f)) + 1;
-    const Rectangle bounds{cursor.x, cursor.y, width, lineHeight * static_cast<float>(approxLines)};
-    CguiDrawTextPro(description.c_str(), t.body, bounds, 12.5f, 0.2f, lineHeight,
-                    palette::withAlpha(t.textDim, 0.95f), CGUI_TEXT_JUSTIFY_BEGIN,
-                    CGUI_TEXT_JUSTIFY_BEGIN);
-    cursor.y += bounds.height + 6.0f;
+    // Drawn with the app's own atlas-backed renderer rather than CrystalGUI's
+    // Pro text, which rendered thin, broken strokes. The wrapped height is
+    // measured instead of estimated, so longer descriptions (and the larger GUI
+    // scales) can no longer be cut off.
+    // Mostly the primary ink: the dim grey it used to use was the other half of
+    // "too thin to see clearly", especially on the light theme.
+    Color ink = palette::mix(t.textDim, t.text, 0.6f);
+    ink.a = 255;
+    const float height = ui::drawTextWrapped(
+        Rectangle{cursor.x, cursor.y, cursor.width, 0.0f}, description.c_str(), 13.0f, ink);
+    cursor.y += height + ui::s(8.0f);
 }
 
 }  // namespace
@@ -339,21 +344,79 @@ void drawInspector(UiState &state, Rectangle bounds) {
                 spec.crf = p.output.crf;
                 p.output = spec;
                 refreshOutputAudio(state);
+                updateExportExtension(state);
                 p.dirty = true;
             }
             cursor.y += kRow() + kGap();
         }
         ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 78.0f, kRow()}, "Video", 12.0f, t.textDim);
-        ui::drawText(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()},
-                     p.output.videoCodec.c_str(), 12.0f, t.text);
-        cursor.y += kRow();
+        {
+            // Encoders this build carries and the container can take; the
+            // project's own choice stays visible even when it is unavailable so
+            // the setting is never silently rewritten.
+            std::vector<std::string> ids;
+            std::vector<std::string> labels;
+            for (const std::string &id : videoEncodersForContainer(p.output.container)) {
+                if (!ffmpeg::hasEncoder(id)) continue;
+                ids.push_back(id);
+                labels.push_back(videoEncoderLabel(id));
+            }
+            int index = -1;
+            for (size_t i = 0; i < ids.size(); ++i) {
+                if (ids[i] == p.output.videoCodec) index = static_cast<int>(i);
+            }
+            if (index < 0) {
+                ids.insert(ids.begin(), p.output.videoCodec);
+                labels.insert(labels.begin(),
+                              videoEncoderLabel(p.output.videoCodec) + " (unavailable)");
+                index = 0;
+            }
+            const int before = index;
+            ui::dropdown(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()}, &index,
+                         labels, 8112);
+            if (index != before && index >= 0 && index < static_cast<int>(ids.size())) {
+                p.output.videoCodec = ids[static_cast<size_t>(index)];
+                p.dirty = true;
+            }
+            cursor.y += kRow();
+        }
         ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 78.0f, kRow()}, "Audio", 12.0f, t.textDim);
-        ui::drawText(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()},
-                     (audioCodecDisplayName(p.output.audioCodec) +
-                      (p.audio.transcodedAac && p.output.audioCodec == "aac" ? " (in memory)" : ""))
-                         .c_str(),
-                     12.0f, t.text);
-        cursor.y += kRow();
+        {
+            // Same idea as the video row: only encoders this build has and the
+            // container can mux, plus the project's own choice even when it is
+            // unavailable here.
+            std::vector<std::string> ids;
+            std::vector<std::string> labels;
+            for (const std::string &id : audioEncodersForContainer(p.output.container)) {
+                if (!ffmpeg::hasEncoder(id)) continue;
+                ids.push_back(id);
+                labels.push_back(audioEncoderLabel(id));
+            }
+            int index = -1;
+            for (size_t i = 0; i < ids.size(); ++i) {
+                if (ids[i] == p.output.audioCodec) index = static_cast<int>(i);
+            }
+            if (index < 0) {
+                ids.insert(ids.begin(), p.output.audioCodec);
+                labels.insert(labels.begin(),
+                              audioEncoderLabel(p.output.audioCodec) + " (unavailable)");
+                index = 0;
+            }
+            const int before = index;
+            ui::dropdown(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()}, &index,
+                         labels, 8113);
+            if (index != before && index >= 0 && index < static_cast<int>(ids.size())) {
+                p.output.audioCodec = ids[static_cast<size_t>(index)];
+                p.dirty = true;
+            }
+            cursor.y += kRow();
+        }
+        if (p.audio.transcodedAac && p.output.audioCodec == "aac") {
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f},
+                                "imported audio was converted to AAC in memory", 10.5f,
+                                palette::withAlpha(t.textDim, 0.9f));
+            cursor.y += 16.0f;
+        }
         ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f}, "Quality (CRF)",
                             12.0f, t.textDim);
         cursor.y += 14.0f;
@@ -400,11 +463,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
 
         if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, 30.0f}, "Export video", true)) {
             state.showExportDialog = true;
-            if (state.exportPath.empty()) {
-                state.exportPath = state.projectDirectory.empty()
-                                       ? std::string("output.") + p.output.container
-                                       : state.projectDirectory + "/output." + p.output.container;
-            }
+            updateExportExtension(state);
         }
         cursor.y += 36.0f;
         if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, 26.0f}, "Save project as...")) {
@@ -442,7 +501,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
 
     {
         std::string inputs;
-        for (const PortDesc &port : node->def->inputs) {
+        for (const PortDesc &port : node->inputPorts()) {
             if (!inputs.empty()) inputs += ", ";
             inputs += port.name;
         }
@@ -452,7 +511,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
             cursor.y += 16.0f;
         }
         std::string outputs;
-        for (const PortDesc &port : node->def->outputs) {
+        for (const PortDesc &port : node->outputPorts()) {
             if (!outputs.empty()) outputs += ", ";
             outputs += port.name;
         }
@@ -478,7 +537,9 @@ void drawInspector(UiState &state, Rectangle bounds) {
     }
 
     cursor.y += 4.0f;
-    if (node->kind == "shader.pass") {
+    if (node->kind == "render.shader") {
+        // The block's ports follow the file, so they are rebuilt whenever the
+        // path changes (here, or through the shader browser).
         if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width * 0.5f - 2.0f, 26.0f},
                        "Pick .glsl")) {
             openBrowser(state, "shader", "Open fragment shader", ".glsl", state.projectDirectory);
@@ -490,8 +551,22 @@ void drawInspector(UiState &state, Rectangle bounds) {
             char message[64];
             std::snprintf(message, sizeof(message), "Reloaded %d shader(s)", reloaded);
             setStatus(state, message);
+            refreshShaderPorts(state, *node, true);
         }
+        refreshShaderPorts(state, *node);
         cursor.y += 32.0f;
+
+        // What the file asks for, so the port list is self-explanatory.
+        if (!node->pstr("shader").empty()) {
+            std::string ports;
+            for (const PortDesc &port : node->inputPorts()) {
+                if (!ports.empty()) ports += ", ";
+                ports += port.name;
+            }
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 16.0f},
+                                ("inputs: " + ports).c_str(), 10.5f, t.textDim);
+            cursor.y += 18.0f;
+        }
     }
     if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, 26.0f}, "Delete block")) {
         deleteSelectedNode(state);

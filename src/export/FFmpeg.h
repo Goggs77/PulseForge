@@ -17,6 +17,7 @@ struct MediaInfo {
     int channels = 0;
     long long bitRate = 0;  // bits per second, -1/0 when the container has none
     std::string codec;
+    std::string videoCodec;
     std::string format;
     std::string error;
     long long fileSize = -1;
@@ -35,6 +36,11 @@ bool decodeAudioFloat(const std::string &path, int sampleRate, int *outChannels,
 
 // True when this ffmpeg build carries an encoder with that name (cached).
 bool hasEncoder(const std::string &name);
+
+// True when the encoder actually runs on this machine (cached). A build can
+// list h264_nvenc on a GPU that cannot do it, so hardware encoders are probed
+// with a one frame test encode before an export is started.
+bool canRunVideoEncoder(const std::string &name);
 
 // Encodes interleaved 32-bit float samples to an AAC (ADTS) stream held in
 // memory. Used when the imported media cannot be re-encoded with a matching

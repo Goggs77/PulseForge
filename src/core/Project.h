@@ -2,10 +2,12 @@
 #pragma once
 
 #include <string>
+#include <functional>
 #include <vector>
 
 #include "core/Graph.h"
 #include "core/Json.h"
+#include "render/ShaderLibrary.h"
 
 namespace pf {
 
@@ -72,10 +74,14 @@ public:
     double effectiveDuration(double audioDuration) const;
 
     bool save(const std::string &path, std::string *error);
-    bool load(const std::string &path, std::string *error);
+    // `shaders` is optional; it lets a retired "shader.pass" node be migrated to
+    // the Shader block with the ports of the .glsl file it points at.
+    bool load(const std::string &path, std::string *error,
+              const ShaderLibrary *shaders = nullptr);
 
     json::Value toJson(const std::string &projectDir) const;
-    bool fromJson(const json::Value &value, const std::string &projectDir, std::string *error);
+    bool fromJson(const json::Value &value, const std::string &projectDir, std::string *error,
+                  const ShaderLibrary *shaders = nullptr);
 
     // Relative-to-project paths when possible, absolute otherwise.
     static std::string toRelative(const std::string &path, const std::string &directory);
@@ -87,10 +93,63 @@ public:
 OutputSpec outputSpecForContainer(const std::string &container);
 std::vector<std::string> supportedContainers();
 
+// Video encoders offered by the output settings. `id` is what gets stored in the
+// project and passed to ffmpeg; the label is what the UI shows.
+struct VideoEncoderInfo {
+    const char *id;
+    const char *label;
+    const char *family;  // h264 | hevc | av1 | vp9 | mpeg4
+    const char *api;     // cpu | nvenc | qsv | amf
+};
+const std::vector<VideoEncoderInfo> &videoEncoders();
+const VideoEncoderInfo *findVideoEncoder(const std::string &id);
+std::string videoEncoderLabel(const std::string &id);
+std::string videoEncoderFamily(const std::string &id);
+std::string videoEncoderApi(const std::string &id);
+bool videoEncoderIsHardware(const std::string &id);
+bool containerAcceptsVideoEncoder(const std::string &container, const std::string &id);
+std::vector<std::string> videoEncodersForContainer(const std::string &container);
+
+// Audio encoders offered by the output settings. `family` groups the codec
+// families the importer matches against (aac, mp3, flac, alac, opus, vorbis,
+// ac3, eac3, dts, pcm).
+struct AudioEncoderInfo {
+    const char *id;
+    const char *label;
+    const char *family;
+};
+const std::vector<AudioEncoderInfo> &audioEncoders();
+const AudioEncoderInfo *findAudioEncoder(const std::string &id);
+std::string audioEncoderLabel(const std::string &id);
+std::string audioEncoderFamily(const std::string &id);
+// Which codec families a container can mux.
+bool containerCarriesAudioFamily(const std::string &container, const std::string &family);
+bool containerAcceptsAudioEncoder(const std::string &container, const std::string &id);
+std::vector<std::string> audioEncodersForContainer(const std::string &container);
+
+// Codec family of a decoded source stream ("aac", "mp3", "flac", "pcm", ...).
+std::string audioSourceFamily(const std::string &sourceCodec);
+
+// The encoder an imported file should be exported with.
+struct AudioEncoderChoice {
+    std::string encoder;    // ffmpeg encoder name; empty = keep the project's
+    int bitrateKbps = 0;    // 0 = keep the container default
+    bool transcodeToAac = false;  // media has to be converted to AAC in memory
+};
+// `isAvailable` reports whether this ffmpeg build carries an encoder (usually
+// ffmpeg::hasEncoder), which keeps the decision testable without ffmpeg.
+AudioEncoderChoice chooseAudioEncoder(const std::string &sourceCodec, int sourceBitrateKbps,
+                                      const std::string &container,
+                                      const std::function<bool(const std::string &)> &isAvailable);
+
 // Audio codec helpers shared by the importer, the inspector and the exporter.
 bool audioCodecIsLossless(const std::string &codec);
 bool containerAcceptsAac(const std::string &container);
 std::string audioCodecDisplayName(const std::string &codec);
 int parseAudioBitrateKbps(const std::string &bitrate);
+// Rewrites an export path so its extension matches the container, defaulting to
+// "<directory>/output.<container>" when the path is empty.
+std::string exportPathForContainer(const std::string &path, const std::string &container,
+                                   const std::string &directory);
 
 }  // namespace pf

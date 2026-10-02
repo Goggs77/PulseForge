@@ -79,12 +79,7 @@ void actionSave(CguiNode *) {
 void actionExport(CguiNode *) {
     if (!gApp) return;
     gApp->showExportDialog = true;
-    if (gApp->exportPath.empty()) {
-        gApp->exportPath = gApp->projectDirectory.empty()
-                               ? std::string("output.") + gApp->project.output.container
-                               : gApp->projectDirectory + "/output." +
-                                     gApp->project.output.container;
-    }
+    updateExportExtension(*gApp);
 }
 
 void actionPlay(CguiNode *) {
@@ -335,109 +330,15 @@ void setStatus(UiState &state, const std::string &message, bool error) {
 
 namespace {
 
-// Source codec families the importer can match, with the encoder that keeps the
-// export in the same family.
-struct CodecFamily {
-    const char *name;
-    const char *encoder;
-};
-constexpr CodecFamily kCodecFamilies[] = {
-    {"aac", "aac"},        {"mp3", "libmp3lame"}, {"flac", "flac"},   {"alac", "alac"},
-    {"opus", "libopus"},   {"vorbis", "libvorbis"}, {"ac3", "ac3"},   {"eac3", "eac3"},
-    {"dts", "dca"},        {"pcm", "pcm_s16le"},
-};
-
-std::string codecFamily(const std::string &codec) {
-    if (codec.rfind("pcm_", 0) == 0) return "pcm";
-    if (codec == "mp3" || codec == "mp3float" || codec == "mp2") return "mp3";
-    if (codec == "aac" || codec == "aac_latm") return "aac";
-    for (const CodecFamily &family : kCodecFamilies) {
-        if (codec == family.name) return family.name;
-    }
-    return std::string();
-}
-
-std::string encoderForFamily(const std::string &family) {
-    for (const CodecFamily &entry : kCodecFamilies) {
-        if (family == entry.name) return entry.encoder;
-    }
-    return std::string();
-}
-
-bool containerCarries(const std::string &container, const std::string &family) {
-    if (family.empty()) return false;
-    if (container == "webm") return family == "opus" || family == "vorbis";
-    if (container == "avi") {
-        return family == "mp3" || family == "ac3" || family == "eac3" || family == "aac";
-    }
-    if (container == "mkv") return true;
-    // mp4 and mov both carry ALAC and FLAC inside the ISO base media file
-    // format, which keeps a lossless import lossless.
-    if (container == "mov" || container == "mp4") {
-        return family == "aac" || family == "alac" || family == "flac" || family == "mp3" ||
-               family == "ac3" || family == "eac3" || (container == "mov" && family == "pcm");
-    }
-    // Unknown/newer containers: mainstream audio only.
-    return family == "aac" || family == "alac" || family == "mp3" || family == "ac3" ||
-           family == "eac3";
-}
-
-struct AudioMatch {
-    std::string encoder;      // ffmpeg encoder for project.output.audioCodec
-    int bitrateKbps = 0;      // 0 = keep the container default
-    bool transcodeToAac = false;
-};
-
-// Picks the encoder that keeps the export closest to the imported media. When
-// no encoder in this ffmpeg build can carry the source codec, the caller is told
-// to transcode once to AAC instead of silently dropping to a low-bitrate copy.
-AudioMatch matchAudioEncoder(const std::string &sourceCodec, int sourceKbps,
-                             const std::string &container) {
-    AudioMatch match;
-    const std::string family = codecFamily(sourceCodec);
-    if (!family.empty()) {
-        const std::string encoder = encoderForFamily(family);
-        if (!encoder.empty() && containerCarries(container, family) &&
-            ffmpeg::hasEncoder(encoder)) {
-            match.encoder = encoder;
-            if (!audioCodecIsLossless(encoder) && sourceKbps > 0) match.bitrateKbps = sourceKbps;
-            return match;
-        }
-    }
-
-    // Fall back to the container's own default, then to AAC.
-    const OutputSpec preset = outputSpecForContainer(container);
-    const std::string presetFamily = codecFamily(audioCodecDisplayName(preset.audioCodec));
-    if (ffmpeg::hasEncoder(preset.audioCodec) && containerCarries(container, presetFamily)) {
-        match.encoder = preset.audioCodec;
-        match.bitrateKbps = parseAudioBitrateKbps(preset.audioBitrate);
-    } else if (ffmpeg::hasEncoder("aac") && containerCarries(container, "aac")) {
-        match.encoder = "aac";
-    }
-
-    if (codecFamily(audioCodecDisplayName(match.encoder)) == family && !family.empty()) {
-        return match;  // the fallback happens to match after all
-    }
-    if (ffmpeg::hasEncoder("aac") && containerAcceptsAac(container)) {
-        match.encoder = "aac";
-        match.transcodeToAac = true;
-        // "Best quality possible": never below the source, within what AAC can
-        // usefully carry.
-        match.bitrateKbps = std::clamp(std::max(sourceKbps, 256), 256, 512);
-    } else if (!match.encoder.empty() && match.bitrateKbps <= 0) {
-        match.bitrateKbps = std::max(192, sourceKbps);
-    }
-    return match;
-}
-
 // Applies the match to the project and, when required, transcodes the decoded
 // clip to AAC in memory. Returns a short description for the status line.
 std::string applyImportedAudio(UiState &state, bool allowTranscode) {
     Project &project = state.project;
     if (project.audio.codec.empty() && !state.clip.valid()) return std::string();
     const int sourceKbps = static_cast<int>(project.audio.bitRate / 1000);
-    const AudioMatch match =
-        matchAudioEncoder(project.audio.codec, sourceKbps, project.output.container);
+    const AudioEncoderChoice match =
+        chooseAudioEncoder(project.audio.codec, sourceKbps, project.output.container,
+                           [](const std::string &id) { return ffmpeg::hasEncoder(id); });
     if (allowTranscode) {
         state.clip.clearTranscodedAudio();
         project.audio.transcodedAac = false;
@@ -488,6 +389,23 @@ void refreshOutputAudio(UiState &state) {
     applyImportedAudio(state, false);
 }
 
+void refreshShaderPorts(UiState &state, Node &node, bool force) {
+    if (node.kind != "render.shader") return;
+    const std::string path = node.pstr("shader");
+    const auto it = state.shaderPortKey.find(node.id);
+    if (!force && it != state.shaderPortKey.end() && it->second == path) return;
+    state.shaderPortKey[node.id] = path;
+    std::string error;
+    if (!Registry::applyShaderPorts(node, state.renderer.shaders(), &error)) {
+        setStatus(state, "Shader inputs: " + error, true);
+    }
+}
+
+void updateExportExtension(UiState &state) {
+    state.exportPath = exportPathForContainer(state.exportPath, state.project.output.container,
+                                              state.projectDirectory);
+}
+
 void newProject(UiState &state) {
     state.project.resetToDefault();
     selectNode(state, state.project.graph.sinkNodeId());
@@ -495,6 +413,8 @@ void newProject(UiState &state) {
     state.playing = false;
     state.clip.stopPreview();
     state.analysis.reset();
+    state.shaderPortKey.clear();
+    updateExportExtension(state);  // the container went back to the default
     setStatus(state, "New project created");
 }
 
@@ -660,11 +580,13 @@ bool dialogOpen(const UiState &state) {
 void loadProjectFile(UiState &state, const std::string &path) {
     std::string error;
     Project loaded;
-    if (!loaded.load(path, &error)) {
+    if (!loaded.load(path, &error, &state.renderer.shaders())) {
         setStatus(state, "Could not open project: " + error, true);
         return;
     }
     state.project = loaded;
+    state.shaderPortKey.clear();
+    for (Node &node : state.project.graph.nodes) refreshShaderPorts(state, node, true);
     state.projectDirectory = Project::directoryOf(path);
     state.selectedNode = state.project.view.selectedNode;
     if (!state.project.audio.path.empty()) {
@@ -684,6 +606,7 @@ void loadProjectFile(UiState &state, const std::string &path) {
         }
     }
     state.playhead = std::clamp(state.project.view.playhead, 0.0, 1e9);
+    updateExportExtension(state);  // follow the container stored in the project
     setStatus(state, "Opened " + path);
 }
 
@@ -1088,7 +1011,7 @@ int runApp(int argc, char **argv) {
     ui::setDarkTheme(state.preferences.defaultDarkTheme);
     state.project.resetToDefault();
     selectNode(state, state.project.graph.sinkNodeId());
-    state.exportPath = state.projectDirectory + "/output.mp4";
+    updateExportExtension(state);  // "output.<container>" next to the project
     // The chrome is positioned in screen coordinates, so the layout has to exist
     // before it is built.
     computeLayout(state, static_cast<float>(GetScreenWidth()), static_cast<float>(GetScreenHeight()));

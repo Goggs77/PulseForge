@@ -17,6 +17,7 @@
 
 #include "core/Project.h"
 #include "core/Registry.h"
+#include "core/TextEdit.h"
 #include "dsp/Analysis.h"
 #include "dsp/AudioClip.h"
 #include "export/Exporter.h"
@@ -324,6 +325,371 @@ int main(int argc, char **argv) {
                             result = fail("math block outputs are wrong");
                         }
                     }
+                }
+            }
+
+            // --- export the real thing ------------------------------------
+            // --- shader blocks: derived ports and legacy migration ---------
+            if (result == 0) {
+                bool ok = true;
+                std::string what;
+                Graph shaderGraph;
+                Node *shaderNode = shaderGraph.addNode("render.shader", 0, 0);
+                if (!shaderNode) {
+                    ok = false;
+                    what = "the Shader block is not registered";
+                } else {
+                    const std::vector<PortDesc> &defaults = shaderNode->inputPorts();
+                    if (defaults.size() != 1 || defaults[0].type != PortType::Image) {
+                        ok = false;
+                        what = "a Shader block without a file should only show uPrev";
+                    }
+                    shaderNode->setText("shader", "assets/shaders/spiral_tunnel.glsl");
+                    std::string shaderError;
+                    if (ok &&
+                        !Registry::applyShaderPorts(*shaderNode, renderer.shaders(), &shaderError)) {
+                        ok = false;
+                        what = "apply shader ports: " + shaderError;
+                    }
+                    if (ok) {
+                        std::vector<std::string> names;
+                        for (const PortDesc &port : shaderNode->inputPorts()) {
+                            names.push_back(port.name);
+                        }
+                        auto has = [&](const char *name) {
+                            return std::find(names.begin(), names.end(), name) != names.end();
+                        };
+                        // spiral_tunnel.glsl uses uUser[0], uUser[1] and both colours.
+                        if (!has("uPrev") || !has("uUser[0]") || !has("uUser[1]") ||
+                            !has("uColorA") || !has("uColorB")) {
+                            ok = false;
+                            what = "the ports do not follow the uniforms of the shader";
+                        }
+                    }
+                }
+
+                // A retired "shader.pass" node load: a file makes it a Shader
+                // block, a built-in preset makes it Spectrum.
+                if (ok) {
+                    const std::string legacyPath = "selftest_legacy.pforge";
+                    std::ofstream legacyFile(legacyPath.c_str(), std::ios::binary);
+                    legacyFile << R"({
+  "application": "PulseForge",
+  "version": 1,
+  "name": "Legacy",
+  "video": { "width": 320, "height": 180, "fps": 30 },
+  "output": { "container": "mp4" },
+  "media": {},
+  "blocks": [
+    { "id": 1, "kind": "shader.pass", "title": "Shader Pass", "x": 0, "y": 0, "enabled": true,
+      "params": { "shader": "assets/shaders/spiral_tunnel.glsl", "preset": 3 } },
+    { "id": 2, "kind": "shader.pass", "title": "Shader Pass", "x": 200, "y": 0, "enabled": true,
+      "params": { "shader": "", "preset": 4 } }
+  ],
+  "connections": []
+})";
+                    legacyFile.close();
+                    Project legacy;
+                    std::string legacyError;
+                    if (!legacy.load(legacyPath, &legacyError, &renderer.shaders())) {
+                        ok = false;
+                        what = "legacy project failed to load: " + legacyError;
+                    } else {
+                        const Node *withFile = legacy.graph.find(1);
+                        const Node *withPreset = legacy.graph.find(2);
+                        const bool fileOk =
+                            withFile && withFile->kind == "render.shader" &&
+                            withFile->inputPorts().size() > 1;  // ports came from the file
+                        const bool presetOk = withPreset && withPreset->kind == "render.spectrum";
+                        if (!fileOk || !presetOk) {
+                            ok = false;
+                            what = "shader.pass was not migrated to Shader/Spectrum";
+                        }
+                    }
+                }
+
+                if (ok) {
+                    std::printf("  shader   : derived ports (uPrev/uUser/uColour) and "
+                                "shader.pass migration ok\n");
+                } else {
+                    result = fail("shader block: " + what);
+                }
+
+                // The export file name has to follow the output container.
+                if (result == 0) {
+                    const std::string renamed =
+                        exportPathForContainer("C:/out/output.mp4", "webm", "C:/out");
+                    const std::string appended =
+                        exportPathForContainer("C:/out/my clip", "avi", "C:/out");
+                    const std::string fresh = exportPathForContainer("", "mkv", "C:/out");
+                    if (renamed != "C:/out/output.webm" || appended != "C:/out/my clip.avi" ||
+                        fresh != "C:/out/output.mkv") {
+                        result = fail("export path does not follow the container");
+                    } else {
+                        std::printf("  export   : file name follows the container\n");
+                    }
+                }
+
+                // GPU encoders: the table has to suit the container and the
+                // ffmpeg arguments have to use the per-family quality options.
+                if (result == 0) {
+                    bool ok = true;
+                    std::string what;
+                    auto has = [](const std::vector<std::string> &list, const std::string &id) {
+                        return std::find(list.begin(), list.end(), id) != list.end();
+                    };
+                    const std::vector<std::string> webm = videoEncodersForContainer("webm");
+                    if (has(webm, "libx264") || !has(webm, "libvpx-vp9")) {
+                        ok = false;
+                        what = "the WebM encoder list offers codecs the container cannot take";
+                    }
+                    if (!videoEncoderIsHardware("h264_nvenc") ||
+                        videoEncoderIsHardware("libx264")) {
+                        ok = false;
+                        what = "the hardware flag is wrong";
+                    }
+                    auto commandFor = [&](const std::string &codec) {
+                        Project probe = project;
+                        probe.output.container = "mp4";
+                        probe.output.videoCodec = codec;
+                        ExportRequest request;
+                        request.outputPath = "probe.mp4";
+                        return Exporter::describeCommand(
+                            Exporter::buildCommand(probe, request, 1));
+                    };
+                    const std::string nvenc = commandFor("h264_nvenc");
+                    const std::string x264 = commandFor("libx264");
+                    const std::string qsv = commandFor("h264_qsv");
+                    const std::string hevc = commandFor("hevc_nvenc");
+                    if (nvenc.find("-cq") == std::string::npos ||
+                        nvenc.find("-crf") != std::string::npos) {
+                        ok = false;
+                        what = "NVENC should use -cq, not -crf";
+                    }
+                    if (x264.find("-crf") == std::string::npos) {
+                        ok = false;
+                        what = "x264 lost its -crf";
+                    }
+                    if (qsv.find("-global_quality") == std::string::npos) {
+                        ok = false;
+                        what = "Quick Sync should use -global_quality";
+                    }
+                    if (hevc.find("hvc1") == std::string::npos) {
+                        ok = false;
+                        what = "HEVC in MP4 needs the hvc1 tag";
+                    }
+                    if (ok) {
+                        std::printf("  encoders : per-family options ok, NVENC runs: %s\n",
+                                    ffmpeg::canRunVideoEncoder("h264_nvenc") ? "yes" : "no");
+                    } else {
+                        result = fail("video encoders: " + what);
+                    }
+                }
+
+                // Audio codec matching: a PCM file must not become raw PCM in a
+                // Matroska file (players decode that to silence), while a
+                // container that cannot take FLAC keeps PCM.
+                if (result == 0) {
+                    const bool allAvailable = true;
+                    auto anyEncoder = [&](const std::string &) { return allAvailable; };
+                    const AudioEncoderChoice mkvPcm =
+                        chooseAudioEncoder("pcm_f32le", 6144, "mkv", anyEncoder);
+                    const AudioEncoderChoice aviPcm =
+                        chooseAudioEncoder("pcm_s16le", 1536, "avi", anyEncoder);
+                    const AudioEncoderChoice webmOpus =
+                        chooseAudioEncoder("opus", 141, "webm", anyEncoder);
+                    const AudioEncoderChoice opusToMp4 =
+                        chooseAudioEncoder("opus", 141, "mp4", anyEncoder);
+                    const bool pcmOk = mkvPcm.encoder == "flac" && !mkvPcm.transcodeToAac;
+                    const bool aviOk = aviPcm.encoder == "pcm_s16le";
+                    const bool webmOk = webmOpus.encoder == "libopus";
+                    // Opus cannot go into MP4 here, so it becomes AAC in memory.
+                    const bool mp4Ok = opusToMp4.transcodeToAac && opusToMp4.encoder == "aac";
+                    if (!pcmOk || !aviOk || !webmOk || !mp4Ok) {
+                        result = fail("audio encoder matching: mkv pcm=" + mkvPcm.encoder +
+                                      " avi pcm=" + aviPcm.encoder + " webm opus=" +
+                                      webmOpus.encoder + " mp4 opus=" + opusToMp4.encoder);
+                    } else {
+                        std::printf("  audio    : PCM->FLAC in Matroska, container rules ok\n");
+                    }
+                }
+            }
+
+            // --- a real GPU export when the machine can do it --------------
+            if (result == 0 && ffmpeg::canRunVideoEncoder("h264_nvenc")) {
+                Project gpu = project;
+                gpu.output.container = "mp4";
+                gpu.output.videoCodec = "h264_nvenc";
+                gpu.video.width = 640;
+                gpu.video.height = 360;
+                gpu.video.useAudioDuration = false;
+                gpu.video.duration = 1.0;
+                ExportRequest request;
+                request.outputPath = "selftest_nvenc.mp4";
+                request.overwrite = true;
+                request.audioSampleRate = 48000;
+                std::string gpuError;
+                const bool gpuOk = Exporter::run(renderer, gpu, request, clip.buffer(), analysis,
+                                                nullptr, nullptr, &gpuError);
+                if (!gpuOk) {
+                    result = fail("NVENC export: " + gpuError);
+                } else {
+                    const MediaInfo gpuInfo = ffmpeg::probe("selftest_nvenc.mp4");
+                    if (!gpuInfo.ok || gpuInfo.videoCodec != "h264") {
+                        result = fail("NVENC export produced " +
+                                      (gpuInfo.ok ? gpuInfo.videoCodec : std::string("nothing")));
+                    } else {
+                        std::printf("  gpu      : NVENC export ok (%s + %s, %.2f s)\n",
+                                    gpuInfo.videoCodec.c_str(), gpuInfo.codec.c_str(),
+                                    gpuInfo.duration);
+                    }
+                }
+            }
+
+            // --- export the real thing ------------------------------------
+            // --- single line text editing ---------------------------------
+            if (result == 0) {
+                auto run = [](TextEditState &edit, const TextEditKeys &keys) {
+                    return applyTextEditKeys(edit, keys);
+                };
+                bool ok = true;
+                std::string what;
+
+                TextEditState arrows;
+                arrows.begin("hello world");
+                TextEditKeys keys;
+                keys.left = true;
+                run(arrows, keys);
+                if (arrows.caret() != 10) {
+                    ok = false;
+                    what = "left arrow";
+                }
+                keys = TextEditKeys{};
+                keys.home = true;
+                run(arrows, keys);
+                if (arrows.caret() != 0) {
+                    ok = false;
+                    what = "home";
+                }
+                keys = TextEditKeys{};
+                keys.end = true;
+                run(arrows, keys);
+                if (arrows.caret() != 11) {
+                    ok = false;
+                    what = "end";
+                }
+
+                // SHIFT+HOME selects everything and typing replaces it.
+                keys = TextEditKeys{};
+                keys.home = true;
+                keys.shift = true;
+                run(arrows, keys);
+                if (!arrows.hasSelection() || arrows.selection() != "hello world") {
+                    ok = false;
+                    what = "shift+home selection";
+                }
+                keys = TextEditKeys{};
+                keys.typed = "bye";
+                run(arrows, keys);
+                if (arrows.text() != "bye" || arrows.caret() != 3) {
+                    ok = false;
+                    what = "typing over a selection";
+                }
+
+                // Mouse-style placement plus shift extension in both directions.
+                arrows.setCaret(1, false);
+                arrows.setCaret(3, true);
+                if (arrows.selection() != "ye") {
+                    ok = false;
+                    what = "shift extension";
+                }
+
+                // Word jumps and word deletion (Ctrl+arrows / Ctrl+backspace).
+                if (textIndexWordLeft("alpha beta gamma", 16) != 11 ||
+                    textIndexWordLeft("alpha beta gamma", 11) != 6 ||
+                    textIndexWordRight("alpha beta gamma", 0) != 5) {
+                    ok = false;
+                    what = "word jumps";
+                }
+                TextEditState words;
+                words.begin("alpha beta");
+                keys = TextEditKeys{};
+                keys.backspace = true;
+                keys.ctrl = true;
+                run(words, keys);
+                if (words.text() != "alpha ") {
+                    ok = false;
+                    what = "ctrl+backspace";
+                }
+
+                // Backspace and Delete at the caret.
+                TextEditState erase;
+                erase.begin("abc");
+                erase.setCaret(1, false);
+                erase.erase(false);
+                if (erase.text() != "bc") {
+                    ok = false;
+                    what = "backspace";
+                }
+                erase.setCaret(0, false);
+                erase.erase(true);
+                if (erase.text() != "c") {
+                    ok = false;
+                    what = "delete";
+                }
+
+                // Cut / paste round trip.
+                TextEditState clip;
+                clip.begin("copy me");
+                clip.selectAll();
+                keys = TextEditKeys{};
+                keys.cut = true;
+                const TextEditApplied cut = run(clip, keys);
+                if (!cut.copied || cut.clipboard != "copy me" || !clip.text().empty()) {
+                    ok = false;
+                    what = "cut";
+                }
+                keys = TextEditKeys{};
+                keys.paste = true;
+                keys.clipboard = cut.clipboard;
+                run(clip, keys);
+                if (clip.text() != "copy me" || clip.caret() != 7) {
+                    ok = false;
+                    what = "paste";
+                }
+
+                // Enter keeps the typed text, Escape puts the old value back.
+                TextEditState finish;
+                finish.begin("start");
+                keys = TextEditKeys{};
+                keys.typed = "!";
+                run(finish, keys);
+                keys = TextEditKeys{};
+                keys.commit = true;
+                const TextEditApplied committed = run(finish, keys);
+                if (!committed.finished || !committed.commit || finish.text() != "start!") {
+                    ok = false;
+                    what = "enter commit";
+                }
+                // The widget ends the edit on commit; the next edit starts from
+                // the committed value, and Escape restores that value.
+                finish.begin(finish.text());
+                keys = TextEditKeys{};
+                keys.typed = "XX";
+                run(finish, keys);
+                keys = TextEditKeys{};
+                keys.cancel = true;
+                const TextEditApplied cancelled = run(finish, keys);
+                if (!cancelled.finished || cancelled.commit || finish.text() != "start!") {
+                    ok = false;
+                    what = "escape restore";
+                }
+
+                if (ok) {
+                    std::printf("  textedit : arrows, home/end, shift selection, replace, word "
+                                "jumps, cut/paste, enter/escape ok\n");
+                } else {
+                    result = fail("text editing: " + what);
                 }
             }
 

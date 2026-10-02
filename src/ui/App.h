@@ -3,6 +3,7 @@
 
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "core/Project.h"
@@ -115,6 +116,8 @@ struct UiState {
     double lastUiFps = 0.0;
     int shaderPasses = 0;
     int pooledTargets = 0;
+    // Last shader path a Shader block's ports were derived from, keyed by block.
+    std::unordered_map<int, std::string> shaderPortKey;
 
     // analysis progress
     bool analyzing = false;
@@ -165,9 +168,15 @@ void showConfirm(UiState &state, const std::string &title, const std::string &te
 // Re-derives the output audio codec/bitrate from the imported media, e.g. after
 // the container changes. Never transcodes; it only re-points the settings.
 void refreshOutputAudio(UiState &state);
+// Rebuilds a Shader block's input ports from its .glsl file. Cached per block,
+// so calling it every frame only rescans when the path changed (or `force`).
+void refreshShaderPorts(UiState &state, Node &node, bool force = false);
 // Starts the render for the current export path, first asking for confirmation
 // when the audio settings would audibly downgrade the imported media.
 void requestExport(UiState &state);
+// Keeps the export file name's extension in step with the output container, so
+// switching to WebM does not keep writing "output.mp4".
+void updateExportExtension(UiState &state);
 Rectangle nodeBounds(const Graph &graph, const Node &node);
 
 int runApp(int argc, char **argv);

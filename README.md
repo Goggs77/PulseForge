@@ -1,14 +1,15 @@
 # PulseForge
 
-A programmable audio-reactive video synthesiser. Load any audio file ffmpeg can
+A programmable, lightweight, fast, audio-reactive video synthesiser. Load any audio file ffmpeg can
 read, patch a flow graph of DSP, modulation, timing, shader and geometry blocks,
 watch it render live, then export it to any container/codec ffmpeg supports.
 
-```
-Audio Source ──▶ Spectrum Analyzer ──▶ Frequency Band ──┐
-                                                        ├─▶ Shader Pass ──▶ Geometry ──▶ Post FX ──▶ Video Output
-Automation ──▶ LFO ──▶ Amount/VCA ──────────────────────┘
-```
+![Project Example](./docs/Overlay.png)
+
+## Developmental Notes
+
+This project is built with deepseek-flash under manual supervision.
+The app is still in early stages, so expect minor bugs.
 
 ## Contents
 
@@ -26,7 +27,7 @@ Automation ──▶ LFO ──▶ Amount/VCA ───────────�
 
 ## What it does
 
-- **Any input format.** Audio is decoded through ffmpeg, so wav/mp3/flac/ogg/
+- **Any\* input format.** Audio is decoded through ffmpeg, so wav/mp3/flac/ogg/
   m4a/opus/aiff/... all work, at any sample rate or channel count. The clip is
   decoded once to 32-bit float for analysis and preview, **at the rate it was
   recorded at** (nothing is resampled on import). Files above 100 MB or
@@ -38,11 +39,10 @@ Automation ──▶ LFO ──▶ Amount/VCA ───────────�
   build has no encoder for the source, the decoded audio is converted to AAC
   **in memory** at the best bitrate the format carries and that stream is copied
   out during export, so nothing is encoded twice.
-- **Programmable pipeline.** A flow graph of blocks with typed ports
-  (Audio, Analysis, Scalar, Colour, Image). Connections are type-checked and
-  cycles are rejected.
+- **Visualized Programmable pipeline.** A flow graph of blocks with typed ports.
+  Connections are type-checked and cycles are rejected.
 - **GPU rendering.** Blocks render through OpenGL 3.3 render targets. Shader
-  blocks run your own `.glsl` files, or one of the built-in effects.
+  blocks run your own `.glsl` files, while Spectrum uses one of the built-in effects.
 - **Real automation.** Every automation block owns a keyframed curve that you
   edit inside the block itself, with a unipolar (0..1) / bipolar (-1..1) switch,
   and drive any scalar input, including other modulation blocks.
@@ -50,32 +50,28 @@ Automation ──▶ LFO ──▶ Amount/VCA ───────────�
   piped to ffmpeg as raw RGBA, so MP4/H.264, WebM/VP9, MKV, MOV and AVI all work
   with a single code path. The audio comes straight from the source file.
 - **Drag and drop.** Drop an audio file or a `.pforge` project onto the window.
-  Audio above 100 MB or above 192 kHz is refused with an explanation, because it
-  cannot be decoded, analysed and previewed in real time.
+  Audio above 100 MB or above 192 kHz is refused with an explanation,
+  I guess realtime for this kind of quality is absurd,
+  but you can remove this for experiments.
 - **Preferences.** A preferences dialog holds the startup theme and the GUI
   scaling factor, next to the project's own information and metadata.
 
 ## Requirements
 
 - Windows with an OpenGL 3.3 capable GPU (developed and verified on a GTX 1660 Ti).
-- MinGW-w64 GCC 11 or newer (`D:\Qt\Tools\mingw1120_64` was used here) or MSVC.
+- MinGW-w64 GCC 11 or newer or MSVC.
 - CMake 3.20+ and Ninja.
 - `ffmpeg` and `ffprobe` on `PATH` (the WinGet build is picked up automatically).
 - [CrystalGUI](https://github.com/anstropleuton/crystalgui) sources, including
   its raylib submodule. The build looks for `third_party/crystalgui` first and
-  then for the sibling checkout `../crystalgui`, which is where it lives on this
-  machine.
+  then for the sibling checkout `../crystalgui`.
 
 ## Building
 
 ```powershell
-$env:Path = 'D:\Qt\Tools\mingw1120_64\bin;D:\Qt\Tools\Ninja;' + $env:Path
-cmake -S . -B build -G Ninja `
-  -DCMAKE_BUILD_TYPE=Release `
-  -DCMAKE_C_COMPILER=D:/Qt/Tools/mingw1120_64/bin/gcc.exe `
-  -DCMAKE_CXX_COMPILER=D:/Qt/Tools/mingw1120_64/bin/g++.exe `
-  -DCMAKE_RC_COMPILER=D:/Qt/Tools/mingw1120_64/bin/windres.exe
-cmake --build build --parallel
+cd build
+cmake -S .. -B . -G Ninja
+cmake --build . --parallel
 ```
 
 The executable lands in `build/bin/PulseForge.exe`. The post-build step copies
@@ -96,7 +92,7 @@ Useful cache options:
 ```powershell
 cd build/bin
 ./PulseForge.exe                     # start empty, then load audio
-./PulseForge.exe track.flac          # start with audio loaded
+./PulseForge.exe yourTrack.flac          # start with audio loaded
 ./PulseForge.exe project.pforge      # open a saved project
 ./PulseForge.exe --shot out.png track.wav           # off-screen capture of the editor
 ./PulseForge.exe --size 2560x1440 --shot ui.png     # capture at a specific size
@@ -170,11 +166,11 @@ changes.
 
 The **Prefs** button (or `Ctrl+,`) opens a dialog with:
 
-* **Default theme** - dark or light, applied at startup.
-* **GUI scaling** - 0.75x to 2x. Every widget metric, panel size and label is
+- **Default theme** - dark or light, applied at startup.
+- **GUI scaling** - 0.75x to 2x. Every widget metric, panel size and label is
   multiplied by it, which is also the knob for making the text larger or
   smaller.
-* **Project information and metadata** - project name, target resolution,
+- **Project information and metadata** - project name, target resolution,
   target frame rate, duration (following the audio or fixed), output container,
   codec pair, quality (CRF), audio bitrate, output sample rate (48 kHz by
   default) and encoder preset.
@@ -184,27 +180,51 @@ executable when *Save preferences* is pressed.
 
 ### Editor behaviour worth knowing
 
-* **Sliders** can be dragged, or **double-clicked** to type an exact value.
+- **Sliders** can be dragged, or **double-clicked** to type an exact value.
   Whatever you enter is clamped to the slider's range and the handle jumps to
   match.
-* **Dropdown lists** scroll with the wheel and show a scroll bar when the
+- **Frequency sliders are logarithmic**: the Low/High Hz controls in Frequency
+  Band map the track the way the ear and the analysis bands divide the
+  spectrum, and their readouts are whole Hz instead of scientific notation.
+- **GPU encoding is available per project**: the Output section's *Video* row
+  lists the encoders this ffmpeg build carries for the chosen container, with
+  the GPU families marked (NVENC, Quick Sync, AMF) next to the CPU ones. The
+  choice is stored in the project file (`output.videoCodec`) and each family
+  gets the right quality options (CRF for x264/x265/SVT-AV1, `-cq` for NVENC,
+  `-global_quality` for Quick Sync, `-qp_i/-qp_p` for AMF). Before a GPU export
+  starts the encoder is probed once; if the machine cannot run it, you are
+  offered the software fallback instead of a failed render.
+- **The audio encoder is a project setting too**: the Output section's *Audio*
+  row offers the encoders the container can mux and this ffmpeg build carries
+  (AAC, Opus, Vorbis, FLAC, ALAC, MP3, AC-3, E-AC-3, PCM). Importing audio picks
+  the matching encoder automatically - with one exception: a PCM file imported
+  into a Matroska project becomes **FLAC** instead of raw PCM, because many
+  players decode PCM-in-MKV to silence (and it is twice the size). Matroska now
+  defaults to AAC for the same compatibility reason; FLAC and Opus are one click
+  away when you want them.
+- **Dropdown lists** scroll with the wheel and show a scroll bar when the
   enumeration is longer than the box; options never spill outside it.
-* **While a dialog or list is open**, everything behind it stops responding to
+- **While a dialog or list is open**, everything behind it stops responding to
   clicks and hover, including the CrystalGUI chrome buttons.
-* **Preview playback is audible**: the decoded clip is streamed to the audio
+- **Preview playback is audible**: the decoded clip is streamed to the audio
   device in whole 2 KiB sub-buffers, so pressing *Play* plays the track at its
   original rate while the playhead follows the frames that were actually
   handed to the device. Seeking and looping restart the stream at the new
   position.
-* **Starting an export reminds you** when the configured audio bitrate is far
+- **Starting an export reminds you** when the configured audio bitrate is far
   below the imported file (below 80%), with the source and target rates spelled
   out; *Continue* renders anyway and *Cancel* returns to the dialog.
-* **Colour fields** open an HSV picker: a hue/saturation wheel with a pivot, a
+- **Inspector descriptions** are drawn with the same atlas-backed font as the
+  rest of the UI and wrap to the panel width, with the height measured instead
+  of estimated - they stay readable (and complete) at every GUI scale. The same
+  applies to dialog messages and the help overlay, which scrolls when it does
+  not fit.
+- **Color fields** open an HSV picker: a hue/saturation wheel with a pivot, a
   black-to-full-value bar with its own pivot, and RGB/HSV boxes underneath that
   stay in sync with the pivots in both directions. *Select* keeps the colour,
   *Cancel* (or Escape) restores the previous one, and clicking anywhere else
   behaves like *Select*.
-* **Vector ports widen automatically**: a Vector2 or Vector3 output can be
+- **Vector ports widen automatically**: a Vector2 or Vector3 output can be
   plugged into a Vector4 input, with the missing components filled with 0, and
   Vector2 into Vector3 the same way.
 
@@ -255,9 +275,9 @@ Arithmetic, Automation, Matrix and Determinant show a symbol in the middle of
 their block (`+`, `-`, `x`, `/`, `<=`, `>=`, `%`, `0..1`, `+/-`, `3x3`) so the
 pipeline can be read without opening the inspector.
 
-Vector and matrix outputs are consumed by the `Vector2/3/4` and `Matrix` inputs
-on **Shader Pass** (exposed as `uVector2`, `uVector3`, `uVector4`, `uMatrix`) and
-by the **Position** input on **Geometry**.
+Vector and matrix outputs are consumed by the `uVector2/3/4` and `uMatrix`
+inputs of a **Shader** block whose file declares them, and by the **Position**
+input on **Geometry**.
 
 ### Modulation
 
@@ -271,7 +291,8 @@ by the **Position** input on **Geometry**.
 
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
-| Shader Pass | Prev, u0..u7 | Image | Runs a `.glsl` fragment shader or a built-in effect; `u0..u7` become `uUser[0..7]` |
+| Spectrum | Analysis, Scale, Feedback, Colour A/B | Image | Draws the analysis with a built-in spectrum effect; the Scale/Feedback/Colour inputs modulate the matching parameters |
+| Shader | uPrev, ...derived | Image | Applies a `.glsl` file to the incoming image; the ports follow the uniforms the file uses (`uPrev`, `uInput2`, `uUser[0..7]`, `uColorA/B`, `uVector2/3/4`, `uMatrix`). Compile errors are reported on the block instead of silently falling back |
 | Blend | A, B | Image | Cross fade, add, screen, multiply, difference, overlay, min, max |
 | Post FX | Image, 8 scalars | Image | Bloom, chromatic aberration, vignette, grain, scanlines, feedback, saturation, hue |
 | Geometry | Layer, Scale, Rotation, X, Y | Image | Circle, ring, radial bars, bar spectrum, waveform ring/line, polygon grid, sparks, orbit, text |
@@ -284,10 +305,15 @@ by the **Position** input on **Geometry**.
 
 ## Writing shaders
 
-A shader block points at a `.glsl` file (the file picker in the inspector writes
-the path into the block). If the file does **not** start with `#version`, the
-PulseForge preamble is prepended, so the body only needs a `main()` that writes
-`finalColor`.
+The **Shader** block points at a `.glsl` file (the file picker in the inspector
+writes the path into the block) and applies it to the incoming image. Its input
+ports are **derived from the file**: only the uniforms the source actually uses
+get a port, so a shader that reads `uUser[0]`, `uUser[1]` and both colours shows
+exactly those four inputs next to `uPrev`. Changing the file (or pressing
+*Reload shaders*) rebuilds the ports; links are matched by uniform name.
+
+If the file does **not** start with `#version`, the PulseForge preamble is
+prepended, so the body only needs a `main()` that writes `finalColor`.
 
 ```glsl
 // assets/shaders/my_effect.glsl
@@ -316,10 +342,16 @@ Shaders that declare `#version` themselves are compiled verbatim, which is the
 escape hatch for porting existing GLSL (see
 `assets/shaders/minimal_selfcontained.glsl`).
 
-Built-in effects (usable without any file): `passthrough`, `solid`, `gradient`,
-`plasma`, `radial_spectrum`, `bars`, `waveform_scope`, `spectrogram`, `tunnel`,
-`kaleidoscope`, `starfield`, `bloom`, `chromatic`, `feedback_trail`, `vignette`,
-`blend`, `postfx`.
+Built-in effects live on the **Spectrum** block (Analysis in, Image out):
+`passthrough`, `solid`, `gradient`, `plasma`, `radial_spectrum`, `bars`,
+`waveform_scope`, `spectrogram`, `tunnel`, `kaleidoscope`, `starfield`, `bloom`,
+`chromatic`, `feedback_trail` and `vignette`. `blend` and `postfx` are internal
+effects used by their own blocks.
+
+Projects saved before the split keep loading: a `shader.pass` node with a file
+becomes a Shader block (its ports rebuilt from the file, links re-matched by
+name), one without a file becomes Spectrum and is wired to the project's
+Spectrum Analyzer.
 
 Shader files are hot-reloadable: edit and press `F5` (or use *Reload shaders* in
 the inspector).
@@ -420,14 +452,14 @@ immediate-mode widgets drawn with raylib inside the rectangles the app lays out.
 Three things learned from the library are worth recording, since the app works
 around all three:
 
-* `CguiTextElementData.text` stores the pointer it is given - label strings must
+- `CguiTextElementData.text` stores the pointer it is given - label strings must
   outlive the node tree. The app therefore draws chrome captions itself rather
   than creating label nodes.
-* CrystalGUI's label component renders glyphs incorrectly in this build (letters
+- CrystalGUI's label component renders glyphs incorrectly in this build (letters
   come out as neighbouring glyphs), and node names are reset when instances sync
   from the template, so the palette binds each button to its block kind through
   a side table rather than through the node name.
-* Absolute transformations are in screen coordinates, not parent-relative, and
+- Absolute transformations are in screen coordinates, not parent-relative, and
   the root node paints a full-window background. Chrome is therefore rebuilt
   when the window resizes and only the chrome subtrees are drawn.
 

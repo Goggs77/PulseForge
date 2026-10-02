@@ -89,6 +89,31 @@ void showConfirm(UiState &state, const std::string &title, const std::string &te
 
 void requestExport(UiState &state) {
     Project &project = state.project;
+    // A GPU encoder can be listed by ffmpeg but unusable on this machine (an
+    // old card, a missing driver). Probe it once and offer the CPU fallback
+    // instead of failing halfway through a render.
+    const std::string codec = project.output.videoCodec;
+    if (videoEncoderIsHardware(codec) && !ffmpeg::canRunVideoEncoder(codec)) {
+        // Prefer a software encoder the container can take.
+        std::string fallback = "libx264";
+        for (const std::string &id : videoEncodersForContainer(project.output.container)) {
+            if (!videoEncoderIsHardware(id) && ffmpeg::hasEncoder(id)) {
+                fallback = id;
+                break;
+            }
+        }
+        char text[512];
+        std::snprintf(text, sizeof(text),
+                      "%s could not be initialised on this machine (no compatible GPU or "
+                      "driver).\n\nExport with %s instead?",
+                      videoEncoderLabel(codec).c_str(), videoEncoderLabel(fallback).c_str());
+        showConfirm(state, "GPU encoder unavailable", text, true, [&state, fallback]() {
+            state.project.output.videoCodec = fallback;
+            state.project.dirty = true;
+            requestExport(state);
+        });
+        return;
+    }
     if (exportDowngradesAudio(state)) {
         const int sourceKbps = static_cast<int>(project.audio.bitRate / 1000);
         const int targetKbps = parseAudioBitrateKbps(project.output.audioBitrate);
@@ -316,7 +341,9 @@ void drawBrowser(UiState &state) {
             }
         }
     }
-    if (ui::button(cancelBox, "Cancel") || IsKeyPressed(KEY_ESCAPE)) {
+    // Escape first leaves the filename field; a second press closes the dialog.
+    if (ui::button(cancelBox, "Cancel") ||
+        (!ui::keyboardCaptured() && IsKeyPressed(KEY_ESCAPE))) {
         browser.open = false;
     }
 }
@@ -338,8 +365,9 @@ void drawExportDialog(UiState &state) {
 
     ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 110.0f, cursor.height}, "Output file", 12.0f,
                         t.textDim);
+    const std::string placeholder = "output." + project.output.container;
     if (ui::textField(Rectangle{cursor.x + 110.0f, cursor.y, cursor.width - 210.0f, cursor.height},
-                      &state.exportPath, "output.mp4", 9002)) {
+                      &state.exportPath, placeholder.c_str(), 9002)) {
     }
     if (ui::button(Rectangle{cursor.x + cursor.width - 94.0f, cursor.y, 94.0f, cursor.height},
                    "Browse")) {
@@ -353,7 +381,8 @@ void drawExportDialog(UiState &state) {
                   "%dx%d  %.0f fps  %d frames  %.2f s  %s / %s  %d Hz  crf %d",
                   project.video.width, project.video.height, project.video.fps,
                   static_cast<int>(std::ceil(duration * project.video.fps)), duration,
-                  project.output.videoCodec.c_str(), project.output.audioCodec.c_str(),
+                  videoEncoderLabel(project.output.videoCodec).c_str(),
+                  audioEncoderLabel(project.output.audioCodec).c_str(),
                   project.output.audioSampleRate > 0 ? project.output.audioSampleRate : 48000,
                   project.output.crf);
     ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 20.0f}, summary, 12.0f, t.text);
@@ -394,6 +423,9 @@ void drawExportDialog(UiState &state) {
     if (index != before) {
         project.output = outputSpecForContainer(containers[static_cast<size_t>(index)]);
         refreshOutputAudio(state);
+        // The file name follows the container so the export does not write a
+        // WebM/AVI stream into an ".mp4" path.
+        updateExportExtension(state);
     }
     int crf = project.output.crf;
     if (ui::intSlider(Rectangle{cursor.x + 140.0f, cursor.y, cursor.width - 140.0f, 24.0f},
@@ -439,7 +471,7 @@ void drawExportDialog(UiState &state) {
         requestExport(state);
     }
     if (ui::button(cancelBox, "Close")) state.showExportDialog = false;
-    if (IsKeyPressed(KEY_ESCAPE)) state.showExportDialog = false;
+    if (!ui::keyboardCaptured() && IsKeyPressed(KEY_ESCAPE)) state.showExportDialog = false;
 }
 
 // Preferences: the application defaults plus the project's own information and
@@ -584,10 +616,11 @@ void drawPreferencesDialog(UiState &state) {
             spec.crf = p.output.crf;
             p.output = spec;
             refreshOutputAudio(state);
+            updateExportExtension(state);
             p.dirty = true;
         }
         char codecs[96];
-        std::snprintf(codecs, sizeof(codecs), "%s / %s", p.output.videoCodec.c_str(),
+        std::snprintf(codecs, sizeof(codecs), "%s / %s", videoEncoderLabel(p.output.videoCodec).c_str(),
                       audioCodecDisplayName(p.output.audioCodec).c_str());
         ui::drawTextClipped(Rectangle{cursor.x + ui::s(310.0f), cursor.y, cursor.width - ui::s(310.0f),
                                       row},
@@ -651,7 +684,10 @@ void drawPreferencesDialog(UiState &state) {
             showMessage(state, "Preferences", "Could not write " + state.preferencesPath, true);
         }
     }
-    if (ui::button(closeBox, "Close") || IsKeyPressed(KEY_ESCAPE)) state.showPreferences = false;
+    if (ui::button(closeBox, "Close") ||
+        (!ui::keyboardCaptured() && IsKeyPressed(KEY_ESCAPE))) {
+        state.showPreferences = false;
+    }
     ui::drawTextClipped(Rectangle{box.x + ui::s(18.0f), box.y + box.height - ui::s(42.0f),
                                   box.width - ui::s(280.0f), ui::s(28.0f)},
                         ("Saved to " + state.preferencesPath).c_str(), 10.5f, t.textDim);
@@ -662,19 +698,28 @@ void drawMessageBox(UiState &state) {
     const ui::Theme &t = ui::theme();
     const bool confirm = static_cast<bool>(state.messageConfirm);
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.6f));
-    const float width = std::min(520.0f, GetScreenWidth() - ui::s(40.0f));
-    const float height = ui::s(confirm ? 170.0f : 150.0f);
+    const float width = std::min(560.0f, GetScreenWidth() - ui::s(40.0f));
+    const float padding = ui::s(18.0f);
+    const float bodyWidth = width - padding * 2.0f;
+    // The box grows with the message instead of clipping it: these bodies are
+    // several wrapped lines long and were drawn through CrystalGUI's Pro text,
+    // which also rendered them too thin to read comfortably.
+    const float bodyHeight =
+        ui::textWrappedHeight(state.messageText.c_str(), 13.0f, bodyWidth);
+    const float height = std::min(GetScreenHeight() - ui::s(40.0f),
+                                  std::max(ui::s(confirm ? 170.0f : 150.0f),
+                                           ui::s(36.0f) + bodyHeight + ui::s(48.0f)));
     const Rectangle box{(GetScreenWidth() - width) * 0.5f, (GetScreenHeight() - height) * 0.5f,
                         width, height};
     ui::panel(box, state.messageTitle.c_str());
     DrawRectangleRoundedLines(box, 0.02f, 6, state.messageIsError ? t.danger : t.accent);
-    // Word-wrapped body: these messages carry an explanation and a suggested
-    // command, so they are several lines long.
-    CguiDrawTextPro(state.messageText.c_str(), t.body,
-                    Rectangle{box.x + ui::s(16.0f), box.y + ui::s(40.0f), box.width - ui::s(32.0f),
-                              height - ui::s(92.0f)},
-                    13.0f, 0.0f, 17.0f, state.messageIsError ? t.danger : t.text,
-                    CGUI_TEXT_JUSTIFY_BEGIN, CGUI_TEXT_JUSTIFY_BEGIN);
+    const Rectangle bodyRect{box.x + padding, box.y + ui::s(36.0f), bodyWidth,
+                             height - ui::s(84.0f)};
+    BeginScissorMode(static_cast<int>(bodyRect.x), static_cast<int>(bodyRect.y),
+                     static_cast<int>(bodyRect.width), static_cast<int>(bodyRect.height));
+    ui::drawTextWrapped(bodyRect, state.messageText.c_str(), 13.0f,
+                        state.messageIsError ? t.danger : t.text);
+    EndScissorMode();
     const Rectangle okBox{box.x + box.width - ui::s(110.0f), box.y + height - ui::s(40.0f),
                           ui::s(94.0f), ui::s(28.0f)};
     if (confirm) {
@@ -708,36 +753,60 @@ void drawHelpOverlay(UiState &state) {
     ui::panel(box, "PulseForge - how it works");
     DrawRectangleRoundedLines(box, 0.02f, 6, t.accent);
 
-    static const char *lines[] = {
-        "Blocks are connected by typed ports: Audio (amber), Analysis (green),",
-        "Scalar (blue), Image (violet) and Colour (pink).",
-        "",
-        "Typical chain",
-        "  Audio Source -> Spectrum Analyzer -> Frequency Band -> LFO / Automation",
-        "  -> Shader Pass (uUser[0..7] from the scalar ports) -> Geometry -> Post FX -> Video Output",
-        "",
-        "Shader Pass",
-        "  Point it at a .glsl file; the PulseForge preamble is prepended unless the file",
-        "  starts with #version. Available: pfUv(), pfPrev(), pfFeedback(), pfSpectrum(),",
-        "  pfWave(), pfFbm(), uTime, uBass/uMid/uTreble/uLevel/uOnset, uUser[8], uColorA/B,",
-        "  uVector2/uVector3/uVector4/uMatrix from the vector and matrix ports.",
-        "",
-        "Shortcuts",
-        "  Space play/pause      Ctrl+S save      Ctrl+O open      Ctrl+N new",
-        "  Ctrl+E export         Ctrl+, preferences   F2 preferences",
-        "  Del delete block      F5 reload shaders    H help",
-        "  Drag an audio file or .pforge onto the window to load it.",
-        "",
-        "Export",
-        "  Frames are rendered off-screen at the project resolution and piped to ffmpeg",
-        "  as raw RGBA, so any container/codec ffmpeg supports is available. The audio is",
-        "  taken straight from the source file and re-encoded, never re-sampled twice.",
-    };
-    float y = box.y + 40.0f;
-    for (const char *line : lines) {
-        ui::drawTextClipped(Rectangle{box.x + 18.0f, y, box.width - 36.0f, 18.0f}, line, 12.5f,
-                            palette::withAlpha(t.text, 0.95f));
-        y += 18.0f;
+    // One wrapped paragraph instead of hand-broken lines: the overlay keeps its
+    // layout at every GUI scale and long lines can no longer be clipped.
+    static const char *helpText =
+        "Blocks are connected by typed ports: Audio (amber), Analysis (green), Scalar (blue), "
+        "Image (violet) and Colour (pink).\n"
+        "\n"
+        "Typical chain\n"
+        "  Audio Source -> Spectrum Analyzer -> Frequency Band -> LFO / Automation -> Spectrum "
+        "(built-in effect) -> Shader (.glsl file) -> Geometry -> Post FX -> Video Output\n"
+        "\n"
+        "Spectrum and Shader\n"
+        "  Spectrum draws the analysis with a built-in effect; its Scale, Feedback and "
+        "Colour inputs can be modulated. Shader applies a .glsl file to an image and grows "
+        "exactly the input ports that file uses (uPrev, uInput2, uUser[0..7], uColorA/B, "
+        "uVector2/3/4, uMatrix). The PulseForge preamble is prepended unless the file "
+        "starts with #version; helpers: pfUv(), pfPrev(), pfFeedback(), pfSpectrum(), "
+        "pfWave(), pfFbm(), uTime, uBass/uMid/uTreble/uLevel/uOnset.\n"
+        "\n"
+        "Shortcuts\n"
+        "  Space play/pause     Ctrl+S save     Ctrl+O open     Ctrl+N new\n"
+        "  Ctrl+E export        Ctrl+, preferences    F2 preferences\n"
+        "  Del delete block     F5 reload shaders     H help\n"
+        "  Drag an audio file or .pforge onto the window to load it.\n"
+        "\n"
+        "Export\n"
+        "  Frames are rendered off-screen at the project resolution and piped to ffmpeg as "
+        "raw RGBA, so any container/codec ffmpeg supports is available. The audio keeps the "
+        "imported codec and bitrate whenever this ffmpeg build can encode them.";
+    // The body shrinks to fit when the GUI scale makes it taller than the panel,
+    // and scrolls if even the smallest size does not fit, so no line is ever
+    // clipped away.
+    const float bodyWidth = box.width - 36.0f;
+    const Rectangle bodyView{box.x + 18.0f, box.y + 38.0f, bodyWidth, box.height - 88.0f};
+    float bodySize = 12.5f;
+    while (bodySize > 9.0f &&
+           ui::textWrappedHeight(helpText, bodySize, bodyWidth) > bodyView.height) {
+        bodySize -= 0.5f;
+    }
+    static float helpScroll = 0.0f;
+    const float contentHeight = ui::textWrappedHeight(helpText, bodySize, bodyWidth);
+    const float maxScroll = std::max(0.0f, contentHeight - bodyView.height);
+    if (ui::hovered(bodyView) && GetMouseWheelMove() != 0.0f) {
+        helpScroll -= GetMouseWheelMove() * ui::s(48.0f);
+    }
+    helpScroll = std::clamp(helpScroll, 0.0f, maxScroll);
+    BeginScissorMode(static_cast<int>(bodyView.x), static_cast<int>(bodyView.y),
+                     static_cast<int>(bodyView.width), static_cast<int>(bodyView.height));
+    ui::drawTextWrapped(Rectangle{bodyView.x, bodyView.y - helpScroll, bodyWidth, 0.0f}, helpText,
+                        bodySize, palette::withAlpha(t.text, 1.0f));
+    EndScissorMode();
+    if (maxScroll > 0.0f) {
+        ui::scrollbar(Rectangle{bodyView.x + bodyView.width - ui::s(6.0f), bodyView.y,
+                                ui::s(5.0f), bodyView.height},
+                      &helpScroll, contentHeight, bodyView.height);
     }
     if (ui::button(Rectangle{box.x + box.width - 110.0f, box.y + box.height - 40.0f, 96.0f, 26.0f},
                    "Close")) {

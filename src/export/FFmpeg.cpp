@@ -6,6 +6,7 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <unordered_map>
 
 #include "core/Json.h"
 
@@ -160,6 +161,30 @@ bool ffmpeg::hasEncoder(const std::string &name) {
     return knownEncoders().count(name) > 0;
 }
 
+bool ffmpeg::canRunVideoEncoder(const std::string &name) {
+    if (name.empty()) return false;
+    static std::unordered_map<std::string, bool> cache;
+    const auto it = cache.find(name);
+    if (it != cache.end()) return it->second;
+
+    bool ok = false;
+    if (hasEncoder(name)) {
+        const std::vector<std::string> arguments = {
+            ffmpegPath(), "-hide_banner", "-nostdin", "-loglevel", "error",
+            "-f",         "lavfi",        "-i",       "color=black:s=320x240:r=30:d=0.5",
+            "-frames:v",  "1",            "-pix_fmt", "yuv420p",
+            "-c:v",       name,           "-f",       "null",
+            "-"};
+        ChildProcess probe;
+        if (probe.start(arguments, nullptr)) {
+            int exitCode = 0;
+            ok = probe.wait(&exitCode) && exitCode == 0;
+        }
+    }
+    cache[name] = ok;
+    return ok;
+}
+
 bool ffmpeg::encodeAacInMemory(const float *samples, long long frameCount, int channels,
                                int inputSampleRate, int outputSampleRate, int bitrateKbps,
                                std::vector<unsigned char> *out, std::string *error) {
@@ -264,6 +289,9 @@ MediaInfo ffmpeg::probe(const std::string &path) {
     const json::Value &streams = root["streams"];
     for (size_t i = 0; i < streams.size(); ++i) {
         const json::Value &stream = streams.at(i);
+        if (stream["codec_type"].asString() == "video" && info.videoCodec.empty()) {
+            info.videoCodec = stream["codec_name"].asString();
+        }
         if (stream["codec_type"].asString() != "audio") continue;
         info.sampleRate = std::atoi(stream["sample_rate"].asString("0").c_str());
         info.channels = stream["channels"].asInt(0);

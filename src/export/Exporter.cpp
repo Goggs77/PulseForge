@@ -66,7 +66,39 @@ std::vector<std::string> Exporter::buildCommand(const Project &project,
     // ---- video codec ---------------------------------------------------------
     args.push_back("-c:v");
     args.push_back(out.videoCodec);
-    if (out.videoCodec == "libvpx-vp9") {
+    const std::string family = videoEncoderFamily(out.videoCodec);
+    const std::string api = videoEncoderApi(out.videoCodec);
+    if (api == "nvenc") {
+        // Constant-quality VBR is the NVENC equivalent of CRF; `-b:v 0` lets the
+        // quality target drive the bitrate.
+        args.push_back("-preset");
+        args.push_back("p5");
+        if (family != "av1") {
+            args.push_back("-tune");
+            args.push_back("hq");
+        }
+        args.push_back("-rc");
+        args.push_back("vbr");
+        args.push_back("-cq");
+        args.push_back(std::to_string(std::clamp(out.crf, 0, 51)));
+        args.push_back("-b:v");
+        args.push_back(out.bitrateKbps > 0 ? std::to_string(out.bitrateKbps) + "k" : "0");
+    } else if (api == "qsv") {
+        // ICQ: the quality target behaves like CRF.
+        args.push_back("-global_quality");
+        args.push_back(std::to_string(std::clamp(out.crf, 1, 51)));
+        args.push_back("-look_ahead");
+        args.push_back("1");
+    } else if (api == "amf") {
+        args.push_back("-quality");
+        args.push_back("quality");
+        args.push_back("-rc");
+        args.push_back("cqp");
+        args.push_back("-qp_i");
+        args.push_back(std::to_string(std::clamp(out.crf, 1, 51)));
+        args.push_back("-qp_p");
+        args.push_back(std::to_string(std::clamp(out.crf, 1, 51)));
+    } else if (out.videoCodec == "libvpx-vp9") {
         args.push_back("-crf");
         args.push_back(std::to_string(out.crf));
         args.push_back("-b:v");
@@ -80,11 +112,22 @@ std::vector<std::string> Exporter::buildCommand(const Project &project,
     } else if (out.videoCodec == "mpeg4") {
         args.push_back("-qscale:v");
         args.push_back(std::to_string(std::max(1, out.crf)));
+    } else if (out.videoCodec == "libsvtav1") {
+        // SVT presets are numbers (0 = slowest/best, 13 = fastest).
+        args.push_back("-crf");
+        args.push_back(std::to_string(std::clamp(out.crf, 1, 63)));
+        args.push_back("-preset");
+        args.push_back("8");
     } else {
         args.push_back("-crf");
         args.push_back(std::to_string(out.crf));
         args.push_back("-preset");
         args.push_back(out.preset);
+    }
+    // HEVC in MP4/MOV needs the hvc1 tag to play in QuickTime/Apple players.
+    if (family == "hevc" && (out.container == "mp4" || out.container == "mov")) {
+        args.push_back("-tag:v");
+        args.push_back("hvc1");
     }
     args.push_back("-pix_fmt");
     args.push_back(out.pixelFormat);
