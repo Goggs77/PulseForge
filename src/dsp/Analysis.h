@@ -19,6 +19,14 @@ struct AnalysisSettings {
 
 // `progress` receives 0..1, return false from it to abort.
 AnalysisPtr analyzeAudio(const AudioBuffer &buffer, const AnalysisSettings &settings,
-                         const std::function<void(float)> &progress = {});
+                         const std::function<void(float)> &progress = {},
+                         const AudioPtr &source = {});
+
+// Analyses one FFT window ending at `time` (seconds in clip time). Used by the
+// Spectrum Analyzer for a processed Audio input, where no whole-file analysis
+// exists. The returned data holds a single frame and records where its window
+// starts so time lookups land on that frame.
+AnalysisPtr analyzeWindow(const AudioBuffer &buffer, double time, const AnalysisSettings &settings,
+                          const AudioPtr &source = {});
 
 }  // namespace pf

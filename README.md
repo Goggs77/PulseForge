@@ -254,13 +254,13 @@ executable when *Save preferences* is pressed.
 
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
-| Spectrum Analyzer | Audio | Analysis, Level, Onset, Bass, Mid, Treble | Access point to the precomputed FFT analysis |
+| Spectrum Analyzer | Audio | Analysis, Level, Onset, Bass, Mid, Treble | Analyses its own Audio input: the imported clip uses its whole-file analysis, a processed stream (Dynamics, DAC, ...) is measured live every frame, and an unconnected input outputs silence |
 | Frequency Band | Analysis | Value | Log-frequency range with average/peak/sum, shaping and attack/release |
 | Envelope Follower | Scalar | Scalar | Attack/release, threshold, gain, floor |
 | Curve / Remap | Scalar | Scalar | Input range to output range with power, smoothstep and clamping |
 | Dynamics | Audio, Pre-gain, Threshold, Ratio, Attack, Release, Post-gain | Audio | Zero-latency single-band compressor / downward expander with an optional 0 dBFS limiter (Hard Clip or Soft Clip and independent attack/release). The block draws dry and wet loudness in a 4:3 dBFS graph; the modulation ports follow the usual conventions (levels scale by `1 + input`, threshold adds 24 dB per unit, times shift by octaves) |
-| ADC | Audio | Value | Measures the current video frame's slice of the stream (RMS or Peak) so Math and Modulation blocks can process audio at frame rate |
-| DAC | Value | Audio | Turns one Scalar per video frame into samples at the clip's rate, ramping between frames by default; patch the output into an Audio Output to hear it |
+| ADC | Audio | Value | Carries the waveform and emits a per-frame control value: Unity (default) makes ADC -> DAC a lossless round trip, RMS/Peak follow loudness for Math and Modulation |
+| DAC | Value | Audio | Applies each frame's control value to the carried waveform sample-accurately; without a carrier the value becomes the sample itself. Patch it into an Audio Output to hear it |
 
 ### Math
 
@@ -471,6 +471,10 @@ Analysis is computed once per media load, in parallel across all cores: FFT
 frames (default 2048/512) are reduced to 64 log-spaced bands plus per-frame rms,
 level, spectral flux and onset, with a per-band auto-level pass so quiet material
 still animates.
+
+A **Spectrum Analyzer** whose Audio input is not the decoded clip (a Dynamics or
+DAC chain, for example) analyses a live FFT window for the current video frame
+instead, so the spectrum always belongs to the signal on its port.
 
 Rendering uses raylib's render targets with two deliberate deviations, both
 verified experimentally (see `docs/RENDERING_NOTES.md`):

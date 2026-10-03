@@ -573,7 +573,7 @@ void loadAudioFile(UiState &state, const std::string &path) {
     state.project.audio.fileSize = static_cast<long long>(fileSize);
 
     state.clip.buildOverview();
-    state.analysis = analyzeAudio(*state.clip.buffer(), AnalysisSettings{});
+    state.analysis = analyzeAudio(*state.clip.buffer(), AnalysisSettings{}, {}, state.clip.buffer());
     // Follow the imported media: same codec family and bitrate when this ffmpeg
     // build can carry it, otherwise a one-off AAC conversion held in memory.
     const std::string audioNote = applyImportedAudio(state, true);
@@ -698,7 +698,8 @@ void loadProjectFile(UiState &state, const std::string &path) {
         const int mediaRate =
             state.project.audio.sampleRate > 0 ? state.project.audio.sampleRate : 48000;
         if (state.clip.load(state.project.audio.path, mediaRate, &audioError)) {
-            state.analysis = analyzeAudio(*state.clip.buffer(), AnalysisSettings{});
+            state.analysis =
+                analyzeAudio(*state.clip.buffer(), AnalysisSettings{}, {}, state.clip.buffer());
             // The saved output settings are the user's, so they are kept; only
             // the in-memory AAC conversion the project was saved with has to be
             // reproduced.

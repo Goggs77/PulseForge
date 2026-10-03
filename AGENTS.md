@@ -51,7 +51,9 @@ metadata, text editing (caret, selection, clipboard), shader ports derived from 
 `.glsl` file and `shader.pass` migration, per-family encoder arguments and the
 audio matching rules, legacy Audio Output migration, ADC/DAC conversion, and the
 exclusive Audio Output routing (processed, dry and silent exports, plus the
-monitor's source/silent/processed decisions). When NVENC is usable it also
+monitor's source/silent/processed decisions). It also checks the ADC -> DAC
+Unity round trip (bit-exact), the carrier-shaped Math path, and the input-driven
+Spectrum Analyzer (silent / precomputed / live). When NVENC is usable it also
 renders a real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
@@ -188,11 +190,21 @@ docs         rendering notes and the README overlay image
   rewiring the Audio Output takes effect immediately; parameter edits apply on
   the next Play. Pre-rendered DAC buffers must not be overwritten by the live
   window path (`evalDac` keeps buffers larger than one video frame).
-- ADC/DAC are the bridge between the Audio and Scalar domains: ADC measures the
-  current video frame's slice of the stream (RMS/Peak), DAC synthesises that
-  frame's samples at the clip's rate and ramps between frames. Rendered buffers
-  record where their first sample sits with `AudioBuffer::startFrame`, which is
-  what lets a downstream ADC map `audioTime` onto a partially rendered buffer.
+- ADC/DAC are the bridge between the Audio and Scalar domains. ADC carries the
+  waveform as a hidden `Value::carrier` and emits a per-frame control value
+  (Unity by default, RMS/Peak as a follower); scalar blocks propagate the
+  carrier in `Graph::evaluate`, and DAC applies the control to the carried
+  waveform sample-accurately (so a Unity round trip is bit-exact) or
+  synthesises from the value when no carrier is present. Rendered buffers record
+  where their first sample sits with `AudioBuffer::startFrame`, which is what
+  lets a downstream ADC map `audioTime` onto a partially rendered buffer.
+- The Spectrum Analyzer is input-driven: it emits no Analysis when its Audio
+  port is unconnected, uses `ctx.analysis` only when that port is exactly the
+  decoded clip, and otherwise measures a live window with `analyzeWindow`.
+  `AnalysisData::originTime` maps that window in time, and
+  `AnalysisData::source` feeds the Spectrum block's spectrum/waveform textures
+  through `Renderer::uploadAnalysisTextures`. `analysisFrom` treats a connected
+  Analysis port as authoritative instead of falling back to the project clip.
 - `Project::ensureAudioOutput` upgrades files saved before `out.audio` existed,
   wiring it to the end of the chain the old exporter followed; `pf_migrate`
   applies the same migration to files on disk. Keep both paths working whenever

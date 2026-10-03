@@ -87,7 +87,7 @@ float AudioBuffer::monoAt(double frame) const {
 size_t AnalysisData::frameIndexAt(double time) const {
     if (frames.empty()) return 0;
     if (hopSize <= 0 || sampleRate <= 0) return 0;
-    const double index = time * sampleRate / hopSize;
+    const double index = (time - originTime) * sampleRate / hopSize;
     if (index <= 0.0) return 0;
     const size_t last = frames.size() - 1;
     if (index >= static_cast<double>(last)) return last;

@@ -333,7 +333,8 @@ void drawInspector(UiState &state, Rectangle bounds) {
                                  cursor.width * 0.5f - 2.0f, 26.0f},
                        "Re-analyse")) {
             if (state.clip.valid()) {
-                state.analysis = analyzeAudio(*state.clip.buffer(), AnalysisSettings{});
+                state.analysis = analyzeAudio(*state.clip.buffer(), AnalysisSettings{}, {},
+                                              state.clip.buffer());
                 setStatus(state, "Analysis recomputed");
             }
         }

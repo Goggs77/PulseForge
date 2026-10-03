@@ -67,6 +67,8 @@ struct AudioBuffer {
     float mono(int frame) const { return monoAt(frame); }
 };
 
+using AudioPtr = std::shared_ptr<const AudioBuffer>;
+
 struct AnalysisFrame {
     float rms = 0.0f;
     float level = 0.0f;  // smoothed RMS, 0..1
@@ -82,13 +84,19 @@ struct AnalysisData {
     int bandCount = 64;
     int spectrumBins = 256;  // log-spaced bins kept for the GPU texture
     double duration = 0.0;
+    // Time of frames[0]; a live single-window analysis sets this to the start
+    // of its window so time-based lookups still land on frame 0.
+    double originTime = 0.0;
+    // Audio the analysis was computed from, used by the Spectrum block to show
+    // the matching waveform. May be null for synthetic test data.
+    AudioPtr source;
     std::vector<AnalysisFrame> frames;
     // frames.size() * spectrumBins magnitudes, normalised to 0..1
     std::vector<float> spectrum;
     double computeSeconds = 0.0;
 
     double frameTime(size_t index) const {
-        return static_cast<double>(index) * hopSize / sampleRate;
+        return originTime + static_cast<double>(index) * hopSize / sampleRate;
     }
     size_t frameIndexAt(double time) const;
     const AnalysisFrame *frameAt(double time) const;
@@ -107,7 +115,6 @@ struct ImageBuffer {
     bool valid() const { return texture.id != 0; }
 };
 using ImageBufferPtr = std::shared_ptr<ImageBuffer>;
-using AudioPtr = std::shared_ptr<const AudioBuffer>;
 using AnalysisPtr = std::shared_ptr<const AnalysisData>;
 
 struct Value {
@@ -120,6 +127,10 @@ struct Value {
     Vector4 vec4{};
     Matrix matrix{};
     AudioPtr audio;
+    // A Scalar derived from an Audio stream carries that stream (ADC sets it,
+    // scalar blocks propagate it) so a DAC further down can apply the processed
+    // value to the waveform sample-accurately instead of synthesising DC.
+    AudioPtr carrier;
     AnalysisPtr analysis;
     ImageBufferPtr image;
 

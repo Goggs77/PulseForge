@@ -178,7 +178,8 @@ int main(int argc, char **argv) {
         } else {
             std::printf("  audio    : %.2f s, %d ch @ %d Hz\n", clip.duration(), clip.channels(),
                         clip.sampleRate());
-            AnalysisPtr analysis = analyzeAudio(*clip.buffer(), AnalysisSettings{});
+            AnalysisPtr analysis =
+                analyzeAudio(*clip.buffer(), AnalysisSettings{}, {}, clip.buffer());
             std::printf("  analysis : %zu frames in %.2f s (%.1f ms/frame), %d bands\n",
                         analysis->frames.size(), analysis->computeSeconds,
                         analysis->frames.empty()
@@ -888,6 +889,7 @@ int main(int argc, char **argv) {
                         } else {
                             constant->setFloat("value", 0.25f);
                             dac->setBool("interpolate", true);
+                            adc->setInt("mode", 1);  // RMS; mode 0 is Unity
                             std::string why;
                             bridgeOk = bridge.connect(constant->id, 0, dac->id, 0, &why) &&
                                        bridge.connect(dac->id, 0, adc->id, 0, &why);
@@ -933,6 +935,216 @@ int main(int argc, char **argv) {
                                         static_cast<double>(adcValue));
                         } else {
                             result = fail("ADC/DAC blocks: " + bridgeWhat);
+                        }
+                    }
+
+                    // ADC Unity -> DAC is a lossless round trip, and a Math
+                    // block in between shapes the carried waveform.
+                    if (result == 0) {
+                        auto waveform = std::make_shared<AudioBuffer>();
+                        waveform->channels = 2;
+                        waveform->sampleRate = 48000;
+                        waveform->frameCount = 96000;
+                        waveform->samples.resize(static_cast<size_t>(waveform->frameCount) * 2);
+                        for (long long i = 0; i < waveform->frameCount; ++i) {
+                            const float sample =
+                                0.4f * std::sin(6.2831853f * 440.0f * i / 48000.0f);
+                            waveform->samples[static_cast<size_t>(i) * 2] = sample;
+                            waveform->samples[static_cast<size_t>(i) * 2 + 1] = sample;
+                        }
+
+                        const auto renderBridge = [&](bool shaped, AudioPtr *output,
+                                                      std::string *why) {
+                            Graph graph;
+                            Node *src = graph.addNode("src.audio", 0, 0);
+                            Node *adc = graph.addNode("dsp.adc", 200, 0);
+                            Node *math = shaped ? graph.addNode("math.arithmetic", 400, 0) : nullptr;
+                            Node *dac = graph.addNode("dsp.dac", 600, 0);
+                            if (!src || !adc || !dac || (shaped && !math)) {
+                                *why = "blocks missing";
+                                return false;
+                            }
+                            std::string connectWhy;
+                            bool ok = graph.connect(src->id, 0, adc->id, 0, &connectWhy) &&
+                                      graph.connect(adc->id, 0, shaped ? math->id : dac->id, 0,
+                                                    &connectWhy);
+                            if (ok && shaped) {
+                                math->setInt("op", 2);  // multiply
+                                math->setFloat("bValue", 0.5f);
+                                ok = graph.connect(math->id, 0, dac->id, 0, &connectWhy);
+                            }
+                            if (!ok) {
+                                *why = connectWhy;
+                                return false;
+                            }
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 2.0;
+                            ctx.offline = true;
+                            ctx.audio = waveform;
+                            for (int step = 0; step < 60; ++step) {
+                                ctx.frame = 60 + step;
+                                ctx.audioTime = 1.0 + static_cast<double>(step) / 60.0;
+                                graph.evaluate(ctx);
+                            }
+                            *output = dac->audioRenderOutput;
+                            return true;
+                        };
+
+                        AudioPtr straight;
+                        AudioPtr shaped;
+                        std::string straightWhy;
+                        std::string shapedWhy;
+                        bool rtOk = renderBridge(false, &straight, &straightWhy) &&
+                                    renderBridge(true, &shaped, &shapedWhy);
+                        if (rtOk && (!straight || straight->frameCount != 48000 ||
+                                     straight->startFrame != 48000 || straight->channels != 2 ||
+                                     straight->sampleRate != 48000)) {
+                            rtOk = false;
+                            straightWhy = "wrong rendered format";
+                        }
+                        double rtDiff = 0.0;
+                        if (rtOk) {
+                            const size_t base = 48000u * 2u;
+                            bool finite = true;
+                            for (size_t i = 0; i < straight->samples.size(); ++i) {
+                                const double diff =
+                                    std::fabs(static_cast<double>(straight->samples[i]) -
+                                              waveform->samples[base + i]);
+                                if (!std::isfinite(diff)) {
+                                    finite = false;
+                                    break;
+                                }
+                                rtDiff = std::max(rtDiff, diff);
+                            }
+                            if (!finite) {
+                                rtOk = false;
+                                straightWhy = "non-finite round trip sample";
+                            } else if (rtDiff > 1e-7) {
+                                rtOk = false;
+                                straightWhy = "round trip max diff " + std::to_string(rtDiff);
+                            }
+                        }
+                        double shapeDiff = 1e9;
+                        if (rtOk) {
+                            if (!shaped || shaped->samples.size() != straight->samples.size()) {
+                                rtOk = false;
+                                shapedWhy = "shaped render missing";
+                            } else {
+                                shapeDiff = 0.0;
+                                for (size_t i = 0; i < shaped->samples.size(); ++i) {
+                                    shapeDiff = std::max(
+                                        shapeDiff,
+                                        std::fabs(static_cast<double>(shaped->samples[i]) * 2.0 -
+                                                  straight->samples[i]));
+                                }
+                                if (shapeDiff > 1e-5) {
+                                    rtOk = false;
+                                    shapedWhy = "Math x0.5 did not shape the carrier";
+                                }
+                            }
+                        }
+                        if (rtOk) {
+                            std::printf("  bridges  : Unity round trip diff %.1e, Math x0.5 diff "
+                                        "%.1e\n",
+                                        rtDiff, shapeDiff);
+                        } else {
+                            result = fail("ADC/DAC round trip: " + straightWhy + shapedWhy);
+                        }
+                    }
+
+                    // The Spectrum Analyzer depends only on the Audio wired into
+                    // its port: silent when unconnected, the whole-file analysis
+                    // for the source clip, and a live window for processed audio.
+                    if (result == 0) {
+                        auto tone = std::make_shared<AudioBuffer>();
+                        tone->channels = 2;
+                        tone->sampleRate = 48000;
+                        tone->frameCount = 48000;
+                        tone->samples.resize(static_cast<size_t>(tone->frameCount) * 2);
+                        for (long long i = 0; i < tone->frameCount; ++i) {
+                            const float sample =
+                                0.4f * std::sin(6.2831853f * 440.0f * i / 48000.0f);
+                            tone->samples[static_cast<size_t>(i) * 2] = sample;
+                            tone->samples[static_cast<size_t>(i) * 2 + 1] = sample;
+                        }
+                        AnalysisPtr precomputed = analyzeAudio(*tone, AnalysisSettings{}, {}, tone);
+                        Graph analyzerGraph;
+                        Node *analyzer = analyzerGraph.addNode("dsp.analyze", 0, 0);
+                        Node *src = analyzerGraph.addNode("src.audio", 200, 0);
+                        bool analyzerOk = analyzer && src;
+                        std::string analyzerWhat;
+                        if (!analyzerOk) {
+                            analyzerWhat = "the analyzer/source blocks are missing";
+                        }
+                        EvalContext analyzerCtx;
+                        analyzerCtx.fps = 60.0f;
+                        analyzerCtx.duration = 1.0;
+                        analyzerCtx.offline = true;
+                        analyzerCtx.audio = tone;
+                        analyzerCtx.analysis = precomputed;
+                        analyzerCtx.time = 0.5;
+                        analyzerCtx.audioTime = 0.5;
+                        analyzerCtx.frame = 30;
+                        if (analyzerOk) {
+                            analyzerGraph.evaluate(analyzerCtx);
+                            if (analyzer->outputs[0].analysis ||
+                                std::fabs(analyzer->outputs[1].scalar) > 1e-6f) {
+                                analyzerOk = false;
+                                analyzerWhat = "unconnected analyzer still produced data";
+                            }
+                        }
+                        if (analyzerOk) {
+                            std::string why;
+                            if (!analyzerGraph.connect(src->id, 0, analyzer->id, 0, &why)) {
+                                analyzerOk = false;
+                                analyzerWhat = why;
+                            } else {
+                                analyzerGraph.evaluate(analyzerCtx);
+                                if (analyzer->outputs[0].analysis != precomputed) {
+                                    analyzerOk = false;
+                                    analyzerWhat = "the source input did not use its whole-file analysis";
+                                } else if (analyzer->outputs[1].scalar < 0.1f) {
+                                    analyzerOk = false;
+                                    analyzerWhat = "the source input measured silence";
+                                }
+                            }
+                        }
+                        if (analyzerOk) {
+                            analyzerGraph.disconnectInput(analyzer->id, 0);
+                            Node *dynamics = analyzerGraph.addNode("dsp.dynamics", 200, 0);
+                            std::string why;
+                            if (!dynamics) {
+                                analyzerOk = false;
+                                analyzerWhat = "the Dynamics block is missing";
+                            } else {
+                                dynamics->setFloat("threshold", 0.0f);
+                                dynamics->setFloat("ratio", 1.0f);
+                                dynamics->setBool("limiter", false);
+                            }
+                            if (analyzerOk &&
+                                (!analyzerGraph.connect(src->id, 0, dynamics->id, 0, &why) ||
+                                 !analyzerGraph.connect(dynamics->id, 0, analyzer->id, 0, &why))) {
+                                analyzerOk = false;
+                                analyzerWhat = "could not wire the processed analyzer input";
+                            }
+                            if (analyzerOk) {
+                                analyzerGraph.evaluate(analyzerCtx);
+                                const AnalysisData *live = analyzer->outputs[0].analysis.get();
+                                if (!live || live == precomputed.get() ||
+                                    live->frames.size() != 1) {
+                                    analyzerOk = false;
+                                    analyzerWhat = "the processed input got no live analysis";
+                                } else if (analyzer->outputs[1].scalar < 0.1f) {
+                                    analyzerOk = false;
+                                    analyzerWhat = "the processed input measured silence";
+                                }
+                            }
+                        }
+                        if (analyzerOk) {
+                            std::printf("  analyzer : input-driven (silent / precomputed / live)\n");
+                        } else {
+                            result = fail("Spectrum Analyzer input: " + analyzerWhat);
                         }
                     }
 

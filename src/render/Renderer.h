@@ -61,6 +61,10 @@ public:
     Texture2D spectrumTexture() const { return spectrum_; }
     Texture2D waveformTexture() const { return waveform_; }
     void updateAnalysisTextures(const EvalContext &ctx);
+    // Uploads one analysis's spectrum row and waveform window to the shader
+    // textures. Spectrum blocks call this for their own Analysis input so a
+    // processed stream does not show the imported clip's textures.
+    void uploadAnalysisTextures(const AnalysisData &analysis, double time);
 
     // ---- frame ----------------------------------------------------------
     ImageBufferPtr renderFrame(Graph &graph, EvalContext &ctx, std::string *error);

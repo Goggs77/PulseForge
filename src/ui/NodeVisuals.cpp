@@ -110,7 +110,10 @@ void drawSpectrumVisual(UiState &state, const Node &node, Rectangle body, float 
 
     const float gain = node.pfloat("gain", 1.0f);
     const float gate = node.pfloat("gate", 0.0f);
-    const AnalysisPtr &analysis = state.analysis;
+    // Follow the analysis this block actually produced from its Audio input,
+    // not the project's imported one.
+    const AnalysisPtr &analysis =
+        node.outputs.empty() ? AnalysisPtr() : node.outputs[0].analysis;
     const float *row = analysis ? analysis->spectrumRow(state.frameContext.audioTime) : nullptr;
     const int bins = analysis ? analysis->spectrumBins : 0;
     if (!row || bins <= 0) {

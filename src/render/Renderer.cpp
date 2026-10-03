@@ -322,9 +322,9 @@ void Renderer::drawShaderPass(Shader *shader, const EvalContext &ctx, Texture2D 
 // Analysis textures
 // ---------------------------------------------------------------------------
 
-void Renderer::updateAnalysisTextures(const EvalContext &ctx) {
+void Renderer::uploadAnalysisTextures(const AnalysisData &analysis, double time) {
     const size_t bins = scratchSpectrum_.size();
-    const float *row = ctx.analysis ? ctx.analysis->spectrumRow(ctx.audioTime) : nullptr;
+    const float *row = analysis.spectrumRow(time);
     for (size_t i = 0; i < bins; ++i) {
         const float value = row ? std::clamp(row[i], 0.0f, 1.0f) : 0.0f;
         scratchSpectrum_[i] = value;
@@ -343,12 +343,14 @@ void Renderer::updateAnalysisTextures(const EvalContext &ctx) {
 
     const size_t points = scratchWave_.size();
     const double window = 0.08;  // seconds shown left to right
-    if (ctx.audio && ctx.audio->frameCount > 0) {
-        const double start = ctx.audioTime - window * 0.5;
+    const AudioBuffer *source = analysis.source.get();
+    if (source && source->frameCount > 0) {
+        const double rate = std::max(1, source->sampleRate);
+        const double start = time - window * 0.5;
         for (size_t i = 0; i < points; ++i) {
             const double t = start + window * (static_cast<double>(i) / (points - 1));
-            const double frame = t * ctx.audio->sampleRate;
-            scratchWave_[i] = std::clamp(ctx.audio->monoAt(frame), -1.0f, 1.0f);
+            const double frame = t * rate - static_cast<double>(source->startFrame);
+            scratchWave_[i] = std::clamp(source->monoAt(frame), -1.0f, 1.0f);
         }
     } else {
         std::fill(scratchWave_.begin(), scratchWave_.end(), 0.0f);
@@ -362,6 +364,16 @@ void Renderer::updateAnalysisTextures(const EvalContext &ctx) {
         waveformPixels_[i * 4 + 3] = 255;
     }
     UpdateTexture(waveform_, waveformPixels_.data());
+}
+
+void Renderer::updateAnalysisTextures(const EvalContext &ctx) {
+    if (ctx.analysis) {
+        uploadAnalysisTextures(*ctx.analysis, ctx.audioTime);
+        return;
+    }
+    // No global analysis: clear both textures so shaders read silence.
+    static const AnalysisData empty;
+    uploadAnalysisTextures(empty, ctx.audioTime);
 }
 
 // ---------------------------------------------------------------------------

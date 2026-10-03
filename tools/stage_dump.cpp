@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
         std::printf("audio load failed: %s\n", error.c_str());
         return 1;
     }
-    AnalysisPtr analysis = analyzeAudio(*clip.buffer(), AnalysisSettings{});
+    AnalysisPtr analysis = analyzeAudio(*clip.buffer(), AnalysisSettings{}, {}, clip.buffer());
     {
         float maxSpectrum = 0.0f, sumSpectrum = 0.0f;
         for (float v : analysis->spectrum) {

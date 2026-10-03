@@ -98,6 +98,10 @@ public:
     // Scratch values kept between frames by stateful blocks (envelopes, LFOs,
     // particles). Never serialised.
     std::unordered_map<std::string, double> runtimeState;
+    // Live analysis of a Spectrum Analyzer's own Audio input when it is not the
+    // project's decoded clip (processed audio). Never serialised.
+    AnalysisPtr runtimeAnalysis;
+    std::string runtimeAnalysisKey;
 
     // Audio rendered by a block that transforms the Audio stream (Dynamics).
     // `audioRenderOutput` starts at `audioRenderStart` (a frame index inside the

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <vector>
 
+#include "dsp/Analysis.h"
 #include "dsp/Dynamics.h"
 #include "render/Geometry.h"
 #include "render/Palette.h"
@@ -47,7 +48,9 @@ float follow(Node &node, const char *key, float target, float attack, float rele
 }
 
 const AnalysisData *analysisFrom(const std::vector<Value> &in, const EvalContext &ctx, size_t port) {
-    if (port < in.size() && in[port].analysis) return in[port].analysis.get();
+    // A connected Analysis port is authoritative even when it carries no data;
+    // only an unconnected port falls back to the project's decoded analysis.
+    if (port < in.size() && in[port].type == PortType::Analysis) return in[port].analysis.get();
     return ctx.analysis.get();
 }
 
@@ -122,16 +125,46 @@ void evalPulse(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::
 // ---------------------------------------------------------------------------
 
 void evalAnalyzer(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
-    (void)in;
     const float gain = node.pfloat("gain", 1.0f);
     const float gate = node.pfloat("gate", 0.0f);
-    const AnalysisData *analysis = ctx.analysis.get();
     out[0].type = PortType::Analysis;
-    out[0].analysis = ctx.analysis;
-    if (!analysis) {
+    const AudioPtr audio =
+        (!in.empty() && in[0].type == PortType::Audio) ? in[0].audio : AudioPtr();
+    if (!audio) {
+        // Fully input driven: with nothing wired here there is nothing to
+        // analyse, even when the project has imported media.
+        for (size_t i = 1; i < out.size(); ++i) out[i] = Value::makeScalar(0.0f);
+        node.runtimeAnalysis.reset();
+        node.runtimeAnalysisKey.clear();
+        node.status = "connect an Audio input";
+        return;
+    }
+
+    AnalysisPtr analysis;
+    if (ctx.analysis && audio == ctx.audio) {
+        // The project's decoded clip already has a whole-file analysis.
+        analysis = ctx.analysis;
+    } else {
+        // Processed or foreign audio has no whole-file analysis, so one FFT
+        // window is measured for the current video frame.
+        char key[160];
+        std::snprintf(key, sizeof(key), "%p|%lld|%d", static_cast<const void *>(audio.get()),
+                      std::llround(ctx.audioTime * std::max(1, audio->sampleRate)),
+                      audio->sampleRate);
+        if (!node.runtimeAnalysis || node.runtimeAnalysisKey != key) {
+            node.runtimeAnalysis =
+                analyzeWindow(*audio, ctx.audioTime, AnalysisSettings{}, audio);
+            node.runtimeAnalysisKey = key;
+        }
+        analysis = node.runtimeAnalysis;
+    }
+    out[0].analysis = analysis;
+    node.status.clear();
+    if (!analysis || analysis->frames.empty()) {
         for (size_t i = 1; i < out.size(); ++i) out[i] = Value::makeScalar(0.0f);
         return;
     }
+
     auto shape = [&](float value) {
         value *= gain;
         return value < gate ? 0.0f : std::clamp(value, 0.0f, 1.0f);
@@ -400,70 +433,91 @@ void audioWindowBounds(const EvalContext &ctx, const AudioBuffer &buffer, long l
     *end = to;
 }
 
-// ADC: measures the current video frame's slice of an Audio stream and emits it
-// as a Scalar, so Math and Modulation blocks can process audio at frame rate.
+// ADC: Audio -> Scalar. The Scalar is a per-frame control value and it also
+// carries the source stream, so a DAC further down can apply the value to the
+// waveform sample-accurately. Unity (the default) makes ADC -> DAC a lossless
+// round trip; RMS and Peak turn the block into a loudness follower that Math
+// and Modulation blocks can process at frame rate.
 void evalAdc(Node &node, EvalContext &ctx, const std::vector<Value> &in,
              std::vector<Value> &out) {
-    const AudioBuffer *source = nullptr;
-    if (!in.empty() && in[0].audio) source = in[0].audio.get();
-    else if (ctx.audio) source = ctx.audio.get();
-    out[0] = Value::makeScalar(0.0f);
-    if (!source || source->frameCount <= 0 || source->samples.empty()) {
+    AudioPtr carrier;
+    if (!in.empty() && in[0].audio) carrier = in[0].audio;
+    else if (ctx.audio) carrier = ctx.audio;
+    out[0] = Value::makeScalar(1.0f);
+    if (!carrier || carrier->frameCount <= 0 || carrier->samples.empty()) {
         node.status = "no audio";
         return;
     }
-    long long start = 0;
-    long long end = 0;
-    audioWindowBounds(ctx, *source, &start, &end);
-    const int channels = std::max(1, source->channels);
-    const float *samples = source->samples.data();
-    double sumSquares = 0.0;
-    float peak = 0.0f;
-    for (long long frame = start; frame < end; ++frame) {
-        const size_t base = static_cast<size_t>(frame) * static_cast<size_t>(channels);
-        float mono = 0.0f;
-        for (int c = 0; c < channels; ++c) mono += samples[base + static_cast<size_t>(c)];
-        mono /= static_cast<float>(channels);
-        if (!std::isfinite(mono)) mono = 0.0f;
-        sumSquares += static_cast<double>(mono) * mono;
-        peak = std::max(peak, std::fabs(mono));
+
+    const int mode = node.pint("mode", 0);
+    float value = 1.0f;  // Unity: the DAC applies the waveform unchanged.
+    if (mode != 0) {
+        long long start = 0;
+        long long end = 0;
+        audioWindowBounds(ctx, *carrier, &start, &end);
+        const int channels = std::max(1, carrier->channels);
+        const float *samples = carrier->samples.data();
+        double sumSquares = 0.0;
+        float peak = 0.0f;
+        for (long long frame = start; frame < end; ++frame) {
+            const size_t base = static_cast<size_t>(frame) * static_cast<size_t>(channels);
+            float mono = 0.0f;
+            for (int c = 0; c < channels; ++c) mono += samples[base + static_cast<size_t>(c)];
+            mono /= static_cast<float>(channels);
+            if (!std::isfinite(mono)) mono = 0.0f;
+            sumSquares += static_cast<double>(mono) * mono;
+            peak = std::max(peak, std::fabs(mono));
+        }
+        const double count = static_cast<double>(std::max<long long>(1, end - start));
+        value = mode == 2 ? peak : static_cast<float>(std::sqrt(sumSquares / count));
     }
-    const double count = static_cast<double>(std::max<long long>(1, end - start));
-    const float value =
-        node.pint("mode", 0) == 1 ? peak : static_cast<float>(std::sqrt(sumSquares / count));
     node.runtimeState["value"] = value;
     out[0] = Value::makeScalar(value);
+    out[0].carrier = std::move(carrier);
 }
 
-// DAC: converts one Scalar per video frame back into audio at the clip's rate.
-// Consecutive frames ramp between values (or hold them), which is what lets a
-// Math/Modulation chain drive an Audio Output. Offline passes accumulate the
-// exported track; interactive playback keeps only the current window.
+// DAC: Scalar -> Audio. With a carrier the Scalar is a per-frame control value
+// applied to the carried waveform sample by sample, so an untouched ADC -> DAC
+// round trip is lossless. Without a carrier the Scalar itself becomes the
+// sample value (DC/ramp synthesis). Offline passes accumulate the exported
+// track; interactive playback keeps only the current window.
 void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
              std::vector<Value> &out) {
     out[0].type = PortType::Audio;
-    const int sampleRate = ctx.audio ? std::clamp(ctx.audio->sampleRate, 8000, 384000) : 48000;
-    const int channels = ctx.audio ? std::clamp(ctx.audio->channels, 1, 8) : 1;
+    const AudioPtr carrier =
+        (!in.empty() && in[0].type == PortType::Scalar) ? in[0].carrier : nullptr;
+    const AudioBuffer *format = carrier ? carrier.get() : ctx.audio.get();
+    const int sampleRate = format ? std::clamp(format->sampleRate, 8000, 384000) : 48000;
+    const int channels = format ? std::clamp(format->channels, 1, 8) : 1;
+    const long long formatStart = format ? format->startFrame : 0;
+    const long long formatFrames = format ? format->frameCount : -1;
     const float fps = ctx.fps > 1.0f ? ctx.fps : 60.0f;
-    const long long sourceFrames = ctx.audio ? ctx.audio->frameCount : -1;
-    long long startFrame = std::max<long long>(0, std::llround(ctx.audioTime * sampleRate));
-    long long endFrame = std::llround((ctx.audioTime + 1.0 / fps) * sampleRate);
-    if (sourceFrames >= 0) {
-        startFrame = std::min(startFrame, sourceFrames);
-        endFrame = std::min(std::max(endFrame, startFrame), sourceFrames);
+    long long localStart =
+        std::max<long long>(0, std::llround(ctx.audioTime * sampleRate)) - formatStart;
+    if (formatFrames >= 0) {
+        localStart = std::clamp<long long>(localStart, 0, formatFrames);
+    } else {
+        localStart = std::max<long long>(0, localStart);
     }
-    const long long frames = std::max<long long>(0, endFrame - startFrame);
+    long long localEnd =
+        localStart + std::max<long long>(0, std::llround(sampleRate / static_cast<double>(fps)));
+    if (formatFrames >= 0) localEnd = std::clamp<long long>(localEnd, localStart, formatFrames);
+    const long long frames = std::max<long long>(0, localEnd - localStart);
+    const long long absoluteStart = localStart + formatStart;
 
     const bool interpolate = node.pbool("interpolate", true);
     const bool clampOutput = node.pbool("clamp", true);
     float target = scalarFrom(in, 0);
     if (!std::isfinite(target)) target = 0.0f;
-    if (clampOutput) target = std::clamp(target, -1.0f, 1.0f);
+    // Without a carrier the Scalar is the sample value itself; with one it is a
+    // control value, so clamping happens on the rendered sample instead.
+    if (clampOutput && !carrier) target = std::clamp(target, -1.0f, 1.0f);
 
-    char key[192];
-    std::snprintf(key, sizeof(key), "%p|%d|%d|%lld|%d|%d",
-                  static_cast<const void *>(ctx.audio.get()), sampleRate, channels, sourceFrames,
-                  interpolate ? 1 : 0, clampOutput ? 1 : 0);
+    char key[224];
+    std::snprintf(key, sizeof(key), "%p|%p|%lld|%lld|%d|%d|%d|%d",
+                  static_cast<const void *>(carrier.get()), static_cast<const void *>(format),
+                  formatStart, formatFrames, sampleRate, channels, interpolate ? 1 : 0,
+                  clampOutput ? 1 : 0);
 
     const auto storedPrevious = node.runtimeState.find("dac.previous");
     const float previous = storedPrevious != node.runtimeState.end()
@@ -471,33 +525,43 @@ void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                                : target;
 
     const auto fill = [&](AudioBuffer &buffer, long long offset, long long count, float from,
-                          float to) {
+                          float to, long long localBase) {
         const size_t base = static_cast<size_t>(offset) * static_cast<size_t>(channels);
         for (long long i = 0; i < count; ++i) {
             const float t = interpolate && count > 1
                                 ? static_cast<float>(static_cast<double>(i + 1) / count)
                                 : 1.0f;
-            const float value = from + (to - from) * t;
+            const float control = from + (to - from) * t;
             for (int c = 0; c < channels; ++c) {
+                float sample = control;
+                if (carrier) {
+                    const size_t index =
+                        static_cast<size_t>(localBase + i) * static_cast<size_t>(channels) +
+                        static_cast<size_t>(c);
+                    sample = carrier->samples[index] * control;
+                }
+                if (clampOutput) sample = std::clamp(sample, -1.0f, 1.0f);
                 buffer.samples[base + static_cast<size_t>(i) * static_cast<size_t>(channels) +
-                               static_cast<size_t>(c)] = value;
+                               static_cast<size_t>(c)] = sample;
             }
         }
     };
 
     if (ctx.offline) {
         const bool reusable = node.audioRenderOutput && node.audioRenderKey == key &&
-                              startFrame >= node.audioRenderStart &&
-                              endFrame <= node.audioRenderStart + node.audioRenderFrames;
+                              absoluteStart >= node.audioRenderStart &&
+                              absoluteStart + frames <=
+                                  node.audioRenderStart + node.audioRenderFrames;
         if (!reusable) {
             const bool append = node.audioRenderOutput && node.audioRenderKey == key &&
-                                startFrame == node.audioRenderStart + node.audioRenderFrames;
+                                absoluteStart ==
+                                    node.audioRenderStart + node.audioRenderFrames;
             if (!append) {
                 node.audioRenderOutput = std::make_shared<AudioBuffer>();
                 node.audioRenderOutput->channels = channels;
                 node.audioRenderOutput->sampleRate = sampleRate;
-                node.audioRenderOutput->startFrame = startFrame;
-                node.audioRenderStart = startFrame;
+                node.audioRenderOutput->startFrame = absoluteStart;
+                node.audioRenderStart = absoluteStart;
                 node.audioRenderFrames = 0;
                 node.audioRenderKey = key;
             }
@@ -505,7 +569,7 @@ void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
             const long long offset = node.audioRenderFrames;
             buffer.samples.resize(
                 static_cast<size_t>(offset + frames) * static_cast<size_t>(channels));
-            fill(buffer, offset, frames, append ? previous : target, target);
+            fill(buffer, offset, frames, append ? previous : target, target, localStart);
             node.audioRenderFrames += frames;
             buffer.frameCount = node.audioRenderFrames;
         }
@@ -519,16 +583,17 @@ void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
             if (!node.audioRenderOutput) node.audioRenderOutput = std::make_shared<AudioBuffer>();
             AudioBuffer &buffer = *node.audioRenderOutput;
             const bool restart = node.audioRenderKey != key ||
-                                 startFrame != node.audioRenderStart + node.audioRenderFrames;
+                                 absoluteStart !=
+                                     node.audioRenderStart + node.audioRenderFrames;
             buffer.channels = channels;
             buffer.sampleRate = sampleRate;
-            buffer.startFrame = startFrame;
+            buffer.startFrame = absoluteStart;
             buffer.frameCount = frames;
             buffer.samples.assign(static_cast<size_t>(frames) *
                                       static_cast<size_t>(channels),
                                   0.0f);
-            fill(buffer, 0, frames, restart ? target : previous, target);
-            node.audioRenderStart = startFrame;
+            fill(buffer, 0, frames, restart ? target : previous, target, localStart);
+            node.audioRenderStart = absoluteStart;
             node.audioRenderFrames = frames;
             node.audioRenderKey = key;
         }
@@ -1112,6 +1177,9 @@ void evalSpectrum(Node &node, EvalContext &ctx, const std::vector<Value> &in,
         return;
     }
     ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+    // The block displays the analysis that reaches its port, not the project's
+    // imported one.
+    ctx.renderer->uploadAnalysisTextures(*in[0].analysis, ctx.audioTime);
     ctx.renderer->drawShaderPass(shader, ctx, Texture2D{}, Texture2D{}, feedback, user, 8, colorA,
                                  colorB, ShaderVectorUniforms{});
     ctx.renderer->endTarget();
@@ -1504,8 +1572,9 @@ void Registry::registerBuiltins() {
         def.category = "DSP";
         def.label = "Spectrum Analyzer";
         def.description =
-            "Exposes the project's FFT analysis: band magnitudes plus level, onset and "
-            "bass/mid/treble scalars. Analysis is precomputed for the whole clip.";
+            "Analyses the Audio wired into this port: the imported clip uses its whole-file "
+            "analysis, any other stream (Dynamics, DAC, ...) is measured live at frame rate. "
+            "Emits band magnitudes plus level, onset and bass/mid/treble scalars.";
         def.inputs = {PortDesc{"Audio", PortType::Audio}};
         def.outputs = {PortDesc{"Analysis", PortType::Analysis},
                        PortDesc{"Level", PortType::Scalar},
@@ -1646,13 +1715,14 @@ void Registry::registerBuiltins() {
         def.category = "DSP";
         def.label = "ADC";
         def.description =
-            "Audio to Scalar. Measures the incoming Audio over the current video frame and "
-            "emits it at frame rate, so Math and Modulation blocks can process the signal. "
-            "RMS is the loudness; Peak follows transients.";
+            "Audio to Scalar. Emits a per-frame control value and carries the waveform, so "
+            "Math and Modulation blocks can shape the audio and a DAC applies the result "
+            "sample-accurately. Unity is a lossless round trip; RMS/Peak follow loudness "
+            "and transients instead.";
         def.inputs = {PortDesc{"Audio", PortType::Audio}};
-        def.outputs = {PortDesc{"Value", PortType::Scalar, "0..1"}};
+        def.outputs = {PortDesc{"Value", PortType::Scalar, "control"}};
         def.params = {
-            makeEnumParam("mode", "Measure", {"RMS", "Peak"}, 0, "Conversion"),
+            makeEnumParam("mode", "Mode", {"Unity", "RMS", "Peak"}, 0, "Conversion"),
         };
         def.evaluate = evalAdc;
         add(std::move(def));
@@ -1663,11 +1733,12 @@ void Registry::registerBuiltins() {
         def.category = "DSP";
         def.label = "DAC";
         def.description =
-            "Scalar to Audio. Each video frame's Scalar becomes one frame of samples at the "
-            "clip's rate; consecutive values ramp by default. Patch the output into an Audio "
-            "Output to hear it.";
+            "Scalar to Audio. Each video frame's control value is applied to the carried "
+            "waveform at the clip's rate (ADC carries it automatically), so a modulation "
+            "chain shapes the audio sample-accurately. Without a carrier the value becomes "
+            "the sample itself. Patch the output into an Audio Output to hear it.";
         def.inputs = {PortDesc{"Value", PortType::Scalar}};
-        def.outputs = {PortDesc{"Audio", PortType::Audio, "synthesised clip"}};
+        def.outputs = {PortDesc{"Audio", PortType::Audio, "rendered clip"}};
         def.params = {
             makeBoolParam("interpolate", "Interpolate frames", true, "Conversion"),
             makeBoolParam("clamp", "Clamp to -1..1", true, "Conversion"),

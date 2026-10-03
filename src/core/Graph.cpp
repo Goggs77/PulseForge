@@ -226,6 +226,23 @@ bool Graph::evaluate(EvalContext &ctx) {
         const double start = GetTime();
         def.evaluate(*node, ctx, inputs, node->outputs);
         node->lastEvalMs = (GetTime() - start) * 1000.0;
+
+        // Scalar blocks pass an audio carrier along, so a math/modulation chain
+        // between ADC and DAC keeps the waveform the values were derived from.
+        AudioPtr carrier;
+        for (const Value &value : inputs) {
+            if (value.type == PortType::Scalar && value.carrier) {
+                carrier = value.carrier;
+                break;
+            }
+        }
+        if (carrier) {
+            for (Value &value : node->outputs) {
+                if (value.type == PortType::Scalar && !value.carrier) {
+                    value.carrier = carrier;
+                }
+            }
+        }
     }
     return true;
 }
