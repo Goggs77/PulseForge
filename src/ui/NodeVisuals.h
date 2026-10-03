@@ -14,9 +14,11 @@ class Node;
 // its live content. Blocks without content return 0.
 float nodeVisualHeight(const Node &node);
 
-// Draws the live content of `node` inside `body` (screen space). `state` supplies
-// the analysis and audio the previews read from.
-void drawNodeVisual(UiState &state, const Node &node, Rectangle body, float zoom);
+// Draws the live content of `node` inside `body` (screen space), clipped to the
+// intersection of `body` and `clip` (usually the canvas viewport) so a block that
+// hangs over the edge of the pipeline panel never paints outside it. `state`
+// supplies the analysis and audio the previews read from.
+void drawNodeVisual(UiState &state, const Node &node, Rectangle body, Rectangle clip, float zoom);
 
 // Some blocks put an interactive pivot in their live content (the Signal Filter's
 // cutoff/resonance handle). The canvas asks these instead of dragging the block.

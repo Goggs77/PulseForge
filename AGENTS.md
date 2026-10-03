@@ -113,6 +113,11 @@ docs         rendering notes and the README overlay image
   links by port index, so inserting a port in the middle would re-target them.
   The convention for the value is: rates/frequencies multiply by `2^input`
   (octaves), levels multiply by `(1 + input)` and offsets add the input.
+- A block that modulates a parameter **publishes the value it actually used**
+  through `Node::publishEffective(key, value)`. The inspector slider and the
+  in-block previews follow it (`Node::effectiveParam`) so an LFO visibly moves
+  the control instead of leaving it on the base value; the inspector falls back
+  to the base value while that slider is being dragged (`ui::sliderDragging`).
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
   the Frequency Band and Signal Filter Hz sliders) and an optional
   `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty

@@ -289,6 +289,12 @@ input on **Geometry**.
 | Ringbuffer | In, Speed | Input, Average, Buffer | Records the scalar into a loop buffer of 2..1024 samples; `Input` is the live value, `Average` the running average of the buffer and `Buffer` the sample the looping read pointer (loops/second, octave modulation) is passing over. The block draws the buffer with the read position marked |
 | Signal Filter | In, Cutoff, Resonance | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Modulation runs one sample per video frame, so the filter's sample rate **is the project frame rate**; the cutoff and resonance inputs shift by octaves. The block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)) |
 
+Modulated parameters are live: the inspector handles (and the Signal Filter's
+response plot, the Ringbuffer's read marker, and so on) follow the value the block
+actually used, so an LFO visibly moves the control it is patched into. Dragging a
+slider shows its base value while the drag lasts, then returns to the modulated
+readout.
+
 ### Debug
 
 | Block | Inputs | Outputs | Notes |

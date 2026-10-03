@@ -126,6 +126,19 @@ public:
     void setText(const std::string &key, const std::string &value);
     void setColor(const std::string &key, Color value);
 
+    // A block publishes the value it actually used after modulation
+    // (`value.<key>` in runtimeState) so the inspector slider and the in-block
+    // previews can follow an LFO instead of only showing the base parameter.
+    void publishEffective(const std::string &key, float value) {
+        runtimeState["value." + key] = static_cast<double>(value);
+    }
+    bool effectiveParam(const std::string &key, float *value) const {
+        const auto it = runtimeState.find("value." + key);
+        if (it == runtimeState.end()) return false;
+        if (value) *value = static_cast<float>(it->second);
+        return true;
+    }
+
     // Fills in any missing parameters from the definition; keeps values of
     // matching keys so saved projects stay compatible when a block gains one.
     void ensureParams(const NodeDef &definition);

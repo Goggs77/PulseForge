@@ -732,6 +732,8 @@ bool intSlider(Rectangle r, const char *label, int *value, int lo, int hi, int s
     return changed;
 }
 
+bool sliderDragging(int stableId) { return stableId != 0 && gActiveSlider == stableId; }
+
 bool intField(Rectangle r, int *value, int lo, int hi, int stableId) {
     const Theme &t = theme();
     const int id = stableId != 0 ? stableId : nextId();

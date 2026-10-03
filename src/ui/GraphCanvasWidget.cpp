@@ -359,7 +359,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                                box.width - 12.0f * view.zoom, footerHeight};
         // Live content (spectrum, level bar, value/time curve, waveform).
         if (visualFraction(node) > 0.0f) {
-            drawNodeVisual(state, node, visualRect(node, box), view.zoom);
+            drawNodeVisual(state, node, visualRect(node, box), viewport, view.zoom);
             // drawNodeVisual scissorstamps its own body and ends the scissor
             // when it is done, so the canvas clip has to be re-established or
             // the next block would be free to draw over other panels.

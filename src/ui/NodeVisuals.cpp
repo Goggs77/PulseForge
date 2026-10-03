@@ -566,9 +566,15 @@ void drawFilterVisual(UiState &state, const Node &node, Rectangle body, float zo
     const double fMin = 0.01;
     const double fMax = std::max(fMin * 2.0, nyquist);
     const int mode = std::clamp(node.pint("mode", 0), 0, 2);
-    const double q = std::clamp(node.pfloat("resonance", 0.707f), 0.05f, 20.0f);
-    const double cutoff =
-        std::clamp(static_cast<double>(node.pfloat("cutoff", 4.0f)), fMin, fMax);
+    // Follow the modulated values the block actually used, so the plot (and its
+    // pivot) track an LFO patched into Cutoff or Resonance.
+    float effective = 0.0f;
+    const float baseQ = node.effectiveParam("resonance", &effective) ? effective
+                                                                    : node.pfloat("resonance", 0.707f);
+    const double q = std::clamp(static_cast<double>(baseQ), 0.05, 20.0);
+    const float baseCutoff =
+        node.effectiveParam("cutoff", &effective) ? effective : node.pfloat("cutoff", 4.0f);
+    const double cutoff = std::clamp(static_cast<double>(baseCutoff), fMin, fMax);
     const BiquadCoefficients coefficients = biquadCoefficients(mode, cutoff, q, fs);
 
     auto xFor = [&](double hz) {
@@ -647,11 +653,22 @@ float nodeVisualHeight(const Node &node) {
     return 0.0f;
 }
 
-void drawNodeVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
+void drawNodeVisual(UiState &state, const Node &node, Rectangle body, Rectangle clip, float zoom) {
     if (body.width < 8.0f || body.height < 8.0f) return;
-    // Live content never spills outside its block, whatever it draws.
-    BeginScissorMode(static_cast<int>(body.x), static_cast<int>(body.y),
-                     static_cast<int>(body.width), static_cast<int>(body.height));
+    // Live content never spills outside its block *or* the panel it lives in, so
+    // a block hanging over the edge of the canvas is clipped at the edge instead
+    // of drawing over the neighbouring panels.
+    Rectangle limit = body;
+    if (clip.width > 0.0f && clip.height > 0.0f) {
+        const float x0 = std::max(body.x, clip.x);
+        const float y0 = std::max(body.y, clip.y);
+        const float x1 = std::min(body.x + body.width, clip.x + clip.width);
+        const float y1 = std::min(body.y + body.height, clip.y + clip.height);
+        limit = Rectangle{x0, y0, std::max(0.0f, x1 - x0), std::max(0.0f, y1 - y0)};
+    }
+    if (limit.width < 2.0f || limit.height < 2.0f) return;
+    BeginScissorMode(static_cast<int>(limit.x), static_cast<int>(limit.y),
+                     static_cast<int>(limit.width), static_cast<int>(limit.height));
     if (node.kind == "dsp.analyze") {
         drawSpectrumVisual(state, node, body, zoom);
     } else if (node.kind == "dsp.band") {

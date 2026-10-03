@@ -740,6 +740,13 @@ int main(int argc, char **argv) {
                             // the 8 Hz one has all but settled.
                             for (int i = 0; i < 8; ++i) graph.evaluate(ctx);
                             *value = filter->outputs[0].scalar;
+                            // The block publishes what it used so the inspector
+                            // slider and the response plot can follow it.
+                            float published = 0.0f;
+                            if (!filter->effectiveParam("cutoff", &published)) return false;
+                            const float expected =
+                                cutoffInput == 0.0f ? 2.0f : 2.0f * std::pow(2.0f, cutoffInput);
+                            if (std::fabs(published - expected) > 0.01f) return false;
                             return true;
                         };
                         float plainCutoff = 0.0f, modulatedCutoff = 0.0f;

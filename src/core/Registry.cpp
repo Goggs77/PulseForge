@@ -108,6 +108,9 @@ void evalPulse(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::
     decay = std::clamp(decay, 0.02f, 2.0f);
     float offset = node.pfloat("offset", 0.0f);
     if (offsetConnected) offset += in[2].scalar * 0.25f;  // quarter of a beat nudge
+    node.publishEffective("bpm", bpm);
+    node.publishEffective("decay", decay);
+    node.publishEffective("offset", offset);
     const double phase = (ctx.time + offset) / std::max(1e-4f, beatLength);
     const float fract = static_cast<float>(phase - std::floor(phase));
     out[0] = Value::makeScalar(std::exp(-fract * decay * 9.0f));
@@ -567,6 +570,9 @@ void evalLfo(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::ve
     if (offsetConnected) offset += in[3].scalar;
     // Keep the phase so the block preview can put its pivot on the waveform.
     node.runtimeState["phase"] = t;
+    node.publishEffective("frequency", frequency);
+    node.publishEffective("amplitude", amplitude);
+    node.publishEffective("offset", offset);
     out[0] = Value::makeScalar(wave * amplitude + offset);
 }
 
@@ -588,6 +594,8 @@ void evalAutomation(Node &node, EvalContext &ctx, const std::vector<Value> &in, 
     if (depthConnected) depth *= std::max(0.0f, 1.0f + in[0].scalar);
     float offset = node.pfloat("offset", 0.0f);
     if (offsetConnected) offset += in[1].scalar;
+    node.publishEffective("depth", depth);
+    node.publishEffective("offset", offset);
     result = result * depth + offset;
     if (node.pbool("smooth", false)) {
         result = follow(node, "smooth", result, node.pfloat("smoothing", 0.2f),
@@ -608,6 +616,8 @@ void evalAmount(Node &node, EvalContext &ctx, const std::vector<Value> &in, std:
     if (gainConnected) gain *= std::max(0.0f, 1.0f + in[2].scalar);
     float offset = node.pfloat("offset", 0.0f);
     if (offsetConnected) offset += in[3].scalar;
+    node.publishEffective("gain", gain);
+    node.publishEffective("offset", offset);
     float result = value * amount * gain + offset;
     const int steps = node.pint("quantize", 0);
     if (steps > 1) result = std::round(result * static_cast<float>(steps)) / static_cast<float>(steps);
@@ -639,6 +649,7 @@ void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
         speed *= std::pow(2.0f, std::clamp(in[1].scalar, -8.0f, 8.0f));
     }
     speed = std::clamp(speed, 0.001f, 64.0f);
+    node.publishEffective("speed", speed);
     double phase = node.runtimeState["phase"] + speed / fps;
     phase -= std::floor(phase);
     node.runtimeState["phase"] = phase;
@@ -669,6 +680,8 @@ void evalSignalFilter(Node &node, EvalContext &ctx, const std::vector<Value> &in
         cutoff *= std::pow(2.0, std::clamp(static_cast<double>(in[1].scalar), -8.0, 8.0));
     }
     cutoff = std::clamp(cutoff, 0.001, std::max(1.0, fs * 0.49));
+    node.publishEffective("cutoff", static_cast<float>(cutoff));
+    node.publishEffective("resonance", static_cast<float>(q));
     const BiquadCoefficients coefficients = biquadCoefficients(mode, cutoff, q, fs);
 
     double z1 = node.runtimeState["z1"];

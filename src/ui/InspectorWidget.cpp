@@ -165,9 +165,20 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
             const std::string defaultFormat = param.logarithmic ? "%.0f Hz" : "%.3g";
             const char *valueFormat =
                 param.valueFormat.empty() ? defaultFormat.c_str() : param.valueFormat.c_str();
+            // A modulated parameter follows the value the block actually used, so
+            // an LFO visibly moves the handle; while the user drags, the base
+            // value is shown instead so the handle stays under the cursor.
+            const int sliderId = ui::widgetId(node.id, param.key.c_str());
+            float effective = 0.0f;
+            float displayed = param.value;
+            if (!ui::sliderDragging(sliderId) && node.effectiveParam(param.key, &effective)) {
+                displayed = std::clamp(effective, std::min(param.minValue, param.maxValue),
+                                       std::max(param.minValue, param.maxValue));
+            }
             if (ui::slider(Rectangle{cursor.x, cursor.y + 14.0f, cursor.width, kRow()}, nullptr,
-                           &param.value, param.minValue, param.maxValue, param.step, valueFormat,
-                           ui::widgetId(node.id, param.key.c_str()), param.logarithmic)) {
+                           &displayed, param.minValue, param.maxValue, param.step, valueFormat,
+                           sliderId, param.logarithmic)) {
+                param.value = displayed;
                 state.project.dirty = true;
             }
             cursor.y += kRow() + 18.0f;

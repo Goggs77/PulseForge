@@ -71,6 +71,9 @@ bool smallButton(Rectangle r, const char *label, bool active = false);
 
 bool slider(Rectangle r, const char *label, float *value, float lo, float hi, float step = 0.0f,
             const char *format = "%.2f", int stableId = 0, bool logarithmic = false);
+// True while that slider is being dragged. The inspector uses it to show the
+// base value (instead of the modulation-following readout) during a drag.
+bool sliderDragging(int stableId);
 bool intSlider(Rectangle r, const char *label, int *value, int lo, int hi, int stableId = 0);
 // Commit-on-enter numeric entry with stepper buttons; used for exact values such
 // as the video resolution, where a slider is the wrong control.
