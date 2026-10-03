@@ -511,19 +511,27 @@ void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
         }
         out[0].audio = node.audioRenderOutput;
     } else {
-        if (!node.audioRenderOutput) node.audioRenderOutput = std::make_shared<AudioBuffer>();
-        AudioBuffer &buffer = *node.audioRenderOutput;
-        const bool restart = node.audioRenderKey != key ||
-                             startFrame != node.audioRenderStart + node.audioRenderFrames;
-        buffer.channels = channels;
-        buffer.sampleRate = sampleRate;
-        buffer.startFrame = startFrame;
-        buffer.frameCount = frames;
-        buffer.samples.assign(static_cast<size_t>(frames) * static_cast<size_t>(channels), 0.0f);
-        fill(buffer, 0, frames, restart ? target : previous, target);
-        node.audioRenderStart = startFrame;
-        node.audioRenderFrames = frames;
-        node.audioRenderKey = key;
+        // A buffer holding more than this frame's window was rendered offline
+        // (the monitor's pre-rendered soundtrack); do not overwrite it while
+        // the editor plays it back.
+        const bool preRendered = node.audioRenderOutput && node.audioRenderFrames > frames;
+        if (!preRendered) {
+            if (!node.audioRenderOutput) node.audioRenderOutput = std::make_shared<AudioBuffer>();
+            AudioBuffer &buffer = *node.audioRenderOutput;
+            const bool restart = node.audioRenderKey != key ||
+                                 startFrame != node.audioRenderStart + node.audioRenderFrames;
+            buffer.channels = channels;
+            buffer.sampleRate = sampleRate;
+            buffer.startFrame = startFrame;
+            buffer.frameCount = frames;
+            buffer.samples.assign(static_cast<size_t>(frames) *
+                                      static_cast<size_t>(channels),
+                                  0.0f);
+            fill(buffer, 0, frames, restart ? target : previous, target);
+            node.audioRenderStart = startFrame;
+            node.audioRenderFrames = frames;
+            node.audioRenderKey = key;
+        }
         out[0].audio = node.audioRenderOutput;
     }
     node.runtimeState["dac.previous"] = static_cast<double>(target);

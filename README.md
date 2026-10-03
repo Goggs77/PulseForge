@@ -210,11 +210,14 @@ executable when *Save preferences* is pressed.
   enumeration is longer than the box; options never spill outside it.
 - **While a dialog or list is open**, everything behind it stops responding to
   clicks and hover, including the CrystalGUI chrome buttons.
-- **Preview playback is audible**: the decoded clip is streamed to the audio
-  device in whole 2 KiB sub-buffers, so pressing *Play* plays the track at its
-  original rate while the playhead follows the frames that were actually
-  handed to the device. Seeking and looping restart the stream at the new
-  position.
+- **Preview playback follows the Audio Output**: a direct link from the Audio
+  Source streams the decoded clip, a processed chain (Dynamics, DAC, ...) is
+  rendered once when playback starts and that result is what you hear, and an
+  unconnected Audio Output plays silence while the video keeps running.
+  Rewiring the Audio Output takes effect immediately; parameter edits are
+  picked up on the next *Play*. The stream still uses whole 2 KiB sub-buffers,
+  so the playhead follows the frames actually handed to the device, and seeking
+  or looping restarts it at the new position.
 - **Starting an export reminds you** when the configured audio bitrate is far
   below the imported file (below 80%), with the source and target rates spelled
   out; *Continue* renders anyway and *Cancel* returns to the dialog.
@@ -403,8 +406,9 @@ exactly once. Anything else (Dynamics, DAC, a processed chain) makes the graph
 render the track first: it is evaluated once before the video starts, one video
 frame at a time so modulations apply, and the result is written to a temporary
 32-bit float WAV that ffmpeg muxes. A missing or unconnected Audio Output exports
-no audio track at all. `-shortest` keeps the mux in step with the video; the
-preview monitor still streams the decoded source clip.
+no audio track at all (`-an`). `-shortest` keeps the mux in step with the video;
+the preview monitor plays the same route, so what you hear while editing is what
+the export will mux.
 
 `pf_selftest` exercises this path end to end:
 

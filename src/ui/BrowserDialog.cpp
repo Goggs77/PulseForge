@@ -55,6 +55,8 @@ namespace {
 // imported file, which is worth a reminder before spending render time.
 bool exportDowngradesAudio(const UiState &state) {
     const Project &project = state.project;
+    // A silent Audio Output has no track to compare the imported bitrate with.
+    if (Exporter::audioRoute(project) == AudioRoute::Silent) return false;
     const double totalDuration = project.effectiveDuration(project.audio.duration);
     const bool copiesConvertedStream =
         state.clip.hasTranscodedAudio() && project.output.audioCodec == "aac" &&

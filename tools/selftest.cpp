@@ -936,6 +936,80 @@ int main(int argc, char **argv) {
                         }
                     }
 
+                    // Monitor routing: playback follows the Audio Output, so a
+                    // disconnected output is silent and a DAC chain renders the
+                    // track the monitor streams.
+                    if (result == 0) {
+                        Project monitor = project;
+                        bool monitorOk = true;
+                        std::string monitorWhat;
+                        if (Exporter::audioRoute(monitor) != AudioRoute::Source) {
+                            monitorOk = false;
+                            monitorWhat = "the default route is not the source";
+                        }
+                        Node *monitorOut = nullptr;
+                        for (Node &node : monitor.graph.nodes) {
+                            if (node.kind == "out.audio") monitorOut = &node;
+                        }
+                        if (!monitorOut) {
+                            monitorOk = false;
+                            monitorWhat = "the default project has no Audio Output";
+                        } else {
+                            monitor.graph.disconnectInput(monitorOut->id, 0);
+                            if (Exporter::audioRoute(monitor) != AudioRoute::Silent) {
+                                monitorOk = false;
+                                monitorWhat = "a disconnected Audio Output is not silent";
+                            }
+                            Node *constant = monitor.graph.addNode("math.constant", 0, 200);
+                            Node *dac = monitor.graph.addNode("dsp.dac", 200, 200);
+                            std::string why;
+                            if (!constant || !dac ||
+                                !monitor.graph.connect(constant->id, 0, dac->id, 0, &why) ||
+                                !monitor.graph.connect(dac->id, 0, monitorOut->id, 0, &why)) {
+                                monitorOk = false;
+                                monitorWhat = "could not wire the DAC route: " + why;
+                            } else {
+                                constant->setFloat("value", 0.5f);
+                                if (Exporter::audioRoute(monitor) != AudioRoute::Processed) {
+                                    monitorOk = false;
+                                    monitorWhat = "a DAC chain is not the processed route";
+                                }
+                                AudioPtr rendered;
+                                std::string renderError;
+                                if (!Exporter::renderOutputAudio(monitor, clip.buffer(), analysis,
+                                                                 0.0, 1.0, {}, {}, &rendered,
+                                                                 &renderError)) {
+                                    monitorOk = false;
+                                    monitorWhat = "monitor render: " + renderError;
+                                } else if (!rendered || rendered->frameCount != 48000 ||
+                                           std::fabs(rendered->samples[24000] - 0.5f) > 0.01f) {
+                                    monitorOk = false;
+                                    monitorWhat = "monitor render produced the wrong samples";
+                                } else {
+                                    clip.setPlaybackBuffer(rendered);
+                                    clip.seek(0.0);
+                                    clip.startPreview();
+                                    const bool played = clip.previewPlaying();
+                                    clip.stopPreview();
+                                    clip.setPlaybackBuffer(nullptr);
+                                    clip.seek(0.0);
+                                    clip.startPreview();
+                                    const bool silent = !clip.previewPlaying();
+                                    clip.clearPlaybackBuffer();
+                                    if (!played || !silent) {
+                                        monitorOk = false;
+                                        monitorWhat = "the monitor did not follow the override";
+                                    }
+                                }
+                            }
+                        }
+                        if (monitorOk) {
+                            std::printf("  monitor  : source/silent/processed routing ok\n");
+                        } else {
+                            result = fail("monitor routing: " + monitorWhat);
+                        }
+                    }
+
                     // Modulation inputs on the existing blocks. They all follow
                     // the same pattern (rates in octaves, levels scaled, offsets
                     // additive), so one check per block covers the wiring.
@@ -1552,6 +1626,27 @@ int main(int argc, char **argv) {
                                         }
                                     }
                                 }
+                            }
+                        }
+
+                        // An unconnected Audio Output exports no audio track.
+                        if (result == 0) {
+                            graph.disconnectInput(audioOut->id, 0);
+                            ExportRequest silentRequest = dynRequest;
+                            silentRequest.outputPath = "selftest_silent.mp4";
+                            silentRequest.endTime = 0.25;
+                            std::string silentError;
+                            const bool silentExported = Exporter::run(
+                                renderer, dynProject, silentRequest, synthetic, analysis, {},
+                                []() { return false; }, &silentError);
+                            const MediaInfo silentInfo = ffmpeg::probe(silentRequest.outputPath);
+                            if (!silentExported) {
+                                result = fail("silent route export: " + silentError);
+                            } else if (!silentInfo.ok || !silentInfo.codec.empty()) {
+                                result = fail("silent route export: the file still carries audio");
+                            } else {
+                                std::printf("  routing  : unconnected Audio Output exported "
+                                            "without a track\n");
                             }
                         }
                     }

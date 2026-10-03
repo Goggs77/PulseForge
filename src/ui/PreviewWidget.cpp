@@ -49,20 +49,15 @@ void drawPreview(UiState &state, Rectangle bounds) {
     const float y = controls.y + ui::s(6.0f);
     if (ui::toggleButton(Rectangle{controls.x + ui::s(8.0f), y, buttonWidth, ui::s(24.0f)},
                          state.playing ? "Pause" : "Play", state.playing)) {
-        state.playing = !state.playing;
-        if (state.playing) {
-            state.clip.seek(state.playhead + project.video.trimStart);
-            state.clip.startPreview();
+        if (!state.playing) {
+            startPlayback(state);
         } else {
-            state.clip.pausePreview();
+            pausePlayback(state);
         }
     }
     if (ui::button(Rectangle{controls.x + ui::s(8.0f) + buttonWidth + ui::s(6.0f), y, buttonWidth, ui::s(24.0f)},
                    "Stop")) {
-        state.playing = false;
-        state.playhead = 0.0;
-        state.clip.stopPreview();
-        state.clip.seek(project.video.trimStart);
+        stopPlayback(state);
     }
     if (ui::toggleButton(Rectangle{controls.x + ui::s(8.0f) + (buttonWidth + ui::s(6.0f)) * 2.0f, y, ui::s(58.0f), ui::s(24.0f)},
                        "Loop", state.loopPlayback)) {

@@ -26,6 +26,8 @@ bool AudioClip::load(const std::string &path, int sampleRate, std::string *error
     stopPreview();
     destroyStream();
     buffer_.reset();
+    playback_.reset();
+    playbackOverride_ = false;
     transcodedAac_.clear();
     position_ = 0.0;
     startPosition_ = 0.0;
@@ -52,6 +54,8 @@ void AudioClip::clear() {
     stopPreview();
     destroyStream();
     buffer_.reset();
+    playback_.reset();
+    playbackOverride_ = false;
     transcodedAac_.clear();
     path_.clear();
     overviewMin_.clear();
@@ -100,11 +104,58 @@ float AudioClip::overviewMax(int index) const {
 
 bool AudioClip::audioDeviceReady() const { return IsAudioDeviceReady(); }
 
+const AudioBuffer *AudioClip::playbackBuffer() const {
+    if (playbackOverride_) return playback_.get();
+    return buffer_.get();
+}
+
+int AudioClip::playbackSampleRate() const {
+    const AudioBuffer *buffer = playbackBuffer();
+    return buffer ? std::max(1, buffer->sampleRate) : 48000;
+}
+
+long long AudioClip::frameForPosition(double seconds) const {
+    const AudioBuffer *buffer = playbackBuffer();
+    if (!buffer || buffer->frameCount <= 0) return 0;
+    const long long frame = std::llround(seconds * playbackSampleRate()) - buffer->startFrame;
+    return std::clamp<long long>(frame, 0, buffer->frameCount);
+}
+
+double AudioClip::positionForFrame(long long frame) const {
+    const AudioBuffer *buffer = playbackBuffer();
+    if (!buffer) return 0.0;
+    const long long clamped = std::clamp<long long>(frame, 0, buffer->frameCount);
+    return static_cast<double>(clamped + buffer->startFrame) / playbackSampleRate();
+}
+
+void AudioClip::setPlaybackBuffer(const AudioPtr &buffer) {
+    playing_ = false;
+    destroyStream();
+    playbackOverride_ = true;
+    playback_ = buffer;
+    feedFrame_ = frameForPosition(position_);
+    startFeedFrame_ = feedFrame_;
+    startClock_ = GetTime();
+    startPosition_ = position_;
+}
+
+void AudioClip::clearPlaybackBuffer() {
+    playing_ = false;
+    destroyStream();
+    playbackOverride_ = false;
+    playback_.reset();
+    feedFrame_ = frameForPosition(position_);
+    startFeedFrame_ = feedFrame_;
+    startClock_ = GetTime();
+    startPosition_ = position_;
+}
+
 void AudioClip::ensureStream() {
-    if (streamReady_ || !valid() || !audioDeviceReady()) return;
+    const AudioBuffer *playback = playbackBuffer();
+    if (streamReady_ || !playback || playback->frameCount <= 0 || !audioDeviceReady()) return;
     SetAudioStreamBufferSizeDefault(kPreviewSubBufferFrames);
-    stream_ = LoadAudioStream(static_cast<unsigned int>(buffer_->sampleRate), 32,
-                              static_cast<unsigned int>(std::max(1, buffer_->channels)));
+    stream_ = LoadAudioStream(static_cast<unsigned int>(std::max(1, playback->sampleRate)), 32,
+                              static_cast<unsigned int>(std::max(1, playback->channels)));
     streamReady_ = stream_.buffer != nullptr;
 }
 
@@ -118,15 +169,17 @@ void AudioClip::destroyStream() {
 }
 
 void AudioClip::feed() {
-    if (!streamReady_ || !valid()) return;
+    const AudioBuffer *playback = playbackBuffer();
+    if (!streamReady_ || !playback) return;
     while (IsAudioStreamProcessed(stream_)) {
-        const long long remaining = buffer_->frameCount - feedFrame_;
+        const long long remaining = playback->frameCount - feedFrame_;
         if (remaining <= 0) return;
         // Exactly one sub-buffer per call: raylib zero-fills the remainder, so
         // anything shorter would insert trailing silence.
         const int frames = static_cast<int>(std::min<long long>(kPreviewSubBufferFrames, remaining));
-        const float *base = buffer_->samples.data() +
-                            static_cast<size_t>(feedFrame_) * static_cast<size_t>(buffer_->channels);
+        const float *base =
+            playback->samples.data() +
+            static_cast<size_t>(feedFrame_) * static_cast<size_t>(playback->channels);
         UpdateAudioStream(stream_, base, frames);
         feedFrame_ += frames;
         if (frames < kPreviewSubBufferFrames) return;  // final, partial chunk
@@ -134,7 +187,8 @@ void AudioClip::feed() {
 }
 
 void AudioClip::startPreview() {
-    if (!valid() || !audioDeviceReady()) return;
+    const AudioBuffer *playback = playbackBuffer();
+    if (!playback || playback->frameCount <= 0 || !audioDeviceReady()) return;
     ensureStream();
     if (!streamReady_) return;
     if (playing_) return;
@@ -153,7 +207,7 @@ void AudioClip::pausePreview() {
     // old queue, so resume restarts the stream from the stopped position.
     playing_ = false;
     if (streamReady_) StopAudioStream(stream_);
-    feedFrame_ = static_cast<long long>(position_ * sampleRate());
+    feedFrame_ = frameForPosition(position_);
     startFeedFrame_ = feedFrame_;
     startClock_ = GetTime();
     startPosition_ = position_;
@@ -162,19 +216,21 @@ void AudioClip::pausePreview() {
 void AudioClip::stopPreview() {
     playing_ = false;
     if (streamReady_) StopAudioStream(stream_);
-    feedFrame_ = static_cast<long long>(position_ * sampleRate());
+    feedFrame_ = frameForPosition(position_);
     startFeedFrame_ = feedFrame_;
     startClock_ = GetTime();
     startPosition_ = position_;
 }
 
 void AudioClip::seek(double seconds) {
-    const double duration = buffer_ ? buffer_->duration() : 0.0;
+    const AudioBuffer *playback = playbackBuffer();
+    const double end = playback ? positionForFrame(playback->frameCount)
+                                : (buffer_ ? buffer_->duration() : std::max(0.0, seconds));
     const bool wasPlaying = playing_;
     playing_ = false;
     if (streamReady_) StopAudioStream(stream_);
-    position_ = std::clamp(seconds, 0.0, std::max(0.0, duration));
-    feedFrame_ = static_cast<long long>(position_ * sampleRate());
+    position_ = std::clamp(seconds, 0.0, std::max(0.0, end));
+    feedFrame_ = frameForPosition(position_);
     startFeedFrame_ = feedFrame_;
     startClock_ = GetTime();
     startPosition_ = position_;
@@ -182,17 +238,18 @@ void AudioClip::seek(double seconds) {
 }
 
 void AudioClip::updatePreview() {
-    if (!valid()) return;
+    const AudioBuffer *playback = playbackBuffer();
+    if (!playback) return;  // silent output: the app clock drives the playhead
     if (playing_) {
         // The playhead follows the frames actually handed to the device, never
         // the wall clock alone, so a stalled frame cannot run ahead of the
         // sound.
         const double elapsed = GetTime() - startClock_;
-        const double queued = static_cast<double>(feedFrame_ - startFeedFrame_) / sampleRate();
+        const double queued =
+            static_cast<double>(feedFrame_ - startFeedFrame_) / playbackSampleRate();
         position_ = startPosition_ + std::min(elapsed, queued);
-        const double duration = buffer_->duration();
-        if (feedFrame_ >= buffer_->frameCount && elapsed >= queued) {
-            position_ = duration;
+        if (feedFrame_ >= playback->frameCount && elapsed >= queued) {
+            position_ = positionForFrame(playback->frameCount);
             playing_ = false;
             if (streamReady_) StopAudioStream(stream_);
         }

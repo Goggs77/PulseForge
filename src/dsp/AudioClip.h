@@ -40,6 +40,15 @@ public:
     float overviewMax(int index) const;
 
     // ---- preview playback -------------------------------------------------
+    // The monitor plays the signal that reaches the Audio Output. With no
+    // override the decoded clip is streamed; `setPlaybackBuffer(nullptr)` makes
+    // playback silent without opening a stream, and a rendered buffer streams
+    // the graph-processed track instead. Positions stay in clip time: the
+    // buffer's `startFrame` maps them onto its samples.
+    void setPlaybackBuffer(const AudioPtr &buffer);
+    void clearPlaybackBuffer();
+    bool hasPlaybackOverride() const { return playbackOverride_; }
+
     bool audioDeviceReady() const;
     void startPreview();
     void pausePreview();
@@ -53,8 +62,15 @@ private:
     void ensureStream();
     void destroyStream();
     void feed();
+    const AudioBuffer *playbackBuffer() const;
+    int playbackSampleRate() const;
+    // Absolute clip position <-> index inside the playback buffer.
+    long long frameForPosition(double seconds) const;
+    double positionForFrame(long long frame) const;
 
     AudioPtr buffer_;
+    AudioPtr playback_;
+    bool playbackOverride_ = false;
     std::string path_;
     std::vector<unsigned char> transcodedAac_;
     std::vector<float> overviewMin_;

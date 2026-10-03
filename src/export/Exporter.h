@@ -30,6 +30,11 @@ struct ExportProgress {
     std::string status;
 };
 
+// How the export and the monitor get their soundtrack. Source = play or mux the
+// media file, Processed = render the graph's Audio Output, Silent = no Audio
+// Output or nothing wired into it.
+enum class AudioRoute { Source, Processed, Silent };
+
 class Exporter {
 public:
     // Blocking; must be called with an active GL context on the main thread.
@@ -44,8 +49,22 @@ public:
     static std::vector<std::string> buildCommand(const Project &project,
                                                  const ExportRequest &request, int frameCount,
                                                  const std::string &audioPathOverride = {},
-                                                 bool copyAudio = false, double audioSeek = -1.0);
+                                                 bool copyAudio = false, double audioSeek = -1.0,
+                                                 bool muteAudio = false);
     static std::string describeCommand(const std::vector<std::string> &arguments);
+
+    // Classifies the Audio Output wiring without rendering anything.
+    static AudioRoute audioRoute(const Project &project);
+
+    // Renders the graph's Audio Output over [startTime, endTime) for the
+    // processed route (the monitor uses it to play what the export will mux).
+    // `rendered` is left empty for the source and silent routes. Returns false
+    // and fills `error` when the route cannot produce audio.
+    static bool renderOutputAudio(Project &project, const AudioPtr &audio,
+                                  const AnalysisPtr &analysis, double startTime, double endTime,
+                                  const std::function<void(const ExportProgress &)> &onProgress,
+                                  const std::function<bool()> &shouldCancel, AudioPtr *rendered,
+                                  std::string *error);
 };
 
 }  // namespace pf

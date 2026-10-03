@@ -73,6 +73,11 @@ struct UiState {
     bool playing = false;
     double playhead = 0.0;
     bool loopPlayback = true;
+    // Monitor playback follows the Audio Output. `monitorRenderKey` caches the
+    // pre-rendered track (full graph fingerprint), `monitorRoute` is the cheap
+    // wiring signature used to notice a rewire while playing.
+    std::string monitorRenderKey;
+    std::string monitorRoute;
 
     int selectedNode = -1;
     float inspectorScroll = 0.0f;
@@ -158,6 +163,11 @@ void loadAudioFile(UiState &state, const std::string &path);
 void loadProjectFile(UiState &state, const std::string &path);
 void saveProjectFile(UiState &state, const std::string &path);
 void startExport(UiState &state, const std::string &path);
+// Prepares the monitor for the current Audio Output route and starts playback.
+// The routed track is rendered once and cached until the graph changes.
+void startPlayback(UiState &state);
+void pausePlayback(UiState &state);
+void stopPlayback(UiState &state);
 void openBrowser(UiState &state, const std::string &purpose, const std::string &title,
                  const std::string &filter, const std::string &initialPath);
 void deleteSelectedNode(UiState &state);

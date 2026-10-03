@@ -50,14 +50,16 @@ specific regressions: math/matrix blocks, project save/load round trip, project
 metadata, text editing (caret, selection, clipboard), shader ports derived from a
 `.glsl` file and `shader.pass` migration, per-family encoder arguments and the
 audio matching rules, legacy Audio Output migration, ADC/DAC conversion, and the
-exclusive Audio Output routing (processed vs. dry exports measured in dBFS).
-When NVENC is usable it also renders a real GPU export.
+exclusive Audio Output routing (processed, dry and silent exports, plus the
+monitor's source/silent/processed decisions). When NVENC is usable it also
+renders a real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
 `selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
 `selftest_dynamics.pforge`, `selftest_dynamics.mp4`, `selftest_dry_source.wav`,
-`selftest_dry.mp4`, `selftest_dac.mp4` and (when GPUs are available)
-`selftest_nvenc.mp4` into the current directory - delete them when you are done.
+`selftest_dry.mp4`, `selftest_dac.mp4`, `selftest_silent.mp4` and (when GPUs are
+available) `selftest_nvenc.mp4` into the current directory - delete them when
+you are done.
 
 Other tools:
 
@@ -178,6 +180,14 @@ docs         rendering notes and the README overlay image
   unconnected Audio Output exports no audio track. Keep the per-frame window
   logic contiguous so this path stays sample-exact, and keep `buildCommand`'s
   `audioSeek` at 0 for the rendered WAV (it already starts at the export offset).
+  `buildCommand`'s `muteAudio` flag is what turns an empty override into `-an`;
+  without it the empty path would fall back to the media file.
+- Monitor playback follows the same route through `Exporter::renderOutputAudio`
+  plus `AudioClip::setPlaybackBuffer` (nullptr = silent, no stream). The app
+  rebuilds the monitor when `monitorRouteIdentity` changes while playing, so
+  rewiring the Audio Output takes effect immediately; parameter edits apply on
+  the next Play. Pre-rendered DAC buffers must not be overwritten by the live
+  window path (`evalDac` keeps buffers larger than one video frame).
 - ADC/DAC are the bridge between the Audio and Scalar domains: ADC measures the
   current video frame's slice of the stream (RMS/Peak), DAC synthesises that
   frame's samples at the clip's rate and ramps between frames. Rendered buffers

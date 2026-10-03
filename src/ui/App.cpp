@@ -86,19 +86,15 @@ void actionPlay(CguiNode *) {
     if (!gApp) return;
     gApp->playing = !gApp->playing;
     if (gApp->playing) {
-        gApp->clip.seek(gApp->playhead + gApp->project.video.trimStart);
-        gApp->clip.startPreview();
+        startPlayback(*gApp);
     } else {
-        gApp->clip.pausePreview();
+        pausePlayback(*gApp);
     }
 }
 
 void actionStop(CguiNode *) {
     if (!gApp) return;
-    gApp->playing = false;
-    gApp->playhead = 0.0;
-    gApp->clip.stopPreview();
-    gApp->clip.seek(gApp->project.video.trimStart);
+    stopPlayback(*gApp);
 }
 
 void actionTheme(CguiNode *) { ui::setDarkTheme(!ui::isDarkTheme()); }
@@ -382,6 +378,80 @@ std::string applyImportedAudio(UiState &state, bool allowTranscode) {
     return note;
 }
 
+// Cheap identity of the Audio Output wiring, used to notice a rewire while the
+// transport is running. Parameter edits are picked up on the next Play.
+std::string monitorRouteIdentity(const UiState &state) {
+    const Project &project = state.project;
+    const int sink = project.graph.audioSinkNodeId();
+    if (sink == 0) return "none";
+    const Link *link = project.graph.findInputLink(sink, 0);
+    if (!link) return "open";
+    const Node *source = project.graph.find(link->fromNode);
+    if (!source || !source->enabled) return "open";
+    char text[320];
+    std::snprintf(text, sizeof(text), "%d:%s|%s|%.4f|%.4f", source->id, source->kind.c_str(),
+                  project.audio.path.c_str(), project.video.trimStart,
+                  project.effectiveDuration(project.audio.duration));
+    return text;
+}
+
+// Full fingerprint of everything the rendered track depends on; the view is
+// excluded so panning and the playhead do not invalidate it.
+std::string monitorRenderKey(const UiState &state) {
+    Project copy = state.project;
+    copy.view = ViewState{};
+    // Moving blocks around does not change the rendered track.
+    for (Node &node : copy.graph.nodes) {
+        node.x = 0.0f;
+        node.y = 0.0f;
+        node.title.clear();
+    }
+    const std::string document = json::write(copy.toJson(state.projectDirectory), 0);
+    unsigned long long hash = 1469598103934665603ull;
+    for (unsigned char c : document) {
+        hash ^= c;
+        hash *= 1099511628211ull;
+    }
+    char text[32];
+    std::snprintf(text, sizeof(text), "%016llx", hash);
+    return text;
+}
+
+// Applies the current Audio Output route to the monitor: the decoded clip for a
+// direct source link, the rendered track for a processed chain, silence for an
+// unconnected output.
+bool prepareMonitorAudio(UiState &state, std::string *error) {
+    switch (Exporter::audioRoute(state.project)) {
+        case AudioRoute::Source:
+            state.clip.clearPlaybackBuffer();
+            return true;
+        case AudioRoute::Silent:
+            state.clip.setPlaybackBuffer(nullptr);
+            return true;
+        case AudioRoute::Processed: {
+            const double duration = state.project.effectiveDuration(state.clip.duration());
+            AudioPtr rendered;
+            if (!Exporter::renderOutputAudio(state.project, state.clip.buffer(), state.analysis,
+                                             0.0, duration, {}, {}, &rendered, error)) {
+                return false;
+            }
+            if (!rendered || rendered->frameCount <= 0) {
+                if (error) *error = "the Audio Output produced no audio";
+                return false;
+            }
+            state.clip.setPlaybackBuffer(rendered);
+            return true;
+        }
+    }
+    return true;
+}
+
+void resetMonitor(UiState &state) {
+    state.clip.clearPlaybackBuffer();
+    state.monitorRenderKey.clear();
+    state.monitorRoute.clear();
+}
+
 }  // namespace
 
 void refreshOutputAudio(UiState &state) {
@@ -406,12 +476,42 @@ void updateExportExtension(UiState &state) {
                                               state.projectDirectory);
 }
 
+void startPlayback(UiState &state) {
+    const std::string key = monitorRenderKey(state);
+    if (!state.clip.hasPlaybackOverride() || key != state.monitorRenderKey) {
+        std::string error;
+        if (!prepareMonitorAudio(state, &error)) {
+            state.playing = false;
+            setStatus(state, "Playback: " + error, true);
+            return;
+        }
+        state.monitorRenderKey = key;
+        state.monitorRoute = monitorRouteIdentity(state);
+    }
+    state.playing = true;
+    state.clip.seek(state.playhead + state.project.video.trimStart);
+    state.clip.startPreview();
+}
+
+void pausePlayback(UiState &state) {
+    state.playing = false;
+    state.clip.pausePreview();
+}
+
+void stopPlayback(UiState &state) {
+    state.playing = false;
+    state.playhead = 0.0;
+    state.clip.stopPreview();
+    state.clip.seek(state.project.video.trimStart);
+}
+
 void newProject(UiState &state) {
     state.project.resetToDefault();
     selectNode(state, state.project.graph.videoSinkNodeId());
     state.playhead = 0.0;
     state.playing = false;
     state.clip.stopPreview();
+    resetMonitor(state);
     state.analysis.reset();
     state.shaderPortKey.clear();
     updateExportExtension(state);  // the container went back to the default
@@ -461,6 +561,8 @@ void loadAudioFile(UiState &state, const std::string &path) {
         showMessage(state, "Could not load audio", error, true);
         return;
     }
+    state.playing = false;
+    resetMonitor(state);
     state.project.audio.path = path;
     state.project.audio.duration = state.clip.duration();
     state.project.audio.sampleRate = state.clip.sampleRate();
@@ -604,7 +706,12 @@ void loadProjectFile(UiState &state, const std::string &path) {
         } else {
             setStatus(state, "Project loaded, but the audio is missing: " + audioError, true);
         }
+    } else {
+        state.clip.clear();
+        state.analysis.reset();
     }
+    state.playing = false;
+    resetMonitor(state);
     state.playhead = std::clamp(state.project.view.playhead, 0.0, 1e9);
     updateExportExtension(state);  // follow the container stored in the project
     setStatus(state, "Opened " + path);
@@ -1073,16 +1180,35 @@ int runApp(int argc, char **argv) {
         const double duration = state.project.effectiveDuration(state.clip.duration());
         state.clip.updatePreview();
         if (state.playing) {
-            state.playhead += GetFrameTime();
-            if (state.playhead >= duration) {
-                if (state.loopPlayback) {
-                    state.playhead = 0.0;
-                    state.clip.seek(state.project.video.trimStart);
-                    state.clip.startPreview();
-                } else {
+            // Rewiring the Audio Output while the transport runs takes effect
+            // immediately: rebuild the monitor from the new route and resume at
+            // the current playhead.
+            const std::string route = monitorRouteIdentity(state);
+            if (route != state.monitorRoute) {
+                state.clip.stopPreview();
+                std::string monitorError;
+                if (!prepareMonitorAudio(state, &monitorError)) {
                     state.playing = false;
-                    state.playhead = duration;
-                    state.clip.pausePreview();
+                    setStatus(state, "Playback stopped: " + monitorError, true);
+                } else {
+                    state.monitorRenderKey = monitorRenderKey(state);
+                    state.monitorRoute = route;
+                    state.clip.seek(state.playhead + state.project.video.trimStart);
+                    state.clip.startPreview();
+                }
+            }
+            if (state.playing) {
+                state.playhead += GetFrameTime();
+                if (state.playhead >= duration) {
+                    if (state.loopPlayback) {
+                        state.playhead = 0.0;
+                        state.clip.seek(state.project.video.trimStart);
+                        state.clip.startPreview();
+                    } else {
+                        state.playing = false;
+                        state.playhead = duration;
+                        state.clip.pausePreview();
+                    }
                 }
             }
         } else if (state.clip.previewPlaying()) {
