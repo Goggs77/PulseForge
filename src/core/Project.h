@@ -67,8 +67,10 @@ public:
     ViewState view;
     bool dirty = false;
 
-    // Fills in the demo pipeline used by File > New.
-    void resetToDefault();
+    // Fills in the demo pipeline used by File > New. Loads `template.pforge`
+    // next to the executable when it exists (shaders lets its Shader blocks
+    // derive their ports); falls back to the built-in pipeline otherwise.
+    void resetToDefault(const ShaderLibrary *shaders = nullptr);
 
     // Adds an Audio Output when the graph has none and wires it to the end of
     // the audio chain the pre-Output exporter used. Returns true when a block

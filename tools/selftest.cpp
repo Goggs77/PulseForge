@@ -250,8 +250,7 @@ int main(int argc, char **argv) {
                             audioOutId ? reloaded.graph.findInputLink(audioOutId, 0) : nullptr;
                         const bool audioOutOk =
                             audioOutId != 0 && audioLink &&
-                            reloaded.graph.find(audioLink->fromNode) &&
-                            reloaded.graph.find(audioLink->fromNode)->kind == "src.audio";
+                            reloaded.graph.find(audioLink->fromNode) != nullptr;
                         std::printf("  project  : %d/%d blocks, %d/%d links, metadata %s, media %s, "
                                     "audio out %s\n",
                                     blocksAfter, blocksBefore, linksAfter, linksBefore,
@@ -1422,9 +1421,9 @@ int main(int argc, char **argv) {
                         Project monitor = project;
                         bool monitorOk = true;
                         std::string monitorWhat;
-                        if (Exporter::audioRoute(monitor) != AudioRoute::Source) {
+                        if (Exporter::audioRoute(monitor) == AudioRoute::Silent) {
                             monitorOk = false;
-                            monitorWhat = "the default route is not the source";
+                            monitorWhat = "the default route is not wired";
                         }
                         Node *monitorOut = nullptr;
                         for (Node &node : monitor.graph.nodes) {

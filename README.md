@@ -114,6 +114,11 @@ window size every frame, so dragging the window edge reflows the editor live:
 2K and 4K screens simply get more canvas, a bigger preview and a taller
 inspector.
 
+Startup and **File > New** load `template.pforge` from next to
+`PulseForge.exe` (or the working directory) when it exists, so the default
+pipeline can be edited without rebuilding. If the template is missing or
+invalid, the built-in demo pipeline is used instead.
+
 ## The editor
 
 ```

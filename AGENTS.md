@@ -239,6 +239,13 @@ docs         rendering notes and the README overlay image
   wiring it to the end of the chain the old exporter followed; `pf_migrate`
   applies the same migration to files on disk. Keep both paths working whenever
   the Audio Output or the audio chain changes.
+- `Project::resetToDefault(const ShaderLibrary *)` loads `template.pforge` next
+  to the executable (with the current working directory as a second candidate):
+  the template is the editable default pipeline used by startup and *File >
+  New*. It clears `filePath` so the new document is unsaved, and the built-in
+  pipeline remains the fallback when the template is missing or invalid.
+  `newProject` passes the renderer's ShaderLibrary so Shader blocks derive their
+  ports, and clears stale preview media when the template has no audio.
 - Project files are JSON (`<name>.pforge`); a UTF-8 BOM is tolerated. Audio and
   video encoder choices are project metadata (`output.audioCodec`,
   `output.videoCodec`), so keep them round-tripping through `Project::toJson`/

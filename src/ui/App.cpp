@@ -554,13 +554,14 @@ void stopPlayback(UiState &state) {
 }
 
 void newProject(UiState &state) {
-    state.project.resetToDefault();
+    state.project.resetToDefault(&state.renderer.shaders());
     selectNode(state, state.project.graph.videoSinkNodeId());
     state.playhead = 0.0;
     state.playing = false;
     state.clip.stopPreview();
     resetMonitor(state);
     state.analysis.reset();
+    if (state.project.audio.path.empty()) state.clip.clear();
     state.shaderPortKey.clear();
     updateExportExtension(state);  // the container went back to the default
     setStatus(state, "New project created");
@@ -1167,7 +1168,7 @@ int runApp(int argc, char **argv) {
     loadPreferences(state.preferences, state.preferencesPath);
     ui::theme().uiScale = state.preferences.guiScale;
     ui::setDarkTheme(state.preferences.defaultDarkTheme);
-    state.project.resetToDefault();
+    state.project.resetToDefault(&state.renderer.shaders());
     selectNode(state, state.project.graph.videoSinkNodeId());
     updateExportExtension(state);  // "output.<container>" next to the project
     // The chrome is positioned in screen coordinates, so the layout has to exist

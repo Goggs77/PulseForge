@@ -396,7 +396,39 @@ std::string exportPathForContainer(const std::string &path, const std::string &c
 // Default project
 // ---------------------------------------------------------------------------
 
-void Project::resetToDefault() {
+void Project::resetToDefault(const ShaderLibrary *shaders) {
+    // The default pipeline lives in template.pforge next to the executable so
+    // it can be edited without rebuilding. The built-in pipeline below stays as
+    // a fallback for a missing or broken template.
+    std::string directory = GetApplicationDirectory();
+    if (!directory.empty() && directory.back() != '/' && directory.back() != '\\') {
+        directory.push_back('/');
+    }
+    std::vector<std::string> candidates;
+    const auto addCandidate = [&](const std::string &path) {
+        if (path.empty()) return;
+        if (std::find(candidates.begin(), candidates.end(), path) == candidates.end()) {
+            candidates.push_back(path);
+        }
+    };
+    addCandidate(directory + "template.pforge");
+    addCandidate("template.pforge");
+    for (const std::string &path : candidates) {
+        std::ifstream probe(path.c_str(), std::ios::binary);
+        if (!probe.good()) continue;
+        probe.close();
+        Project loaded;
+        std::string error;
+        if (loaded.load(path, &error, shaders)) {
+            *this = loaded;
+            filePath.clear();  // New projects start unsaved, based on the template.
+            dirty = false;
+            return;
+        }
+        TraceLog(LOG_WARNING, "PulseForge: could not load default template %s: %s",
+                 path.c_str(), error.c_str());
+    }
+
     name = "Untitled";
     filePath.clear();
     video = VideoMetadata{};
