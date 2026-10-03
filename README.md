@@ -48,7 +48,9 @@ The app is still in early stages, so expect minor bugs.
   and drive any scalar input, including other modulation blocks.
 - **Real export.** Frames are rendered off-screen at the project resolution and
   piped to ffmpeg as raw RGBA, so MP4/H.264, WebM/VP9, MKV, MOV and AVI all work
-  with a single code path. The audio comes straight from the source file.
+  with a single code path. The audio comes straight from the source file unless
+  a **Dynamics** block is patched into the Audio path, in which case the graph
+  renders the processed track first and that is what gets muxed.
 - **Drag and drop.** Drop an audio file or a `.pforge` project onto the window.
   Audio above 100 MB or above 192 kHz is refused with an explanation,
   I guess realtime for this kind of quality is absurd,
@@ -251,7 +253,7 @@ executable when *Save preferences* is pressed.
 | Frequency Band | Analysis | Value | Log-frequency range with average/peak/sum, shaping and attack/release |
 | Envelope Follower | Scalar | Scalar | Attack/release, threshold, gain, floor |
 | Curve / Remap | Scalar | Scalar | Input range to output range with power, smoothstep and clamping |
-| Noise | - | Scalar | Value noise, sample & hold or pink-ish, 0..1 |
+| Dynamics | Audio, Pre-gain, Threshold, Ratio, Attack, Release, Post-gain | Audio | Zero-latency single-band compressor / downward expander with an optional 0 dBFS limiter (Hard Clip or Soft Clip and independent attack/release). The block draws dry and wet loudness in a 4:3 dBFS graph; the modulation ports follow the usual conventions (levels scale by `1 + input`, threshold adds 24 dB per unit, times shift by octaves) |
 
 ### Math
 
@@ -270,6 +272,7 @@ executable when *Save preferences* is pressed.
 | Vector4 | X, Y, Z, W | Vector4, X, Y, Z, W | |
 | Matrix | Row 0..3 (Vector4) | Matrix | 2x2, 3x3 or 4x4, edited as a grid of numeric boxes; a connected Vector4 row overwrites that row |
 | Determinant | Matrix | Determinant, Trace | of the top-left 2x2/3x3/4x4 block |
+| Noise | - | Scalar | Value noise, sample & hold or pink-ish, 0..1 (Math because it takes no Audio/Analysis input) |
 
 Arithmetic, Automation, Matrix and Determinant show a symbol in the middle of
 their block (`+`, `-`, `x`, `/`, `<=`, `>=`, `%`, `0..1`, `+/-`, `3x3`) so the
@@ -390,7 +393,11 @@ Container presets:
 | avi | mpeg4 (qscale) | libmp3lame | |
 
 The audio is taken from the original file with `-ss <trim start>`, so it is
-encoded exactly once. `-shortest` keeps the mux in step with the video.
+encoded exactly once. `-shortest` keeps the mux in step with the video. When a
+**Dynamics** block sits in the Audio path, the graph is evaluated once before
+the video starts (one video frame at a time, so modulations apply) and the
+processed track is written to a temporary 32-bit float WAV that ffmpeg muxes
+instead. The preview monitor streams the decoded source clip.
 
 `pf_selftest` exercises this path end to end:
 

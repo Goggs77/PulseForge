@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <unordered_map>
+#include <utility>
 
 #include "export/FFmpeg.h"
 #include "raylib.h"
@@ -13,10 +15,110 @@
 
 namespace pf {
 
+namespace {
+
+// Follows the Audio links from the project's source and returns the last block
+// that transforms the stream (a Dynamics node), or 0 when the audio is dry.
+int audioProcessorSink(const Graph &graph) {
+    int current = 0;
+    for (const Node &node : graph.nodes) {
+        if (node.enabled && node.kind == "src.audio") {
+            current = node.id;
+            break;
+        }
+    }
+    if (!current) return 0;
+
+    int processor = 0;
+    for (int step = 0; step < 256; ++step) {
+        const Node *node = graph.find(current);
+        if (!node) break;
+        int audioOut = -1;
+        const std::vector<PortDesc> &ports = node->outputPorts();
+        for (size_t port = 0; port < ports.size(); ++port) {
+            if (ports[port].type == PortType::Audio) {
+                audioOut = static_cast<int>(port);
+                break;
+            }
+        }
+        if (audioOut < 0) break;
+        const Link *next = nullptr;
+        for (const Link &link : graph.links) {
+            if (link.fromNode == current && link.fromPort == audioOut) {
+                next = &link;
+                break;
+            }
+        }
+        if (!next) break;
+        current = next->toNode;
+        const Node *target = graph.find(current);
+        if (!target || !target->enabled) break;
+        if (target->kind == "dsp.dynamics") processor = current;
+    }
+    return processor;
+}
+
+void writeLE16(std::ofstream &out, unsigned short value) {
+    const unsigned char bytes[2] = {static_cast<unsigned char>(value & 0xFF),
+                                    static_cast<unsigned char>((value >> 8) & 0xFF)};
+    out.write(reinterpret_cast<const char *>(bytes), 2);
+}
+
+void writeLE32(std::ofstream &out, unsigned int value) {
+    const unsigned char bytes[4] = {static_cast<unsigned char>(value & 0xFF),
+                                    static_cast<unsigned char>((value >> 8) & 0xFF),
+                                    static_cast<unsigned char>((value >> 16) & 0xFF),
+                                    static_cast<unsigned char>((value >> 24) & 0xFF)};
+    out.write(reinterpret_cast<const char *>(bytes), 4);
+}
+
+// 32-bit float WAV for the graph-processed audio. ffmpeg reads it directly and
+// keeps the full precision of the DSP chain.
+bool writeFloatWav(const std::filesystem::path &path, const AudioBuffer &buffer,
+                   long long startFrame, long long frames, std::string *error) {
+    const int channels = std::max(1, buffer.channels);
+    const long long available = std::max<long long>(0, buffer.frameCount - startFrame);
+    frames = std::clamp<long long>(frames, 0, available);
+    const unsigned long long dataBytes =
+        static_cast<unsigned long long>(frames) * channels * sizeof(float);
+    if (frames <= 0 || dataBytes + 36ull > 0xFFFFFFFFull) {
+        if (error) *error = frames <= 0 ? "the graph produced no audio" : "processed audio is too large";
+        return false;
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.good()) {
+        if (error) *error = "could not write " + path.string();
+        return false;
+    }
+    out.write("RIFF", 4);
+    writeLE32(out, static_cast<unsigned int>(36 + dataBytes));
+    out.write("WAVE", 4);
+    out.write("fmt ", 4);
+    writeLE32(out, 16);
+    writeLE16(out, 3);  // IEEE float
+    writeLE16(out, static_cast<unsigned short>(channels));
+    writeLE32(out, static_cast<unsigned int>(std::max(8000, buffer.sampleRate)));
+    writeLE32(out, static_cast<unsigned int>(std::max(8000, buffer.sampleRate) * channels * 4));
+    writeLE16(out, static_cast<unsigned short>(channels * 4));
+    writeLE16(out, 32);
+    out.write("data", 4);
+    writeLE32(out, static_cast<unsigned int>(dataBytes));
+    const size_t offset = static_cast<size_t>(startFrame) * channels;
+    out.write(reinterpret_cast<const char *>(buffer.samples.data() + offset),
+              static_cast<std::streamsize>(dataBytes));
+    if (!out.good()) {
+        if (error) *error = "failed while writing " + path.string();
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 std::vector<std::string> Exporter::buildCommand(const Project &project,
                                                 const ExportRequest &request, int frameCount,
                                                 const std::string &audioPathOverride,
-                                                bool copyAudio) {
+                                                bool copyAudio, double audioSeek) {
     const OutputSpec &out = project.output;
     const std::string &audioPath = audioPathOverride.empty() ? project.audio.path
                                                             : audioPathOverride;
@@ -49,9 +151,10 @@ std::vector<std::string> Exporter::buildCommand(const Project &project,
     // ---- audio ---------------------------------------------------------------
     const bool hasAudio = !audioPath.empty();
     if (hasAudio) {
-        if (project.video.trimStart > 0.0) {
+        const double seek = audioSeek >= 0.0 ? audioSeek : project.video.trimStart;
+        if (seek > 0.0) {
             char buffer[32];
-            std::snprintf(buffer, sizeof(buffer), "%.6f", project.video.trimStart);
+            std::snprintf(buffer, sizeof(buffer), "%.6f", seek);
             args.push_back("-ss");
             args.push_back(buffer);
         }
@@ -239,13 +342,90 @@ bool Exporter::run(Renderer &renderer, Project &project, const ExportRequest &re
             }
         }
     }
+
+    // ---- graph audio rendering ----------------------------------------------
+    // A Dynamics block transforms the Audio stream. ffmpeg wants the whole track
+    // before the first video frame is written, so the graph is evaluated once up
+    // front with the renderer detached: the same per-frame evaluation supplies
+    // the modulated parameters, and the audio buffers the nodes keep let the
+    // render pass below reuse the result instead of processing the clip twice.
+    std::string processedAudioPath;
+    double audioSeek = -1.0;
+    const int processorId = audioProcessorSink(project.graph);
+    if (audio && processorId != 0) {
+        std::error_code pathError;
+        const std::filesystem::path tempDir = std::filesystem::temp_directory_path(pathError);
+        if (!pathError) {
+            const std::filesystem::path tempPath = tempDir / "pulseforge_graph_audio.wav";
+            std::vector<std::pair<int, std::unordered_map<std::string, double>>> savedState;
+            savedState.reserve(project.graph.nodes.size());
+            for (Node &node : project.graph.nodes) {
+                savedState.emplace_back(node.id, node.runtimeState);
+                node.runtimeState.clear();
+                node.audioRenderOutput.reset();
+                node.audioRenderStart = -1;
+                node.audioRenderFrames = 0;
+                node.audioRenderKey.clear();
+            }
+            EvalContext audioCtx;
+            audioCtx.width = project.video.width;
+            audioCtx.height = project.video.height;
+            audioCtx.fps = static_cast<float>(fps);
+            audioCtx.duration = totalDuration;
+            audioCtx.offline = true;
+            audioCtx.audio = audio;
+            audioCtx.analysis = analysis;
+            bool audioCancelled = false;
+            for (int frame = 0; frame < frameCount; ++frame) {
+                const double videoTime = start + static_cast<double>(frame) / fps;
+                audioCtx.time = videoTime;
+                audioCtx.frame = frame;
+                audioCtx.audioTime = std::min(audioDuration, project.video.trimStart + videoTime);
+                project.graph.evaluate(audioCtx);
+                if (shouldCancel && shouldCancel()) {
+                    audioCancelled = true;
+                    break;
+                }
+                if (onProgress && frame % 32 == 0) {
+                    ExportProgress progress;
+                    progress.frame = frame;
+                    progress.frameCount = frameCount;
+                    progress.videoTime = videoTime;
+                    progress.status = "audio";
+                    onProgress(progress);
+                }
+            }
+            const Node *sink = project.graph.find(processorId);
+            std::string wavError;
+            if (!audioCancelled && sink && sink->audioRenderOutput &&
+                writeFloatWav(tempPath, *sink->audioRenderOutput, 0, sink->audioRenderFrames,
+                              &wavError)) {
+                processedAudioPath = tempPath.string();
+                audioPath = processedAudioPath;
+                copyAudio = false;
+                audioSeek = 0.0;  // the rendered clip already starts at the export offset
+            }
+            // The render pass below needs the pre-export modulation state, not
+            // the state left behind by the audio pass. Rendered audio buffers
+            // stay so the nodes can reuse them.
+            for (const auto &entry : savedState) {
+                if (Node *node = project.graph.find(entry.first)) node->runtimeState = entry.second;
+            }
+            if (audioCancelled) {
+                std::filesystem::remove(tempPath);
+                if (error) *error = "export cancelled";
+                return false;
+            }
+        }
+    }
     const std::vector<std::string> arguments =
-        buildCommand(project, request, frameCount, audioPath, copyAudio);
+        buildCommand(project, request, frameCount, audioPath, copyAudio, audioSeek);
     ChildProcess encoder;
     std::string startError;
     if (!encoder.start(arguments, &startError)) {
         if (error) *error = "could not start ffmpeg: " + startError;
         if (!tempAudioPath.empty()) std::filesystem::remove(tempAudioPath);
+        if (!processedAudioPath.empty()) std::filesystem::remove(processedAudioPath);
         return false;
     }
     FrameReadback readback;
@@ -341,6 +521,7 @@ bool Exporter::run(Renderer &renderer, Project &project, const ExportRequest &re
     encoder.closeStdin();
     encoder.wait();
     if (!tempAudioPath.empty()) std::filesystem::remove(tempAudioPath);
+    if (!processedAudioPath.empty()) std::filesystem::remove(processedAudioPath);
     if (ok && !encoder.stderrText().empty()) {
         // Warnings only: ffmpeg returned success.
     }

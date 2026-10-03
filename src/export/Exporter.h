@@ -44,7 +44,7 @@ public:
     static std::vector<std::string> buildCommand(const Project &project,
                                                  const ExportRequest &request, int frameCount,
                                                  const std::string &audioPathOverride = {},
-                                                 bool copyAudio = false);
+                                                 bool copyAudio = false, double audioSeek = -1.0);
     static std::string describeCommand(const std::vector<std::string> &arguments);
 };
 

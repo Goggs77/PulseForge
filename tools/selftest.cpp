@@ -21,6 +21,7 @@
 #include "core/TextEdit.h"
 #include "dsp/Analysis.h"
 #include "dsp/AudioClip.h"
+#include "dsp/Dynamics.h"
 #include "export/Exporter.h"
 #include "export/FFmpeg.h"
 #include "raylib.h"
@@ -655,6 +656,142 @@ int main(int argc, char **argv) {
                         result = fail("debug/modulation blocks: " + what);
                     }
 
+                    // Dynamics: static curve, stream processing and graph
+                    // wiring, including the appended modulation ports.
+                    if (result == 0) {
+                        bool dynOk = true;
+                        std::string dynWhat;
+                        DynamicsSettings statics;
+                        statics.thresholdDb = -18.0f;
+                        statics.ratio = 4.0f;
+                        const float compression = dynamicsGainDb(statics, -6.0f);   // -9 dB
+                        DynamicsSettings expansion = statics;
+                        expansion.expand = true;
+                        expansion.ratio = 2.0f;
+                        const float expanded = dynamicsGainDb(expansion, -30.0f);   // -12 dB
+                        if (std::fabs(compression + 9.0f) > 0.05f ||
+                            std::fabs(expanded + 12.0f) > 0.05f) {
+                            dynOk = false;
+                            dynWhat = "static curve (comp " + std::to_string(compression) +
+                                      ", exp " + std::to_string(expanded) + ")";
+                        }
+
+                        // A settled compressor at -6 dBFS with a 4:1 ratio over a
+                        // -18 dBFS trigger has to land 9 dB down.
+                        DynamicsSettings settings;
+                        settings.thresholdDb = -18.0f;
+                        settings.ratio = 4.0f;
+                        settings.attackMs = 10.0f;
+                        settings.releaseMs = 150.0f;
+                        settings.limiter = false;
+                        DynamicsState state;
+                        std::vector<float> buffer(48000, 0.5f);
+                        std::vector<float> processed(buffer.size(), 0.0f);
+                        processDynamicsBlock(buffer.data(), processed.data(),
+                                             static_cast<long long>(buffer.size()), 1, 48000,
+                                             settings, state);
+                        const float settled = processed.back();
+                        const float expected = 0.5f * std::pow(10.0f, -9.0f / 20.0f);
+                        if (std::fabs(settled - expected) > 0.01f) {
+                            dynOk = false;
+                            dynWhat = "stream gain (" + std::to_string(settled) + " vs " +
+                                      std::to_string(expected) + ")";
+                        }
+
+                        // The limiter has to hold a 2.0 peak at or below 0 dBFS;
+                        // hard clip is transparent below the ceiling.
+                        settings.thresholdDb = 0.0f;   // keep the compressor out of the way
+                        settings.ratio = 1.0f;
+                        settings.limiter = true;
+                        settings.softClip = false;
+                        settings.limiterAttackMs = 0.1f;
+                        DynamicsState limiterState;
+                        std::vector<float> hot(4800, 2.0f);
+                        std::vector<float> limited(hot.size(), 0.0f);
+                        processDynamicsBlock(hot.data(), limited.data(),
+                                             static_cast<long long>(hot.size()), 1, 48000, settings,
+                                             limiterState);
+                        if (limited.back() > 1.0001f || limited.back() < 0.99f) {
+                            dynOk = false;
+                            dynWhat = "hard clip limiter (" + std::to_string(limited.back()) + ")";
+                        }
+
+                        // Graph wiring: the Audio output carries the processed
+                        // clip and a Threshold modulation moves the published
+                        // value the inspector follows.
+                        Graph dynamicsGraph;
+                        Node *dynamics = dynamicsGraph.addNode("dsp.dynamics", 0, 0);
+                        Node *thresholdSource = dynamicsGraph.addNode("math.constant", 220, 0);
+                        float dryDb = -120.0f;
+                        float wetDb = -120.0f;
+                        if (!dynamics || !thresholdSource) {
+                            dynOk = false;
+                            dynWhat = "the Dynamics block is not registered";
+                        } else {
+                            if (dynamics->inputPorts().size() != 7 ||
+                                dynamics->outputPorts().size() != 1 ||
+                                dynamics->inputPorts()[0].type != PortType::Audio ||
+                                dynamics->outputPorts()[0].type != PortType::Audio) {
+                                dynOk = false;
+                                dynWhat = "Dynamics ports are wrong";
+                            }
+                            thresholdSource->setFloat("value", -0.5f);  // -12 dB
+                            dynamicsGraph.connect(thresholdSource->id, 0, dynamics->id, 2);
+                            auto clipBuffer = std::make_shared<AudioBuffer>();
+                            clipBuffer->channels = 1;
+                            clipBuffer->sampleRate = 48000;
+                            clipBuffer->frameCount = 48000;
+                            clipBuffer->samples.assign(48000, 0.5f);
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.audio = clipBuffer;
+                            ctx.audioTime = 0.0;
+                            for (int frame = 0; frame < 12; ++frame) {
+                                ctx.frame = frame;
+                                ctx.audioTime = static_cast<double>(frame) / 60.0;
+                                dynamicsGraph.evaluate(ctx);
+                            }
+                            float published = 0.0f;
+                            const bool hasPublished = dynamics->effectiveParam("threshold", &published);
+                            dryDb = static_cast<float>(
+                                dynamics->runtimeState.count("dryDb")
+                                    ? dynamics->runtimeState.at("dryDb")
+                                    : -120.0);
+                            wetDb = static_cast<float>(
+                                dynamics->runtimeState.count("wetDb")
+                                    ? dynamics->runtimeState.at("wetDb")
+                                    : -120.0);
+                            if (!dynamics->outputs[0].audio ||
+                                dynamics->outputs[0].type != PortType::Audio) {
+                                dynOk = false;
+                                dynWhat = "Dynamics did not emit an Audio buffer";
+                            } else if (!hasPublished || std::fabs(published + 30.0f) > 0.1f) {
+                                dynOk = false;
+                                dynWhat = "Threshold modulation did not publish";
+                            } else if (!(wetDb < dryDb - 4.0f)) {
+                                dynOk = false;
+                                dynWhat = "Dynamics did not attenuate the clip (dry " +
+                                          std::to_string(dryDb) + ", wet " + std::to_string(wetDb) +
+                                          ")";
+                            }
+                        }
+
+                        const NodeDef *noise = Registry::instance().find("dsp.noise");
+                        if (!noise || noise->category != "Math") {
+                            dynOk = false;
+                            dynWhat = "Noise is not in the Math category";
+                        }
+
+                        if (dynOk) {
+                            std::printf("  dynamics : curve %.2f/%.2f dB, settled %.4f, limiter "
+                                        "%.3f, graph dry %.1f wet %.1f dBFS\n",
+                                        compression, expanded, settled, limited.back(), dryDb, wetDb);
+                        } else {
+                            result = fail("dynamics block: " + dynWhat);
+                        }
+                    }
+
                     // Modulation inputs on the existing blocks. They all follow
                     // the same pattern (rates in octaves, levels scaled, offsets
                     // additive), so one check per block covers the wiring.
@@ -1035,6 +1172,130 @@ int main(int argc, char **argv) {
                         std::printf("  export   : %s  %.2f s  format=%s  audio=%s\n",
                                     outputPath.c_str(), info.duration, info.format.c_str(),
                                     info.codec.c_str());
+                    }
+                }
+            }
+
+            // --- Dynamics reaches the exported audio ----------------------
+            if (result == 0) {
+                Project dynProject = project;
+                dynProject.video.width = 320;
+                dynProject.video.height = 180;
+                Graph &graph = dynProject.graph;
+                Node *source = nullptr;
+                Node *analyzer = nullptr;
+                for (Node &node : graph.nodes) {
+                    if (node.kind == "src.audio") source = &node;
+                    if (node.kind == "dsp.analyze") analyzer = &node;
+                }
+                if (!source || !analyzer) {
+                    result = fail("dynamics export: the default pipeline is missing source/analyzer");
+                } else {
+                    graph.disconnectInput(analyzer->id, 0);
+                    Node *dynamics = graph.addNode("dsp.dynamics", 0, 0);
+                    if (!dynamics) {
+                        result = fail("dynamics export: could not add the block");
+                    } else {
+                        dynamics->setInt("mode", 0);            // compress
+                        dynamics->setFloat("threshold", -18.0f);
+                        dynamics->setFloat("ratio", 4.0f);
+                        // A fast attack lets the peak detector track the sine's
+                        // envelope closely, so the steady-state result matches
+                        // the static curve instead of the detector's own lag.
+                        dynamics->setFloat("attack", 0.1f);
+                        dynamics->setFloat("release", 100.0f);
+                        dynamics->setBool("limiter", true);
+                        std::string why;
+                        const bool wired =
+                            graph.connect(source->id, 0, dynamics->id, 0, &why) &&
+                            graph.connect(dynamics->id, 0, analyzer->id, 0, &why);
+                        if (!wired) {
+                            result = fail("dynamics export: " + why);
+                        } else {
+                            // The block and its connections have to survive a
+                            // project round trip like every other block.
+                            std::string roundTripError;
+                            Project reloaded;
+                            if (!dynProject.save("selftest_dynamics.pforge", &roundTripError) ||
+                                !reloaded.load("selftest_dynamics.pforge", &roundTripError)) {
+                                result = fail("dynamics project round trip: " + roundTripError);
+                            } else {
+                                const Node *reloadedDynamics = nullptr;
+                                for (const Node &node : reloaded.graph.nodes) {
+                                    if (node.kind == "dsp.dynamics") reloadedDynamics = &node;
+                                }
+                                if (!reloadedDynamics ||
+                                    std::fabs(reloadedDynamics->pfloat("threshold", 0.0f) + 18.0f) >
+                                        0.01f ||
+                                    reloaded.graph.links.size() != graph.links.size()) {
+                                    result = fail("dynamics project round trip: block or links lost");
+                                }
+                            }
+                        }
+                        if (result == 0) {
+                            ExportRequest dynRequest;
+                            dynRequest.outputPath = "selftest_dynamics.mp4";
+                            dynRequest.overwrite = true;
+                            dynRequest.endTime = 1.0;
+                            // A deterministic source: 100 Hz at -6 dBFS through a
+                            // 4:1 compressor at -18 dBFS has to land 9 dB down,
+                            // so the exported RMS is -18 dBFS RMS, not a guess
+                            // based on whatever programme material was passed in.
+                            auto synthetic = std::make_shared<AudioBuffer>();
+                            // Stereo: decodeAudioFloat() upmixes mono to two
+                            // channels, which shaves 3 dB off a mono probe.
+                            synthetic->channels = 2;
+                            synthetic->sampleRate = 48000;
+                            synthetic->frameCount = 48000 * 4;
+                            synthetic->samples.resize(static_cast<size_t>(synthetic->frameCount) *
+                                                      synthetic->channels);
+                            for (long long i = 0; i < synthetic->frameCount; ++i) {
+                                const float sample =
+                                    0.5f * std::sin(6.2831853f * 100.0f * i / 48000.0f);
+                                synthetic->samples[static_cast<size_t>(i) * 2] = sample;
+                                synthetic->samples[static_cast<size_t>(i) * 2 + 1] = sample;
+                            }
+                            std::string dynError;
+                            const bool exported =
+                                Exporter::run(renderer, dynProject, dynRequest, synthetic,
+                                              analysis, {}, []() { return false; }, &dynError);
+                            const float sourceDb =
+                                loudnessDb(*synthetic, 0, synthetic->frameCount);
+                            int exportedChannels = 0;
+                            std::vector<float> exportedSamples;
+                            std::string decodeError;
+                            const bool decoded = ffmpeg::decodeAudioFloat(
+                                dynRequest.outputPath, 48000, &exportedChannels, &exportedSamples,
+                                &decodeError);
+                            if (!exported) {
+                                result = fail("dynamics export: " + dynError);
+                            } else if (!decoded || exportedSamples.empty()) {
+                                result = fail("dynamics export audio: " + decodeError);
+                            } else {
+                                AudioBuffer exported;
+                                exported.channels = std::max(1, exportedChannels);
+                                exported.sampleRate = 48000;
+                                exported.samples = std::move(exportedSamples);
+                                exported.frameCount = static_cast<long long>(exported.samples.size()) /
+                                                      exported.channels;
+                                // Skip the first 200 ms: the detector needs a
+                                // moment to settle, and the transient would hide
+                                // the steady-state ratio the test is checking.
+                                const float exportedDb = loudnessDb(exported, 9600, 33600);
+                                const float expectedDb = -18.0f;
+                                if (std::fabs(exportedDb - expectedDb) > 1.5f) {
+                                    result = fail("dynamics export: source " +
+                                                  std::to_string(sourceDb) + " dBFS, exported " +
+                                                  std::to_string(exportedDb) + " dBFS, expected " +
+                                                  std::to_string(expectedDb) + " dBFS");
+                                } else {
+                                    std::printf(
+                                        "  dynamics : exported audio %.1f -> %.1f dBFS "
+                                        "(graph processed, expected %.1f)\n",
+                                        sourceDb, exportedDb, expectedDb);
+                                }
+                            }
+                        }
                     }
                 }
             }

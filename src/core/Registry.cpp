@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <vector>
 
+#include "dsp/Dynamics.h"
 #include "render/Geometry.h"
 #include "render/Palette.h"
 #include "render/Renderer.h"
@@ -229,6 +230,153 @@ void evalRemap(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::
         result = std::clamp(result, lo, hi);
     }
     out[0] = Value::makeScalar(result);
+}
+
+// Single-band dynamics. The Audio stream is processed one video frame at a
+// time; the envelope state and the partially rendered clip live on the node, so
+// a sequential pass (playback, export) builds the whole processed buffer while a
+// seek restarts from the requested window. Inputs 1..6 are the appended
+// modulation ports (Pre-gain, Threshold, Ratio, Attack, Release, Post-gain).
+void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                  std::vector<Value> &out) {
+    const AudioBuffer *source = nullptr;
+    if (!in.empty() && in[0].audio) source = in[0].audio.get();
+    else if (ctx.audio) source = ctx.audio.get();
+
+    DynamicsSettings settings;
+    settings.expand = node.pint("mode", 0) == 1;
+    settings.preGainDb = node.pfloat("preGain", 0.0f);
+    settings.thresholdDb = node.pfloat("threshold", -18.0f);
+    settings.ratio = node.pfloat("ratio", 4.0f);
+    settings.attackMs = node.pfloat("attack", 10.0f);
+    settings.releaseMs = node.pfloat("release", 150.0f);
+    settings.postGainDb = node.pfloat("postGain", 0.0f);
+    settings.limiter = node.pbool("limiter", true);
+    settings.softClip = node.pint("limiterMode", 1) == 1;
+    settings.limiterAttackMs = node.pfloat("limiterAttack", 1.0f);
+    settings.limiterReleaseMs = node.pfloat("limiterRelease", 80.0f);
+
+    // Levels scale by (1 + input): the block's dB value moves by the gain the
+    // input asks for. Thresholds and times keep their own conventions.
+    auto levelInputDb = [&](size_t port) {
+        if (in.size() <= port || in[port].type != PortType::Scalar) return 0.0f;
+        const float factor = std::clamp(1.0f + in[port].scalar, 0.01f, 64.0f);
+        return linearToDb(factor);
+    };
+    auto rateInput = [&](size_t port) {
+        if (in.size() <= port || in[port].type != PortType::Scalar) return 1.0f;
+        return std::pow(2.0f, std::clamp(in[port].scalar, -8.0f, 8.0f));
+    };
+    settings.preGainDb += levelInputDb(1);
+    if (in.size() > 2 && in[2].type == PortType::Scalar) {
+        settings.thresholdDb += in[2].scalar * 24.0f;  // full-scale modulation is +/-24 dB
+    }
+    if (in.size() > 3 && in[3].type == PortType::Scalar) {
+        settings.ratio *= std::clamp(1.0f + in[3].scalar, 0.05f, 32.0f);
+    }
+    settings.attackMs *= rateInput(4);
+    settings.releaseMs *= rateInput(5);
+    settings.postGainDb += levelInputDb(6);
+    settings.thresholdDb = std::clamp(settings.thresholdDb, -96.0f, 24.0f);
+    settings.ratio = std::clamp(settings.ratio, 1.0f, 100.0f);
+    settings.attackMs = std::clamp(settings.attackMs, 0.05f, 2000.0f);
+    settings.releaseMs = std::clamp(settings.releaseMs, 1.0f, 8000.0f);
+
+    // The inspector and the in-block readouts follow the values actually used.
+    node.publishEffective("preGain", settings.preGainDb);
+    node.publishEffective("threshold", settings.thresholdDb);
+    node.publishEffective("ratio", settings.ratio);
+    node.publishEffective("attack", settings.attackMs);
+    node.publishEffective("release", settings.releaseMs);
+    node.publishEffective("postGain", settings.postGainDb);
+
+    out[0].type = PortType::Audio;
+    if (!source) return;
+    out[0].audio = node.audioRenderOutput;  // may still be empty until the window is rendered
+    const int channels = std::max(1, source->channels);
+    const int sampleRate = std::max(8000, source->sampleRate);
+    const long long frameCount = source->frameCount;
+    if (frameCount <= 0 || source->samples.empty()) return;
+
+    // Cache key: the input clip plus the *base* parameters. Modulated values are
+    // deliberately excluded so an LFO moving the threshold keeps appending to
+    // the same buffer instead of restarting the render every frame.
+    char key[320];
+    std::snprintf(key, sizeof(key), "%p|%d|%d|%lld|%d|%.5f|%.5f|%.5f|%.5f|%.5f|%.5f|%d|%d|%.5f|%.5f",
+                  static_cast<const void *>(source), channels, sampleRate, frameCount,
+                  node.pint("mode", 0), node.pfloat("preGain", 0.0f),
+                  node.pfloat("threshold", -18.0f), node.pfloat("ratio", 4.0f),
+                  node.pfloat("attack", 10.0f), node.pfloat("release", 150.0f),
+                  node.pfloat("postGain", 0.0f), node.pbool("limiter", true) ? 1 : 0,
+                  node.pint("limiterMode", 1), node.pfloat("limiterAttack", 1.0f),
+                  node.pfloat("limiterRelease", 80.0f));
+
+    const float fps = ctx.fps > 1.0f ? ctx.fps : 60.0f;
+    const long long startFrame =
+        std::clamp<long long>(std::llround(ctx.audioTime * sampleRate), 0, frameCount);
+    const long long endFrame = std::clamp<long long>(
+        std::llround((ctx.audioTime + 1.0 / std::max(1.0f, fps)) * sampleRate), startFrame,
+        frameCount);
+
+    bool reusable = node.audioRenderOutput && node.audioRenderKey == key &&
+                    startFrame >= node.audioRenderStart &&
+                    endFrame <= node.audioRenderStart + node.audioRenderFrames;
+    if (!reusable) {
+        const bool append = node.audioRenderOutput && node.audioRenderKey == key &&
+                            startFrame == node.audioRenderStart + node.audioRenderFrames;
+        if (!append) {
+            node.audioRenderOutput = std::make_shared<AudioBuffer>();
+            node.audioRenderOutput->channels = channels;
+            node.audioRenderOutput->sampleRate = sampleRate;
+            node.audioRenderOutput->frameCount = 0;
+            node.audioRenderStart = startFrame;
+            node.audioRenderFrames = 0;
+            node.audioRenderKey = key;
+            node.runtimeState.erase("dyn.detector");
+            node.runtimeState.erase("dyn.gainDb");
+            node.runtimeState.erase("dyn.limiterGain");
+            out[0].audio = node.audioRenderOutput;
+        }
+        if (endFrame > startFrame) {
+            AudioBuffer &rendered = *node.audioRenderOutput;
+            const long long frames = endFrame - startFrame;
+            const size_t base = rendered.samples.size();
+            rendered.samples.resize(base + static_cast<size_t>(frames) * channels);
+
+            DynamicsState state;
+            const auto stored = [&](const char *name, float fallback) {
+                const auto it = node.runtimeState.find(name);
+                return it == node.runtimeState.end() ? fallback : static_cast<float>(it->second);
+            };
+            state.detector = stored("dyn.detector", 0.0f);
+            state.gainDb = stored("dyn.gainDb", 0.0f);
+            state.limiterGain = stored("dyn.limiterGain", 1.0f);
+            processDynamicsBlock(source->samples.data() + static_cast<size_t>(startFrame) * channels,
+                                 rendered.samples.data() + base, frames, channels, sampleRate, settings,
+                                 state);
+            node.runtimeState["dyn.detector"] = state.detector;
+            node.runtimeState["dyn.gainDb"] = state.gainDb;
+            node.runtimeState["dyn.limiterGain"] = state.limiterGain;
+            node.audioRenderFrames += frames;
+            rendered.frameCount = node.audioRenderFrames;
+            out[0].audio = node.audioRenderOutput;
+        }
+    }
+
+    // Dry and wet loudness for the 4:3 dBFS graph at the top of the block.
+    const long long frames = endFrame - startFrame;
+    const float dryDb = loudnessDb(*source, startFrame, frames);
+    const long long wetOffset = startFrame - node.audioRenderStart;
+    const bool wetAvailable = node.audioRenderOutput && wetOffset >= 0 &&
+                              wetOffset + frames <= node.audioRenderFrames;
+    const float wetDb =
+        wetAvailable ? loudnessDb(*node.audioRenderOutput, wetOffset, frames) : dryDb;
+    node.runtimeState["dryDb"] = dryDb;
+    node.runtimeState["wetDb"] = wetDb;
+    node.runtimeState["gainReductionDb"] = wetDb - dryDb;
+    Node::pushHistory(node.historyA, dryDb, kMeterHistory);
+    Node::pushHistory(node.historyB, wetDb, kMeterHistory);
+    ++node.historyCount;
 }
 
 void evalNoise(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
@@ -1274,18 +1422,57 @@ void Registry::registerBuiltins() {
     }
     {
         NodeDef def;
-        def.kind = "dsp.noise";
+        def.kind = "dsp.dynamics";
         def.category = "DSP";
-        def.label = "Noise";
-        def.description = "Value, sample-and-hold or pink-ish noise as a 0..1 control signal.";
-        def.outputs = {PortDesc{"Value", PortType::Scalar}};
-        def.params = {
-            makeEnumParam("type", "Type", {"Value noise", "Sample & hold", "Pink"}, 0, "Noise"),
-            makeParam("speed", "Speed", 1.0f, 0.01f, 40.0f, 0.01f, "Noise"),
-            makeParam("amount", "Amount", 1.0f, 0.0f, 1.0f, 0.01f, "Noise"),
-            makeIntParam("seed", "Seed", 1, 1, 9999, "Noise"),
+        def.label = "Dynamics";
+        def.description =
+            "Zero-latency single-band compressor / downward expander with an optional 0 dBFS "
+            "output limiter (hard or soft clip). The block draws dry and wet loudness in dBFS; "
+            "Pre-gain, Threshold, Ratio, Attack, Release and Post-gain accept modulation.";
+        def.inputs = {
+            PortDesc{"Audio", PortType::Audio},
+            PortDesc{"Pre-gain", PortType::Scalar, "gain x (1 + input)"},
+            PortDesc{"Threshold", PortType::Scalar, "adds 24 dB per unit"},
+            PortDesc{"Ratio", PortType::Scalar, "ratio x (1 + input)"},
+            PortDesc{"Attack", PortType::Scalar, "time x 2^input"},
+            PortDesc{"Release", PortType::Scalar, "time x 2^input"},
+            PortDesc{"Post-gain", PortType::Scalar, "gain x (1 + input)"},
         };
-        def.evaluate = evalNoise;
+        def.outputs = {PortDesc{"Audio", PortType::Audio, "processed clip"}};
+        Param preGain = makeParam("preGain", "Pre-gain", 0.0f, -24.0f, 24.0f, 0.1f, "Gain");
+        Param postGain = makeParam("postGain", "Post-gain", 0.0f, -24.0f, 24.0f, 0.1f, "Gain");
+        Param threshold =
+            makeParam("threshold", "Trigger (dBFS)", -18.0f, -60.0f, 0.0f, 0.1f, "Dynamics");
+        Param ratio = makeParam("ratio", "Ratio", 4.0f, 1.0f, 20.0f, 0.1f, "Dynamics");
+        Param attack = makeParam("attack", "Attack (ms)", 10.0f, 0.1f, 200.0f, 0.1f, "Dynamics");
+        Param release =
+            makeParam("release", "Release (ms)", 150.0f, 5.0f, 2000.0f, 1.0f, "Dynamics");
+        Param limiterAttack =
+            makeParam("limiterAttack", "Attack (ms)", 1.0f, 0.1f, 100.0f, 0.1f, "Limiter");
+        Param limiterRelease =
+            makeParam("limiterRelease", "Release (ms)", 80.0f, 5.0f, 1000.0f, 1.0f, "Limiter");
+        preGain.valueFormat = "%.1f dB";
+        postGain.valueFormat = "%.1f dB";
+        threshold.valueFormat = "%.1f dBFS";
+        ratio.valueFormat = "%.1f : 1";
+        attack.valueFormat = "%.1f ms";
+        release.valueFormat = "%.0f ms";
+        limiterAttack.valueFormat = "%.1f ms";
+        limiterRelease.valueFormat = "%.0f ms";
+        def.params = {
+            makeEnumParam("mode", "Mode", {"Compress", "Expand"}, 0, "Dynamics"),
+            preGain,
+            postGain,
+            threshold,
+            ratio,
+            attack,
+            release,
+            makeBoolParam("limiter", "Limiter (0 dBFS)", true, "Limiter"),
+            makeEnumParam("limiterMode", "Clip", {"Hard Clip", "Soft Clip"}, 1, "Limiter"),
+            limiterAttack,
+            limiterRelease,
+        };
+        def.evaluate = evalDynamics;
         add(std::move(def));
     }
 
@@ -1525,6 +1712,24 @@ void Registry::registerBuiltins() {
                        PortDesc{"Trace", PortType::Scalar}};
         def.params = {makeEnumParam("size", "Size", {"2x2", "3x3", "4x4"}, 1, "Size")};
         def.evaluate = evalDeterminant;
+        add(std::move(def));
+    }
+    {
+        // Noise takes no Audio/Analysis input, so it belongs with the Math
+        // generators even though it started in DSP.
+        NodeDef def;
+        def.kind = "dsp.noise";
+        def.category = "Math";
+        def.label = "Noise";
+        def.description = "Value, sample-and-hold or pink-ish noise as a 0..1 control signal.";
+        def.outputs = {PortDesc{"Value", PortType::Scalar}};
+        def.params = {
+            makeEnumParam("type", "Type", {"Value noise", "Sample & hold", "Pink"}, 0, "Noise"),
+            makeParam("speed", "Speed", 1.0f, 0.01f, 40.0f, 0.01f, "Noise"),
+            makeParam("amount", "Amount", 1.0f, 0.0f, 1.0f, 0.01f, "Noise"),
+            makeIntParam("seed", "Seed", 1, 1, 9999, "Noise"),
+        };
+        def.evaluate = evalNoise;
         add(std::move(def));
     }
 

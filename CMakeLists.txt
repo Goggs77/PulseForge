@@ -71,6 +71,7 @@ add_library(pulseforge_core STATIC
     src/dsp/AudioClip.cpp
     src/dsp/Fft.cpp
     src/dsp/Analysis.cpp
+    src/dsp/Dynamics.cpp
     src/render/ShaderLibrary.cpp
     src/render/Renderer.cpp
     src/render/Geometry.cpp

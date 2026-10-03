@@ -162,6 +162,15 @@ docs         rendering notes and the README overlay image
   short audio track from cutting the video. GPU encoders are probed with
   `ffmpeg::canRunVideoEncoder` before a run, and
   `exportPathForContainer` keeps the file extension in step with the container.
+- Blocks that transform the **Audio** stream (Dynamics) must fill
+  `Node::audioRenderOutput`/`audioRenderFrames` while the graph is evaluated
+  forward. `Exporter` follows the Audio links from `src.audio`, renders the
+  processed track one video frame at a time with the renderer detached (so
+  modulation still applies), writes it to a temporary 32-bit float WAV and muxes
+  that instead of the source file; the render pass then reuses the same buffer
+  through `audioRenderKey`. Keep the per-frame window logic contiguous so this
+  path stays sample-exact, and keep `buildCommand`'s `audioSeek` at 0 for the
+  rendered WAV (it already starts at the export offset).
 - Project files are JSON (`<name>.pforge`); a UTF-8 BOM is tolerated. Audio and
   video encoder choices are project metadata (`output.audioCodec`,
   `output.videoCodec`), so keep them round-tripping through `Project::toJson`/

@@ -22,6 +22,9 @@ constexpr float kVisualHeightGraph = 52.0f;
 constexpr float kVisualHeightGuard = 46.0f;
 constexpr float kVisualHeightRing = 46.0f;
 constexpr float kVisualHeightFilter = 84.0f;
+// 4:3 dBFS graph plus a readout row; the plot itself is fitted to 4:3 while
+// drawing, this is the body height that gives it room at zoom 1.
+constexpr float kVisualHeightDynamics = 140.0f;
 
 // Number of columns the spectrum is reduced to. 64 columns with bilinear-ish
 // interpolation is the sweet spot for legibility versus per-frame cost.
@@ -637,6 +640,115 @@ void drawFilterVisual(UiState &state, const Node &node, Rectangle body, float zo
                         ui::Align::Right);
 }
 
+// Dynamics: a 4:3 value/time graph whose vertical axis runs from -60 dBFS
+// (silence in practice) to 0 dBFS, with the dry input and the processed output
+// loudness scrolling through it. The static trigger level is marked so the
+// compression/expansion point is readable at a glance.
+void drawDynamicsVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
+    (void)state;
+    (void)zoom;
+    const ui::Theme &t = ui::theme();
+    const float inset = visualInset(body);
+    const Rectangle inner{body.x + inset, body.y + inset, body.width - inset * 2.0f,
+                          body.height - inset * 2.0f};
+    drawVisualBackground(body);
+
+    auto reading = [&](const char *key, double fallback) {
+        const auto it = node.runtimeState.find(key);
+        return it == node.runtimeState.end() ? fallback : it->second;
+    };
+    const float textHeight = visualFont(inner, 0.11f) + 2.0f;
+    // Split readout: each label owns half the row so neither can push the other
+    // out of the block, whatever the GUI scale is.
+    char text[48];
+    std::snprintf(text, sizeof(text), "DRY %.1f", reading("dryDb", -120.0));
+    ui::drawTextClipped(Rectangle{inner.x + 2.0f, inner.y, inner.width * 0.5f - 3.0f, textHeight},
+                        text, visualFont(inner, 0.11f), withAlpha(t.textDim, 0.95f));
+    std::snprintf(text, sizeof(text), "WET %.1f", reading("wetDb", -120.0));
+    ui::drawTextClipped(Rectangle{inner.x + inner.width * 0.5f, inner.y,
+                                  inner.width * 0.5f - 2.0f, textHeight},
+                        text, visualFont(inner, 0.11f), withAlpha(t.accent, 0.95f),
+                        ui::Align::Right);
+
+    // 4:3 plot, fitted to both the block width and the leftover height.
+    const float plotMaxHeight = std::max(8.0f, inner.height - textHeight);
+    float plotHeight = plotMaxHeight;
+    float plotWidth = plotHeight * 4.0f / 3.0f;
+    if (plotWidth > inner.width) {
+        plotWidth = inner.width;
+        plotHeight = plotWidth * 3.0f / 4.0f;
+    }
+    const Rectangle plot{inner.x + (inner.width - plotWidth) * 0.5f, inner.y + textHeight,
+                         plotWidth, plotHeight};
+    DrawRectangleRounded(plot, ui::roundness(plot, ui::s(3.0f)), 3,
+                         palette::modulate(t.panelAlt, 0.55f));
+
+    auto yForDb = [&](double db) {
+        const double position = std::clamp((db + 60.0) / 60.0, 0.0, 1.0);
+        return plot.y + plot.height * static_cast<float>(1.0 - position);
+    };
+    const float gridFont = visualFont(plot, 0.10f);
+    // The bottom line is the noise floor / -inf: everything quieter than the
+    // floor sits on it, so it is labelled accordingly.
+    const int gridDb[] = {0, -12, -24, -36, -48, -60};
+    for (int db : gridDb) {
+        const float y = yForDb(static_cast<double>(db));
+        DrawLineEx(Vector2{plot.x, y}, Vector2{plot.x + plot.width, y},
+                   visualStroke(plot, 0.012f), withAlpha(t.border, 0.55f));
+        char label[8];
+        if (db <= -60) {
+            std::snprintf(label, sizeof(label), "-inf");
+        } else {
+            std::snprintf(label, sizeof(label), "%d", db);
+        }
+        const float labelHeight = gridFont + 1.0f;
+        const float labelY =
+            std::clamp(y - labelHeight * 0.5f, plot.y + 1.0f,
+                       plot.y + plot.height - labelHeight - 1.0f);
+        ui::drawTextClipped(Rectangle{plot.x + 2.0f, labelY, plot.width * 0.30f, labelHeight},
+                            label, gridFont, withAlpha(t.textDim, 0.75f));
+    }
+
+    float thresholdDb = node.pfloat("threshold", -18.0f);
+    node.effectiveParam("threshold", &thresholdDb);
+    const float thresholdY = yForDb(static_cast<double>(thresholdDb));
+    DrawLineEx(Vector2{plot.x, thresholdY}, Vector2{plot.x + plot.width, thresholdY},
+               visualStroke(plot, 0.02f), withAlpha(t.warn, 0.60f));
+
+    // Mode and gain reduction sit inside the plot's top-right corner, where the
+    // signal never reaches.
+    const Color modeColor = node.pint("mode", 0) == 1 ? t.accentAlt : t.accent;
+    std::snprintf(text, sizeof(text), "%s %+.1f dB",
+                  node.pint("mode", 0) == 1 ? "EXP" : "COMP", reading("gainReductionDb", 0.0));
+    ui::drawTextClipped(Rectangle{plot.x + plot.width * 0.40f, plot.y + 1.0f,
+                                  plot.width * 0.60f - 3.0f, gridFont + 2.0f},
+                        text, gridFont, withAlpha(modeColor, 0.95f), ui::Align::Right);
+
+    const int capacity = static_cast<int>(node.historyA.size());
+    if (capacity < 2) {
+        ui::drawText(plot, "waiting for audio", visualFont(plot, 0.14f), withAlpha(t.textDim, 0.8f),
+                     ui::Align::Center);
+        return;
+    }
+    static thread_local std::vector<float> drySeries;
+    static thread_local std::vector<float> wetSeries;
+    drySeries.assign(static_cast<size_t>(capacity), 0.0f);
+    wetSeries.assign(static_cast<size_t>(capacity), 0.0f);
+    for (int i = 0; i < capacity; ++i) {
+        const float position = static_cast<float>(i) / static_cast<float>(capacity - 1);
+        const float dryDb = Node::historyAt(node.historyA, capacity, node.historyCount, position);
+        const float wetDb = Node::historyAt(node.historyB, capacity, node.historyCount, position);
+        drySeries[static_cast<size_t>(i)] = std::clamp((dryDb + 60.0f) / 60.0f, 0.0f, 1.0f);
+        wetSeries[static_cast<size_t>(i)] = std::clamp((wetDb + 60.0f) / 60.0f, 0.0f, 1.0f);
+    }
+    drawSeriesOutline(plot, drySeries.data(), capacity, withAlpha(t.textDim, 0.85f), 0.0f,
+                      std::max(1.0f, visualStroke(plot, 0.015f)));
+    drawFilledSeries(plot, wetSeries.data(), capacity, withAlpha(t.accent, 0.45f),
+                     withAlpha(t.accent, 0.05f));
+    drawSeriesOutline(plot, wetSeries.data(), capacity, withAlpha(t.accent, 0.95f), 0.0f,
+                      std::max(1.2f, visualStroke(plot, 0.03f)));
+}
+
 }  // namespace
 
 float nodeVisualHeight(const Node &node) {
@@ -650,6 +762,7 @@ float nodeVisualHeight(const Node &node) {
     if (node.kind == "dbg.guard") return kVisualHeightGuard;
     if (node.kind == "mod.ringbuffer") return kVisualHeightRing;
     if (node.kind == "mod.filter") return kVisualHeightFilter;
+    if (node.kind == "dsp.dynamics") return kVisualHeightDynamics;
     return 0.0f;
 }
 
@@ -685,6 +798,8 @@ void drawNodeVisual(UiState &state, const Node &node, Rectangle body, Rectangle 
         drawRingbufferVisual(state, node, body, zoom);
     } else if (node.kind == "mod.filter") {
         drawFilterVisual(state, node, body, zoom);
+    } else if (node.kind == "dsp.dynamics") {
+        drawDynamicsVisual(state, node, body, zoom);
     }
     EndScissorMode();
 }

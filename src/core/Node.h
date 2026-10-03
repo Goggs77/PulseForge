@@ -99,6 +99,15 @@ public:
     // particles). Never serialised.
     std::unordered_map<std::string, double> runtimeState;
 
+    // Audio rendered by a block that transforms the Audio stream (Dynamics).
+    // `audioRenderOutput` starts at `audioRenderStart` (a frame index inside the
+    // source clip) and grows as the graph is evaluated forward; the exporter
+    // uses it to mux the processed stream. Never serialised.
+    std::shared_ptr<AudioBuffer> audioRenderOutput;
+    long long audioRenderStart = -1;
+    long long audioRenderFrames = 0;
+    std::string audioRenderKey;
+
     // Rolling sample buffers kept for the in-block visualisations. Not
     // serialised; the editor reads them directly while drawing the graph.
     std::vector<float> historyA;
