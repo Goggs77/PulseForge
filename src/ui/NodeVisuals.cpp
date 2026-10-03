@@ -202,11 +202,11 @@ void drawBandVisual(UiState &state, const Node &node, Rectangle body, float zoom
     const float outValue =
         static_cast<float>(node.runtimeState.count("out") ? node.runtimeState.at("out") : 0.0);
     const float markerWidth = ui::s(3.0f);
-    DrawRectangle(static_cast<int>(inner.x + inner.width - markerWidth),
-                  static_cast<int>(inner.y + inner.height - std::clamp(inValue, 0.0f, 1.0f) * inner.height),
-                  static_cast<int>(markerWidth),
-                  static_cast<int>(std::clamp(inValue, 0.0f, 1.0f) * inner.height),
-                  withAlpha(inputColor, 0.9f));
+    //DrawRectangle(static_cast<int>(inner.x + inner.width - markerWidth),
+    //              static_cast<int>(inner.y + inner.height - std::clamp(inValue, 0.0f, 1.0f) * inner.height),
+    //              static_cast<int>(markerWidth),
+    //              static_cast<int>(std::clamp(inValue, 0.0f, 1.0f) * inner.height),
+    //              withAlpha(inputColor, 0.9f)); //don't need this as well
     DrawRectangle(static_cast<int>(inner.x + inner.width - markerWidth * 2.0f - 2.0f),
                   static_cast<int>(inner.y + inner.height - std::clamp(outValue, 0.0f, 1.0f) * inner.height),
                   static_cast<int>(markerWidth),
@@ -683,8 +683,8 @@ void drawDynamicsVisual(UiState &state, const Node &node, Rectangle body, float 
     }
     const Rectangle plot{inner.x + (inner.width - plotWidth) * 0.5f, inner.y + textHeight,
                          plotWidth, plotHeight};
-    DrawRectangleRounded(plot, ui::roundness(plot, ui::s(3.0f)), 3,
-                         palette::modulate(t.panelAlt, 0.55f));
+    //DrawRectangleRounded(plot, ui::roundness(plot, ui::s(3.0f)), 3,
+    //                     palette::modulate(t.panelAlt, 0.55f)); //actually no
 
     auto yForDb = [&](double db) {
         const double position = std::clamp((db + 60.0) / 60.0, 0.0, 1.0);
@@ -697,7 +697,7 @@ void drawDynamicsVisual(UiState &state, const Node &node, Rectangle body, float 
     for (int db : gridDb) {
         const float y = yForDb(static_cast<double>(db));
         DrawLineEx(Vector2{plot.x, y}, Vector2{plot.x + plot.width, y},
-                   visualStroke(plot, 0.012f), withAlpha(t.border, 0.55f));
+                   visualStroke(plot, 0.006f), withAlpha(t.border, 0.25f)); // cleaner visuals
         char label[8];
         if (db <= -60) {
             std::snprintf(label, sizeof(label), "-inf");
@@ -708,8 +708,8 @@ void drawDynamicsVisual(UiState &state, const Node &node, Rectangle body, float 
         const float labelY =
             std::clamp(y - labelHeight * 0.5f, plot.y + 1.0f,
                        plot.y + plot.height - labelHeight - 1.0f);
-        ui::drawTextClipped(Rectangle{plot.x + 2.0f, labelY, plot.width * 0.30f, labelHeight},
-                            label, gridFont, withAlpha(t.textDim, 0.75f));
+        ui::drawTextClipped(Rectangle{plot.x + 2.0f, labelY + 1.0f, plot.width * 0.30f, labelHeight * 1.59f},
+                            label, gridFont * 0.64f, withAlpha(t.textDim, 0.75f)); // move text down for visability
     }
 
     float thresholdDb = node.pfloat("threshold", -18.0f);
