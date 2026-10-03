@@ -246,6 +246,47 @@ docs         rendering notes and the README overlay image
 - Logging: `SetTraceLogLevel(LOG_WARNING)` is active, so use
   `TraceLog(LOG_WARNING, ...)` for anything a scripted run should be able to see.
 
+### Audio stream sizing (raylib 5.6-dev, raudio 1.1, miniaudio 0.11)
+
+PulseForge uses the CrystalGUI submodule's raylib (`raylib.h`: major 5, minor 6,
+patch 0, `RAYLIB_VERSION "5.6-dev"`), whose audio layer is raudio 1.1 on
+miniaudio 0.11. On Windows miniaudio selects **WASAPI shared mode** by default;
+the device period is chosen by the OS/driver and is not exposed through
+raylib's public API.
+
+- `SetAudioStreamBufferSizeDefault(N)` only *requests* a sub-buffer size.
+  `LoadAudioStream` allocates a 2x ring (`sizeInFrames = subBufferSize*2`) and
+  raises `subBufferSize` to `AUDIO.System.device.playback.internalPeriodSizeInFrames`
+  when `N` is smaller. `AudioStream.buffer` is opaque, so the effective size
+  cannot be queried.
+- `UpdateAudioStream(stream, data, frameCount)` copies `frameCount` frames into
+  one sub-buffer and **zero-fills the remaining `subBufferSize - frameCount`**
+  frames. Feeding a frame-sized chunk smaller than the real sub-buffer is
+  audible as periodic silence and dropped audio; this was the October 2026
+  preview bug.
+- Measured on the development machine (44.1/48 kHz WASAPI): with a 1024-frame
+  request, writing 1537 frames succeeds but 2049 warns `STREAM: Attempting to
+  write too many frames to buffer`, so the real sub-buffer is ~1537-2048 frames
+  (about 40 ms; ~1920 frames at 48 kHz). `detectStreamSubBufferFrames` in
+  `src/dsp/AudioClip.cpp` exploits that warning: it installs a trace-log
+  callback, loads throwaway streams with `defaultSize = 1`, binary-searches the
+  largest writable frame count and caches the result per sample rate. If the
+  warning text changes, it falls back to 16384 frames and logs a warning rather
+  than feeding a too-small buffer.
+- `AudioClip` streams at `max(one video frame's samples, detected device
+  sub-buffer)`, prefills two sub-buffers for live playback and feeds exactly the
+  detected size. The buffered (direct Audio Source) stream uses
+  `max(2048, detected)` for the same reason.
+- Do not "fix" an underrun by feeding smaller chunks (that zero-fills), and do
+  not try to read `AudioStream.buffer` (it is not public). Re-measure the
+  warning string and period handling when raylib/raudio/miniaudio is upgraded.
+- **Device-wise config is not required.** The period is probed per process and
+  sample rate, so another machine or output device adapts on first playback.
+  Live playback re-probes on every Play (the buffered direct-source stream
+  reuses the cached value), so switching the default output device while the
+  app is running is picked up on the next Play. A user-facing buffer override
+  could be added later, but correctness does not depend on a per-device table.
+
 ## Commits
 
 Conventional commit subjects (`feat:`, `fix:`, `docs:`, `chore:`), one subsystem

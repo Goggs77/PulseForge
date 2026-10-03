@@ -40,13 +40,25 @@ void captureStreamTrace(int level, const char *text, va_list args) {
 
 // raylib raises a stream's sub-buffer to the device period when the requested
 // size is smaller, but UpdateAudioStream still expects a whole sub-buffer and
-// zero-fills the remainder. Detect the real size once per sample rate so the
-// preview always feeds exactly one sub-buffer.
-int detectStreamSubBufferFrames(int sampleRate, int channels) {
+// zero-fills the remainder. Detect the real size so the preview always feeds
+// exactly one sub-buffer; live starts re-probe in case the default output
+// device changed since the last playback.
+int detectStreamSubBufferFrames(int sampleRate, int channels, bool refresh = false) {
     static std::vector<std::pair<int, int>> cache;
-    for (const auto &entry : cache) {
-        if (entry.first == sampleRate) return entry.second;
+    if (!refresh) {
+        for (const auto &entry : cache) {
+            if (entry.first == sampleRate) return entry.second;
+        }
     }
+    const auto store = [&](int value) {
+        for (auto &entry : cache) {
+            if (entry.first == sampleRate) {
+                entry.second = value;
+                return;
+            }
+        }
+        cache.emplace_back(sampleRate, value);
+    };
     SetTraceLogCallback(captureStreamTrace);
     const auto fits = [&](int frames) {
         SetAudioStreamBufferSizeDefault(1);
@@ -60,6 +72,17 @@ int detectStreamSubBufferFrames(int sampleRate, int channels) {
         UnloadAudioStream(stream);
         return !gStreamOverflow;
     };
+    // Sanity check: this must overflow. If raylib changes the warning text the
+    // probe cannot see it, so fall back to a size above any normal period
+    // instead of returning a too-small value that would be zero-filled.
+    if (fits(kLiveSubBufferMaxFrames * 2)) {
+        store(kLiveSubBufferMaxFrames);
+        SetTraceLogCallback(nullptr);
+        TraceLog(LOG_WARNING,
+                 "PulseForge: could not probe the audio sub-buffer size; using %d frames",
+                 kLiveSubBufferMaxFrames);
+        return kLiveSubBufferMaxFrames;
+    }
     int low = 1;
     int high = 1;
     while (high <= kLiveSubBufferMaxFrames && fits(high)) {
@@ -75,7 +98,7 @@ int detectStreamSubBufferFrames(int sampleRate, int channels) {
         }
     }
     const int detected = std::clamp(low, kLiveSubBufferMinFrames, kLiveSubBufferMaxFrames);
-    cache.emplace_back(sampleRate, detected);
+    store(detected);
     SetTraceLogCallback(nullptr);
     return detected;
 }
@@ -230,7 +253,9 @@ void AudioClip::startLiveStream(int sampleRate, int channels, int frameSamples) 
     liveChannels_ = std::clamp(channels, 1, 8);
     // The real sub-buffer is raised to the device period, so feed exactly that
     // size instead of a smaller frame-sized chunk (which would be zero-filled).
-    const int deviceSub = detectStreamSubBufferFrames(liveRate_, liveChannels_);
+    // Re-probe on every live start so changing the default output device while
+    // the app is running is picked up on the next Play.
+    const int deviceSub = detectStreamSubBufferFrames(liveRate_, liveChannels_, true);
     liveSubBufferFrames_ =
         std::clamp(std::max(nextPowerOfTwo(std::max(256, frameSamples)), deviceSub),
                    kLiveSubBufferMinFrames, kLiveSubBufferMaxFrames);
