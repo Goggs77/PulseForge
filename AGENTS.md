@@ -109,6 +109,10 @@ docs         rendering notes and the README overlay image
   blocks whose ports follow their configuration store them in
   `Node::dynamicInputs` (the Shader block derives them from the uniforms its file
   uses). Never index `def->inputs` directly - use the accessors.
+- Modulation inputs are **appended** to a block's input list: saved projects store
+  links by port index, so inserting a port in the middle would re-target them.
+  The convention for the value is: rates/frequencies multiply by `2^input`
+  (octaves), levels multiply by `(1 + input)` and offsets add the input.
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
   the Frequency Band and Signal Filter Hz sliders) and an optional
   `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty
@@ -121,6 +125,11 @@ docs         rendering notes and the README overlay image
 - New categories need nothing beyond `def.category`: the palette, its captions
   and the graph accent colour are generated from the registry ("Debug" is the
   most recent addition).
+- Sizes *inside* a block's live content (text, handles, strokes) are derived from
+  the body rect through `visualFont`/`visualHandle`/`visualStroke`/`visualInset`,
+  so they scale with the canvas zoom exactly like the block and never clip.
+  `drawNodeVisual` scissorstamps its own body and therefore ends the caller's
+  scissor: the canvas re-establishes its viewport clip right after the call.
 - UI text goes through the atlas helpers: `ui::drawText`, `drawTextClipped`,
   `drawTextWrapped`/`textWrappedHeight`. Do not use CrystalGUI's
   `CguiDrawTextPro`; it renders thin strokes and wraps with a guessed line count.

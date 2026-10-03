@@ -92,13 +92,22 @@ void evalClock(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::
 }
 
 void evalPulse(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
-    (void)in;
-    const float bpm = std::max(1.0f, node.pfloat("bpm", 120.0f));
+    // Modulation ports are appended after the block's own inputs, so adding them
+    // never renumbers the links of an existing project.
+    const bool bpmConnected = in.size() > 0 && in[0].type == PortType::Scalar;
+    const bool decayConnected = in.size() > 1 && in[1].type == PortType::Scalar;
+    const bool offsetConnected = in.size() > 2 && in[2].type == PortType::Scalar;
+    float bpm = node.pfloat("bpm", 120.0f);
+    if (bpmConnected) bpm *= std::pow(2.0f, std::clamp(in[0].scalar, -4.0f, 4.0f));
+    bpm = std::clamp(bpm, 20.0f, 300.0f);
     const int division = node.pint("division", 2);
     static const float divisors[] = {1.0f, 0.5f, 0.25f, 0.125f, 0.0625f};
     const float beatLength = 60.0f / bpm * divisors[std::clamp(division, 0, 4)];
-    const float decay = std::max(0.05f, node.pfloat("decay", 0.5f));
-    const float offset = node.pfloat("offset", 0.0f);
+    float decay = node.pfloat("decay", 0.5f);
+    if (decayConnected) decay *= std::max(0.0f, 1.0f + in[1].scalar);
+    decay = std::clamp(decay, 0.02f, 2.0f);
+    float offset = node.pfloat("offset", 0.0f);
+    if (offsetConnected) offset += in[2].scalar * 0.25f;  // quarter of a beat nudge
     const double phase = (ctx.time + offset) / std::max(1e-4f, beatLength);
     const float fract = static_cast<float>(phase - std::floor(phase));
     out[0] = Value::makeScalar(std::exp(-fract * decay * 9.0f));
@@ -517,7 +526,12 @@ void evalDeterminant(Node &node, EvalContext &ctx, const std::vector<Value> &in,
 // ---------------------------------------------------------------------------
 
 void evalLfo(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
-    const float frequency = node.pfloat("frequency", 1.0f);
+    const bool frequencyConnected = in.size() > 1 && in[1].type == PortType::Scalar;
+    const bool amplitudeConnected = in.size() > 2 && in[2].type == PortType::Scalar;
+    const bool offsetConnected = in.size() > 3 && in[3].type == PortType::Scalar;
+    float frequency = node.pfloat("frequency", 1.0f);
+    if (frequencyConnected) frequency *= std::pow(2.0f, std::clamp(in[1].scalar, -8.0f, 8.0f));
+    frequency = std::clamp(frequency, 0.0f, 200.0f);
     const float phaseOffset = node.pfloat("phase", 0.0f);
     const bool sync = node.pbool("sync", false);
     double phase = 0.0;
@@ -547,15 +561,18 @@ void evalLfo(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::ve
         }
         default: wave = std::sin(t * 6.2831853f) * 0.5f; break;
     }
-    const float amplitude = node.pfloat("amplitude", 1.0f);
-    const float offset = node.pfloat("offset", 0.0f);
+    float amplitude = node.pfloat("amplitude", 1.0f);
+    if (amplitudeConnected) amplitude *= std::max(0.0f, 1.0f + in[2].scalar);
+    float offset = node.pfloat("offset", 0.0f);
+    if (offsetConnected) offset += in[3].scalar;
     // Keep the phase so the block preview can put its pivot on the waveform.
     node.runtimeState["phase"] = t;
     out[0] = Value::makeScalar(wave * amplitude + offset);
 }
 
 void evalAutomation(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
-    (void)in;
+    const bool depthConnected = !in.empty() && in[0].type == PortType::Scalar;
+    const bool offsetConnected = in.size() > 1 && in[1].type == PortType::Scalar;
     double normalized = ctx.duration > 0.0 ? ctx.time / ctx.duration : 0.0;
     if (node.pbool("loop", false)) {
         const double span = std::max(1e-4, static_cast<double>(node.pfloat("loopLength", 1.0f)));
@@ -567,7 +584,11 @@ void evalAutomation(Node &node, EvalContext &ctx, const std::vector<Value> &in, 
     const float curve = std::clamp(node.curveAt("curve", normalized), 0.0f, 1.0f);
     node.runtimeState["pos"] = normalized;
     float result = node.pbool("bipolar", false) ? (curve * 2.0f - 1.0f) : curve;
-    result = result * node.pfloat("depth", 1.0f) + node.pfloat("offset", 0.0f);
+    float depth = node.pfloat("depth", 1.0f);
+    if (depthConnected) depth *= std::max(0.0f, 1.0f + in[0].scalar);
+    float offset = node.pfloat("offset", 0.0f);
+    if (offsetConnected) offset += in[1].scalar;
+    result = result * depth + offset;
     if (node.pbool("smooth", false)) {
         result = follow(node, "smooth", result, node.pfloat("smoothing", 0.2f),
                         node.pfloat("smoothing", 0.2f), dtOf(ctx));
@@ -579,9 +600,15 @@ void evalAmount(Node &node, EvalContext &ctx, const std::vector<Value> &in, std:
     (void)ctx;
     const float value = scalarFrom(in, 0);
     const bool hasAmount = in.size() > 1 && in[1].type == PortType::Scalar;
+    const bool gainConnected = in.size() > 2 && in[2].type == PortType::Scalar;
+    const bool offsetConnected = in.size() > 3 && in[3].type == PortType::Scalar;
     float amount = hasAmount ? in[1].scalar : node.pfloat("amount", 1.0f);
     amount = std::pow(std::clamp(amount, 0.0f, 4.0f), std::max(0.05f, node.pfloat("curve", 1.0f)));
-    float result = value * amount * node.pfloat("gain", 1.0f) + node.pfloat("offset", 0.0f);
+    float gain = node.pfloat("gain", 1.0f);
+    if (gainConnected) gain *= std::max(0.0f, 1.0f + in[2].scalar);
+    float offset = node.pfloat("offset", 0.0f);
+    if (offsetConnected) offset += in[3].scalar;
+    float result = value * amount * gain + offset;
     const int steps = node.pint("quantize", 0);
     if (steps > 1) result = std::round(result * static_cast<float>(steps)) / static_cast<float>(steps);
     out[0] = Value::makeScalar(result);
@@ -607,7 +634,12 @@ void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     // Read pointer: `speed` loops per second, advanced one video frame at a time
     // so the movement is independent of the project frame rate.
     const float fps = std::max(1.0f, ctx.fps);
-    double phase = node.runtimeState["phase"] + node.pfloat("speed", 0.5f) / fps;
+    float speed = node.pfloat("speed", 0.5f);
+    if (in.size() > 1 && in[1].type == PortType::Scalar) {
+        speed *= std::pow(2.0f, std::clamp(in[1].scalar, -8.0f, 8.0f));
+    }
+    speed = std::clamp(speed, 0.001f, 64.0f);
+    double phase = node.runtimeState["phase"] + speed / fps;
     phase -= std::floor(phase);
     node.runtimeState["phase"] = phase;
     const float buffered = Node::historyAt(node.historyA, size, node.historyCount,
@@ -625,8 +657,18 @@ void evalSignalFilter(Node &node, EvalContext &ctx, const std::vector<Value> &in
     const double input = scalarFrom(in, 0);
     const double fs = std::max(1.0f, ctx.fps);
     const int mode = std::clamp(node.pint("mode", 0), 0, 2);
-    const double q = std::clamp(node.pfloat("resonance", 0.707f), 0.05f, 20.0f);
-    const double cutoff = node.pfloat("cutoff", 4.0f);
+    // Modulation inputs shift cutoff and resonance in octaves (x2 per unit), the
+    // musical way to sweep a filter.
+    double q = std::clamp(node.pfloat("resonance", 0.707f), 0.05f, 20.0f);
+    if (in.size() > 2 && in[2].type == PortType::Scalar) {
+        q *= std::pow(2.0, std::clamp(static_cast<double>(in[2].scalar), -8.0, 8.0));
+    }
+    q = std::clamp(q, 0.05, 20.0);
+    double cutoff = node.pfloat("cutoff", 4.0f);
+    if (in.size() > 1 && in[1].type == PortType::Scalar) {
+        cutoff *= std::pow(2.0, std::clamp(static_cast<double>(in[1].scalar), -8.0, 8.0));
+    }
+    cutoff = std::clamp(cutoff, 0.001, std::max(1.0, fs * 0.49));
     const BiquadCoefficients coefficients = biquadCoefficients(mode, cutoff, q, fs);
 
     double z1 = node.runtimeState["z1"];
@@ -1112,7 +1154,12 @@ void Registry::registerBuiltins() {
         def.kind = "time.pulse";
         def.category = "Timing";
         def.label = "Beat Pulse";
-        def.description = "Decaying trigger on a musical division, handy for stabs and envelopes.";
+        def.description =
+            "Decaying trigger on a musical division, handy for stabs and envelopes. Tempo, decay "
+            "and offset can be modulated; the tempo input shifts the rate by octaves.";
+        def.inputs = {PortDesc{"Tempo", PortType::Scalar, "BPM x 2^input"},
+                      PortDesc{"Decay", PortType::Scalar, "scales the decay"},
+                      PortDesc{"Offset", PortType::Scalar, "shifts the phase by 0.25 s per unit"}};
         def.outputs = {PortDesc{"Pulse", PortType::Scalar, "0..1"}};
         def.params = {
             makeParam("bpm", "Tempo (BPM)", 120.0f, 20.0f, 300.0f, 1.0f, "Pulse"),
@@ -1474,8 +1521,13 @@ void Registry::registerBuiltins() {
         def.kind = "mod.lfo";
         def.category = "Modulation";
         def.label = "LFO";
-        def.description = "Low frequency oscillator, optionally locked to a musical division.";
-        def.inputs = {PortDesc{"Phase", PortType::Scalar, "optional phase offset"}};
+        def.description =
+            "Low frequency oscillator, optionally locked to a musical division. Frequency, "
+            "amplitude and offset can be modulated (the frequency input shifts by octaves).";
+        def.inputs = {PortDesc{"Phase", PortType::Scalar, "optional phase offset"},
+                      PortDesc{"Frequency", PortType::Scalar, "Hz x 2^input"},
+                      PortDesc{"Amplitude", PortType::Scalar, "scales the amplitude"},
+                      PortDesc{"Offset", PortType::Scalar, "added to the output"}};
         def.outputs = {PortDesc{"Value", PortType::Scalar}};
         def.params = {
             makeEnumParam("shape", "Shape",
@@ -1499,7 +1551,9 @@ void Registry::registerBuiltins() {
         def.label = "Automation";
         def.description =
             "Keyframed curve over the project timeline, edited here in the block. Unipolar maps "
-            "the curve to 0..1, bipolar to -1..1.";
+            "the curve to 0..1, bipolar to -1..1. Depth and offset can be modulated.";
+        def.inputs = {PortDesc{"Depth", PortType::Scalar, "scales the depth"},
+                      PortDesc{"Offset", PortType::Scalar, "added to the output"}};
         def.outputs = {PortDesc{"Value", PortType::Scalar}};
         Param curve = makeCurveParam("curve", "Curve");
         def.params = {
@@ -1520,8 +1574,12 @@ void Registry::registerBuiltins() {
         def.kind = "mod.amount";
         def.category = "Modulation";
         def.label = "Amount / VCA";
-        def.description = "Scales a signal by a constant or by a second modulation input.";
-        def.inputs = {PortDesc{"In", PortType::Scalar}, PortDesc{"Amount", PortType::Scalar}};
+        def.description =
+            "Scales a signal by a constant or by a second modulation input. Amount, gain and "
+            "offset can all be modulated.";
+        def.inputs = {PortDesc{"In", PortType::Scalar}, PortDesc{"Amount", PortType::Scalar},
+                      PortDesc{"Gain", PortType::Scalar, "scales the gain"},
+                      PortDesc{"Offset", PortType::Scalar, "added to the output"}};
         def.outputs = {PortDesc{"Out", PortType::Scalar}};
         def.params = {
             makeParam("amount", "Amount", 1.0f, 0.0f, 4.0f, 0.001f, "Amount"),
@@ -1540,8 +1598,10 @@ void Registry::registerBuiltins() {
         def.label = "Ringbuffer";
         def.description =
             "Records the incoming Scalar into a loop buffer. Outputs the live input, the running "
-            "average of the buffer, and the value the read pointer is currently passing over.";
-        def.inputs = {PortDesc{"In", PortType::Scalar}};
+            "average of the buffer, and the value the read pointer is currently passing over. The "
+            "loop speed can be modulated in octaves.";
+        def.inputs = {PortDesc{"In", PortType::Scalar},
+                      PortDesc{"Speed", PortType::Scalar, "loops/s x 2^input"}};
         def.outputs = {PortDesc{"Input", PortType::Scalar},
                        PortDesc{"Average", PortType::Scalar},
                        PortDesc{"Buffer", PortType::Scalar}};
@@ -1560,8 +1620,11 @@ void Registry::registerBuiltins() {
         def.description =
             "Zero-latency biquad (RBJ, transposed direct form II) for modulation signals: low "
             "pass, high pass or band pass. Modulation runs one sample per video frame, so the "
-            "filter's sample rate is the project frame rate.";
-        def.inputs = {PortDesc{"In", PortType::Scalar}};
+            "filter's sample rate is the project frame rate. Cutoff and resonance can be "
+            "modulated in octaves.";
+        def.inputs = {PortDesc{"In", PortType::Scalar},
+                      PortDesc{"Cutoff", PortType::Scalar, "Hz x 2^input"},
+                      PortDesc{"Resonance", PortType::Scalar, "Q x 2^input"}};
         def.outputs = {PortDesc{"Out", PortType::Scalar}};
         Param cutoff = makeParam("cutoff", "Cutoff (Hz)", 4.0f, 0.01f, 200.0f, 0.01f, "Filter",
                                  true);

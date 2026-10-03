@@ -654,6 +654,168 @@ int main(int argc, char **argv) {
                     } else {
                         result = fail("debug/modulation blocks: " + what);
                     }
+
+                    // Modulation inputs on the existing blocks. They all follow
+                    // the same pattern (rates in octaves, levels scaled, offsets
+                    // additive), so one check per block covers the wiring.
+                    if (result == 0) {
+                        bool modOk = true;
+                        std::string modWhat;
+
+                        // LFO: a +1 frequency input doubles the rate, and
+                        // sin(2pi*0.25)=1 while sin(2pi*0.5)=0.
+                        auto lfoAt = [&](bool modulated, float *value) {
+                            Graph graph;
+                            Node *source = graph.addNode("math.constant", 0, 0);
+                            Node *lfo = graph.addNode("mod.lfo", 200, 0);
+                            if (!source || !lfo) return false;
+                            lfo->setInt("shape", 0);
+                            lfo->setFloat("frequency", 1.0f);
+                            source->setFloat("value", 1.0f);
+                            if (modulated) graph.connect(source->id, 0, lfo->id, 1);
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.time = 0.25;
+                            graph.evaluate(ctx);
+                            *value = lfo->outputs[0].scalar;
+                            return true;
+                        };
+                        float plainLfo = 0.0f, modulatedLfo = 0.0f;
+                        if (!lfoAt(false, &plainLfo) || !lfoAt(true, &modulatedLfo)) {
+                            modOk = false;
+                            modWhat = "the LFO block is missing";
+                        } else if (std::fabs(plainLfo - 1.0f) > 0.02f ||
+                                   std::fabs(modulatedLfo) > 0.02f) {
+                            modOk = false;
+                            modWhat = "the LFO frequency input did not shift the rate";
+                        }
+
+                        // Beat Pulse: a +1 tempo input doubles the BPM, halving
+                        // the beat length so the phase lands on the next pulse.
+                        auto pulseAt = [&](float tempoInput, float *value) {
+                            Graph graph;
+                            Node *source = graph.addNode("math.constant", 0, 0);
+                            Node *pulse = graph.addNode("time.pulse", 200, 0);
+                            if (!source || !pulse) return false;
+                            pulse->setFloat("bpm", 120.0f);
+                            pulse->setInt("division", 2);   // 1/4
+                            pulse->setFloat("decay", 0.5f);
+                            source->setFloat("value", tempoInput);
+                            graph.connect(source->id, 0, pulse->id, 0);
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.time = 0.0625;              // half a beat at 120 BPM
+                            graph.evaluate(ctx);
+                            *value = pulse->outputs[0].scalar;
+                            return true;
+                        };
+                        float plainPulse = 0.0f, modulatedPulse = 0.0f;
+                        if (modOk && (!pulseAt(0.0f, &plainPulse) ||
+                                      !pulseAt(1.0f, &modulatedPulse))) {
+                            modOk = false;
+                            modWhat = "the Beat Pulse block is missing";
+                        } else if (modOk && (plainPulse > 0.6f || modulatedPulse < 0.9f)) {
+                            modOk = false;
+                            modWhat = "the Beat Pulse tempo input did not retime the pulse";
+                        }
+
+                        // Signal Filter: a +2 cutoff input opens the filter, so a
+                        // step settles faster than the unmodulated one.
+                        auto filterStepAt = [&](float cutoffInput, float *value) {
+                            Graph graph;
+                            Node *signal = graph.addNode("math.constant", 0, 0);
+                            Node *cutoff = graph.addNode("math.constant", 0, 60);
+                            Node *filter = graph.addNode("mod.filter", 200, 0);
+                            if (!signal || !cutoff || !filter) return false;
+                            signal->setFloat("value", 1.0f);
+                            cutoff->setFloat("value", cutoffInput);
+                            filter->setInt("mode", 0);
+                            filter->setFloat("cutoff", 2.0f);
+                            filter->setFloat("resonance", 0.707f);
+                            graph.connect(signal->id, 0, filter->id, 0);
+                            graph.connect(cutoff->id, 0, filter->id, 1);
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            // 8 frames: the 2 Hz filter is still on its way up while
+                            // the 8 Hz one has all but settled.
+                            for (int i = 0; i < 8; ++i) graph.evaluate(ctx);
+                            *value = filter->outputs[0].scalar;
+                            return true;
+                        };
+                        float plainCutoff = 0.0f, modulatedCutoff = 0.0f;
+                        if (modOk && (!filterStepAt(0.0f, &plainCutoff) ||
+                                      !filterStepAt(2.0f, &modulatedCutoff))) {
+                            modOk = false;
+                            modWhat = "the Signal Filter block is missing";
+                        } else if (modOk && modulatedCutoff < plainCutoff + 0.05f) {
+                            modOk = false;
+                            modWhat = "the Signal Filter cutoff input did nothing";
+                        }
+
+                        // Ringbuffer: a +4 speed input advances the read pointer.
+                        auto ringPhase = [&](bool modulated, double *phase) {
+                            Graph graph;
+                            Node *signal = graph.addNode("math.constant", 0, 0);
+                            Node *speed = graph.addNode("math.constant", 0, 60);
+                            Node *ring = graph.addNode("mod.ringbuffer", 200, 0);
+                            if (!signal || !speed || !ring) return false;
+                            signal->setFloat("value", 0.25f);
+                            speed->setFloat("value", 4.0f);   // x16
+                            ring->setFloat("speed", 0.05f);
+                            graph.connect(signal->id, 0, ring->id, 0);
+                            if (modulated) graph.connect(speed->id, 0, ring->id, 1);
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            graph.evaluate(ctx);
+                            *phase = ring->runtimeState["phase"];
+                            return true;
+                        };
+                        double plainPhase = 0.0, modulatedPhase = 0.0;
+                        if (modOk && (!ringPhase(false, &plainPhase) ||
+                                      !ringPhase(true, &modulatedPhase))) {
+                            modOk = false;
+                            modWhat = "the Ringbuffer block is missing";
+                        } else if (modOk && modulatedPhase <= plainPhase) {
+                            modOk = false;
+                            modWhat = "the Ringbuffer speed input did nothing";
+                        }
+
+                        // Automation: the offset input shifts the output.
+                        if (modOk) {
+                            Graph automationGraph;
+                            Node *automation = automationGraph.addNode("mod.automation", 0, 0);
+                            Node *offsetSource = automationGraph.addNode("math.constant", 200, 0);
+                            if (!automation || !offsetSource) {
+                                modOk = false;
+                                modWhat = "the Automation block is missing";
+                            } else {
+                                if (Param *curve = automation->find("curve")) {
+                                    curve->keys = {Keyframe{0.0, 0.0f, 0},
+                                                   Keyframe{1.0, 0.0f, 0}};
+                                }
+                                automation->setFloat("depth", 1.0f);
+                                automation->setFloat("offset", 0.0f);
+                                offsetSource->setFloat("value", 0.75f);
+                                automationGraph.connect(offsetSource->id, 0, automation->id, 1);
+                                EvalContext ctx;
+                                ctx.fps = 60.0f;
+                                ctx.time = 1.0;
+                                ctx.duration = 4.0;
+                                automationGraph.evaluate(ctx);
+                                if (std::fabs(automation->outputs[0].scalar - 0.75f) > 0.01f) {
+                                    modOk = false;
+                                    modWhat = "the Automation offset input did nothing";
+                                }
+                            }
+                        }
+
+                        if (modOk) {
+                            std::printf("  modports : LFO frequency, Beat tempo, filter cutoff, "
+                                        "ring speed and automation offset ok\n");
+                        } else {
+                            result = fail("modulation inputs: " + modWhat);
+                        }
+                    }
                 }
             }
 

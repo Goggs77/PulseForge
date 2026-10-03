@@ -241,7 +241,7 @@ executable when *Save preferences* is pressed.
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
 | Time Source | - | Time, Frame, Progress, Beat | Video timing: seconds, frame index, 0..1 progress, beat phase |
-| Beat Pulse | - | Pulse | Decaying trigger on a musical division |
+| Beat Pulse | Tempo, Decay, Offset | Pulse | Decaying trigger on a musical division; the tempo input shifts the rate by octaves, decay scales and offset nudges the phase (0.25 s per unit) |
 
 ### DSP
 
@@ -283,11 +283,11 @@ input on **Geometry**.
 
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
-| LFO | Phase | Value | sine/triangle/saw/square/random, free-running or tempo-synced |
-| Automation | - | Value | Keyframed curve edited in the block; unipolar 0..1 or bipolar -1..1, with depth/offset |
-| Amount / VCA | In, Amount | Out | Scales a signal by a constant or by a second modulation input, with quantising |
-| Ringbuffer | In | Input, Average, Buffer | Records the scalar into a loop buffer of 2..1024 samples; `Input` is the live value, `Average` the running average of the buffer and `Buffer` the sample the looping read pointer (loops/second) is passing over. The block draws the buffer with the read position marked |
-| Signal Filter | In | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Modulation runs one sample per video frame, so the filter's sample rate **is the project frame rate**; the block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)) |
+| LFO | Phase, Frequency, Amplitude, Offset | Value | sine/triangle/saw/square/random, free-running or tempo-synced; the frequency input shifts by octaves, amplitude scales and offset is added |
+| Automation | Depth, Offset | Value | Keyframed curve edited in the block; unipolar 0..1 or bipolar -1..1, with modulatable depth/offset |
+| Amount / VCA | In, Amount, Gain, Offset | Out | Scales a signal by a constant or by a second modulation input, with quantising; gain scales and offset is added |
+| Ringbuffer | In, Speed | Input, Average, Buffer | Records the scalar into a loop buffer of 2..1024 samples; `Input` is the live value, `Average` the running average of the buffer and `Buffer` the sample the looping read pointer (loops/second, octave modulation) is passing over. The block draws the buffer with the read position marked |
+| Signal Filter | In, Cutoff, Resonance | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Modulation runs one sample per video frame, so the filter's sample rate **is the project frame rate**; the cutoff and resonance inputs shift by octaves. The block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)) |
 
 ### Debug
 

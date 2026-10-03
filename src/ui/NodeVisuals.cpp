@@ -31,6 +31,26 @@ constexpr int kCurvePoints = 72;
 
 Color withAlpha(Color color, float alpha) { return palette::withAlpha(color, alpha); }
 
+// Element sizes inside a block's live content follow the block itself, with
+// clamps so text stays legible and handles stay grabbable at any canvas zoom.
+// Deriving them from the body (which is already scaled by the canvas zoom) keeps
+// every block internally consistent instead of mixing zoomed and fixed sizes.
+float visualInset(const Rectangle &body) {
+    return std::clamp(std::min(body.width, body.height) * 0.035f, 1.5f, 8.0f);
+}
+
+float visualFont(const Rectangle &body, float ratio) {
+    return std::clamp(body.height * ratio, 7.0f, 19.0f);
+}
+
+float visualHandle(const Rectangle &body, float ratio, float lo, float hi) {
+    return std::clamp(std::min(body.width, body.height) * ratio, lo, hi);
+}
+
+float visualStroke(const Rectangle &body, float ratio) {
+    return std::clamp(std::min(body.width, body.height) * ratio, 1.0f, 3.0f);
+}
+
 // Filled strip built from a column array; one draw call for the whole shape.
 void drawFilledSeries(Rectangle area, const float *values, int count, Color top, Color bottom,
                       float floorLevel = 0.0f) {
@@ -91,7 +111,8 @@ void drawSpectrumVisual(UiState &state, const Node &node, Rectangle body, float 
     const float *row = analysis ? analysis->spectrumRow(state.frameContext.audioTime) : nullptr;
     const int bins = analysis ? analysis->spectrumBins : 0;
     if (!row || bins <= 0) {
-        ui::drawText(inner, "no analysis", 10.0f, withAlpha(t.textDim, 0.8f), ui::Align::Center);
+        ui::drawText(inner, "no analysis", visualFont(inner, 0.18f), withAlpha(t.textDim, 0.8f),
+                     ui::Align::Center);
         return;
     }
 
@@ -145,7 +166,8 @@ void drawBandVisual(UiState &state, const Node &node, Rectangle body, float zoom
 
     const int capacity = node.historyA.empty() ? 0 : static_cast<int>(node.historyA.size());
     if (capacity <= 0) {
-        ui::drawText(inner, "waiting for audio", 10.0f, withAlpha(t.textDim, 0.8f), ui::Align::Center);
+        ui::drawText(inner, "waiting for audio", visualFont(inner, 0.18f), withAlpha(t.textDim, 0.8f),
+                     ui::Align::Center);
         return;
     }
     static thread_local std::vector<float> input;
@@ -263,7 +285,8 @@ void drawWaveVisual(UiState &state, const Node &node, Rectangle body, float zoom
 
     const AudioPtr &audio = state.clip.buffer();
     if (!audio || audio->frameCount <= 0) {
-        ui::drawText(inner, "no audio loaded", 10.0f, withAlpha(t.textDim, 0.8f), ui::Align::Center);
+        ui::drawText(inner, "no audio loaded", visualFont(inner, 0.20f),
+                     withAlpha(t.textDim, 0.8f), ui::Align::Center);
         return;
     }
     const double window = 0.1;  // seconds shown left to right
@@ -324,8 +347,9 @@ constexpr float kVuMax = 18.0f;
 void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
     (void)zoom;
     const ui::Theme &t = ui::theme();
-    const Rectangle inner{body.x + ui::s(3.0f), body.y + ui::s(3.0f), body.width - ui::s(6.0f),
-                          body.height - ui::s(6.0f)};
+    const float inset = visualInset(body);
+    const Rectangle inner{body.x + inset, body.y + inset, body.width - inset * 2.0f,
+                          body.height - inset * 2.0f};
     drawVisualBackground(body);
 
     auto reading = [&](const char *key, double fallback) {
@@ -343,8 +367,8 @@ void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoo
         // Value/time diagram: the same shape the Frequency Band block uses.
         const int capacity = static_cast<int>(node.historyA.size());
         if (capacity < 2) {
-            ui::drawText(inner, "waiting for a signal", 10.0f, withAlpha(t.textDim, 0.8f),
-                         ui::Align::Center);
+            ui::drawText(inner, "waiting for a signal", visualFont(inner, 0.16f),
+                         withAlpha(t.textDim, 0.8f), ui::Align::Center);
             return;
         }
         static thread_local std::vector<float> series;
@@ -367,9 +391,9 @@ void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoo
         std::snprintf(text, sizeof(text), "%.3f   %.1f dBFS",
                       Node::historyAt(node.historyA, capacity, node.historyCount, 1.0f),
                       static_cast<float>(dbfs));
-        ui::drawTextClipped(Rectangle{inner.x + ui::s(3.0f), inner.y, inner.width - ui::s(6.0f),
-                                      ui::s(12.0f)},
-                            text, 9.5f, withAlpha(t.text, 0.9f));
+        ui::drawTextClipped(Rectangle{inner.x + inset, inner.y, inner.width - inset * 2.0f,
+                                      visualFont(inner, 0.16f) + 2.0f},
+                            text, visualFont(inner, 0.13f), withAlpha(t.text, 0.9f));
         return;
     }
 
@@ -396,7 +420,7 @@ void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoo
     for (int i = 1; i <= segments; ++i) {
         const float value = kVuMin + (kVuMax - kVuMin) * static_cast<float>(i) / segments;
         const Vector2 point = pointOn(value, 1.0f);
-        DrawLineEx(previous, point, 1.2f, withAlpha(t.border, 0.9f));
+        DrawLineEx(previous, point, visualStroke(inner, 0.02f), withAlpha(t.border, 0.9f));
         previous = point;
     }
     const float tickValues[] = {-20.0f, -10.0f, -5.0f, -3.0f, -1.0f, 0.0f, 1.0f, 3.0f, 6.0f, 10.0f, 18.0f};
@@ -404,34 +428,37 @@ void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoo
         const bool zero = std::fabs(tick) < 0.01f;
         const Vector2 outer = pointOn(tick, 1.0f);
         const Vector2 innerPoint = pointOn(tick, 0.88f);
-        DrawLineEx(outer, innerPoint, zero ? 1.8f : 1.0f,
+        DrawLineEx(outer, innerPoint, zero ? visualStroke(inner, 0.03f) : visualStroke(inner, 0.015f),
                    zero ? t.accent : withAlpha(t.textDim, 0.9f));
     }
     // Peak hold marker.
     const Vector2 peakPoint = pointOn(static_cast<float>(peak), 1.04f);
-    DrawCircleV(peakPoint, ui::s(1.8f), withAlpha(t.warn, 0.95f));
+    DrawCircleV(peakPoint, visualHandle(inner, 0.028f, 1.2f, 3.0f), withAlpha(t.warn, 0.95f));
 
     // Needle: green below 0 VU, amber up to +6, red above.
     const Color needleInk = needle > 6.0 ? t.danger : (needle > 0.0 ? t.warn : t.success);
     const Vector2 needleStart = pointOn(static_cast<float>(needle), 0.28f);
     const Vector2 needleEnd = pointOn(static_cast<float>(needle), 0.94f);
-    DrawLineEx(needleStart, needleEnd, 1.8f, needleInk);
+    DrawLineEx(needleStart, needleEnd, visualStroke(inner, 0.03f), needleInk);
 
     char text[96];
     // Kept short: "0 VU = -18 dBFS" lives in the block description and README.
     std::snprintf(text, sizeof(text), "%+.1f dB   %+.1f VU", static_cast<float>(dbfs),
                   static_cast<float>(vu));
-    ui::drawTextClipped(Rectangle{inner.x + ui::s(3.0f), inner.y + inner.height - ui::s(13.0f),
-                                  inner.width - ui::s(6.0f), ui::s(12.0f)},
-                        text, 9.5f, dbfs > 0.0f ? t.danger : withAlpha(t.text, 0.92f));
+    const float readoutHeight = visualFont(inner, 0.16f) + 2.0f;
+    ui::drawTextClipped(Rectangle{inner.x + inset, inner.y + inner.height - readoutHeight,
+                                  inner.width - inset * 2.0f, readoutHeight},
+                        text, visualFont(inner, 0.13f),
+                        dbfs > 0.0f ? t.danger : withAlpha(t.text, 0.92f));
 }
 
 void drawGuardVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
     (void)state;
     (void)zoom;
     const ui::Theme &t = ui::theme();
-    const Rectangle inner{body.x + ui::s(3.0f), body.y + ui::s(3.0f), body.width - ui::s(6.0f),
-                          body.height - ui::s(6.0f)};
+    const float inset = visualInset(body);
+    const Rectangle inner{body.x + inset, body.y + inset, body.width - inset * 2.0f,
+                          body.height - inset * 2.0f};
     drawVisualBackground(body);
 
     struct Lamp {
@@ -447,7 +474,9 @@ void drawGuardVisual(UiState &state, const Node &node, Rectangle body, float zoo
     const int count = 3;
     const float slot = inner.width / static_cast<float>(count);
     const float lampY = inner.y + inner.height * 0.36f;
-    const float radius = std::min(ui::s(9.0f), inner.height * 0.26f);
+    const float radius = visualHandle(inner, 0.26f, 3.0f, 14.0f);
+    const float labelGap = visualHandle(inner, 0.06f, 1.5f, 5.0f);
+    const float labelFont = visualFont(inner, 0.26f);
     for (int i = 0; i < count; ++i) {
         const auto it = node.runtimeState.find(lamps[i].key);
         const float level = it == node.runtimeState.end() ? 0.0f : static_cast<float>(it->second);
@@ -459,8 +488,9 @@ void drawGuardVisual(UiState &state, const Node &node, Rectangle body, float zoo
         if (level > 0.35f) {
             DrawCircleV(Vector2{cx, lampY}, radius * 0.45f, withAlpha(WHITE, level * 0.85f));
         }
-        ui::drawText(Rectangle{cx - slot * 0.5f, lampY + radius + ui::s(2.0f), slot, ui::s(13.0f)},
-                     lamps[i].label, 11.0f,
+        ui::drawText(Rectangle{cx - slot * 0.5f, lampY + radius + labelGap, slot,
+                               visualFont(inner, 0.32f)},
+                     lamps[i].label, labelFont,
                      withAlpha(level > 0.05f ? lamps[i].colour : t.textDim, 0.95f),
                      ui::Align::Center, level > 0.05f);
     }
@@ -474,13 +504,15 @@ void drawRingbufferVisual(UiState &state, const Node &node, Rectangle body, floa
     (void)state;
     (void)zoom;
     const ui::Theme &t = ui::theme();
-    const Rectangle inner{body.x + ui::s(3.0f), body.y + ui::s(3.0f), body.width - ui::s(6.0f),
-                          body.height - ui::s(6.0f)};
+    const float inset = visualInset(body);
+    const Rectangle inner{body.x + inset, body.y + inset, body.width - inset * 2.0f,
+                          body.height - inset * 2.0f};
     drawVisualBackground(body);
 
     const int capacity = static_cast<int>(node.historyA.size());
     if (capacity < 2) {
-        ui::drawText(inner, "buffer empty", 10.0f, withAlpha(t.textDim, 0.8f), ui::Align::Center);
+        ui::drawText(inner, "buffer empty", visualFont(inner, 0.25f), withAlpha(t.textDim, 0.8f),
+                     ui::Align::Center);
         return;
     }
     static thread_local std::vector<float> series;
@@ -502,14 +534,14 @@ void drawRingbufferVisual(UiState &state, const Node &node, Rectangle body, floa
     drawSeriesOutline(inner, series.data(), capacity, withAlpha(t.accent, 0.9f), 0.0f, 1.0f);
 
     const float averageY = midY - std::clamp(average, -1.0f, 1.0f) * inner.height * 0.5f;
-    DrawLineEx(Vector2{inner.x, averageY}, Vector2{inner.x + inner.width, averageY}, 1.0f,
-               withAlpha(t.accentAlt, 0.9f));
+    DrawLineEx(Vector2{inner.x, averageY}, Vector2{inner.x + inner.width, averageY},
+               visualStroke(inner, 0.02f), withAlpha(t.accentAlt, 0.9f));
 
     const auto phaseIt = node.runtimeState.find("phase");
     const float phase = phaseIt == node.runtimeState.end() ? 0.0f : static_cast<float>(phaseIt->second);
     const float readX = inner.x + std::clamp(phase, 0.0f, 1.0f) * inner.width;
-    DrawLine(static_cast<int>(readX), static_cast<int>(inner.y), static_cast<int>(readX),
-             static_cast<int>(inner.y + inner.height), withAlpha(t.warn, 0.85f));
+    DrawLineEx(Vector2{readX, inner.y}, Vector2{readX, inner.y + inner.height},
+               visualStroke(inner, 0.02f), withAlpha(t.warn, 0.85f));
 }
 
 // Filter response plot. The y axis is the pivot's resonance mapping: Q = 10^(dB/20).
@@ -517,8 +549,9 @@ constexpr float kFilterDbMax = 18.0f;
 constexpr float kFilterDbMin = -36.0f;
 
 void filterPlotRects(Rectangle body, Rectangle *inner) {
-    *inner = Rectangle{body.x + ui::s(3.0f), body.y + ui::s(3.0f), body.width - ui::s(6.0f),
-                       body.height - ui::s(6.0f)};
+    const float inset = visualInset(body);
+    *inner = Rectangle{body.x + inset, body.y + inset, body.width - inset * 2.0f,
+                       body.height - inset * 2.0f};
 }
 
 void drawFilterVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
@@ -568,26 +601,34 @@ void drawFilterVisual(UiState &state, const Node &node, Rectangle body, float zo
         const double hz = fMin * std::pow(fMax / fMin, position);
         const double db = biquadMagnitudeDb(coefficients, hz, fs);
         const Vector2 point{xFor(hz), yFor(db)};
-        if (i > 0) DrawLineEx(previous, point, 1.6f, withAlpha(t.accent, 0.95f));
+        if (i > 0) {
+            DrawLineEx(previous, point, visualStroke(inner, 0.03f), withAlpha(t.accent, 0.95f));
+        }
         previous = point;
     }
 
     // Cutoff marker and the interactive pivot (x = cutoff, y = resonance).
     const float cutoffX = xFor(cutoff);
-    DrawLine(static_cast<int>(cutoffX), static_cast<int>(inner.y), static_cast<int>(cutoffX),
-             static_cast<int>(inner.y + inner.height), withAlpha(t.warn, 0.45f));
+    DrawLineEx(Vector2{cutoffX, inner.y}, Vector2{cutoffX, inner.y + inner.height},
+               visualStroke(inner, 0.02f), withAlpha(t.warn, 0.45f));
     const float pivotX = cutoffX;
     const float pivotY = yFor(20.0 * std::log10(std::max(0.05, q)));
-    DrawCircleV(Vector2{pivotX, pivotY}, ui::s(6.5f), withAlpha(t.warn, 0.30f));
-    DrawCircleV(Vector2{pivotX, pivotY}, ui::s(4.2f), t.warn);
-    DrawCircleLinesV(Vector2{pivotX, pivotY}, ui::s(4.2f), withAlpha(BLACK, 0.6f));
+    const float pivotRadius = visualHandle(inner, 0.075f, 3.0f, 10.0f);
+    DrawCircleV(Vector2{pivotX, pivotY}, pivotRadius * 1.55f, withAlpha(t.warn, 0.30f));
+    DrawCircleV(Vector2{pivotX, pivotY}, pivotRadius, t.warn);
+    DrawCircleLinesV(Vector2{pivotX, pivotY}, pivotRadius, withAlpha(BLACK, 0.6f));
 
-    char text[96];
-    std::snprintf(text, sizeof(text), "%.2f Hz   Q %.2f   fs %.0f Hz   (drag the pivot)", cutoff,
-                  q, fs);
-    ui::drawTextClipped(Rectangle{inner.x + ui::s(3.0f), inner.y, inner.width - ui::s(6.0f),
-                                  ui::s(12.0f)},
-                        text, 9.5f, withAlpha(t.text, 0.92f));
+    // Two short readouts instead of one long line: a bigger relative font can no
+    // longer push the text out of the block.
+    const float textHeight = visualFont(inner, 0.16f) + 2.0f;
+    char text[64];
+    std::snprintf(text, sizeof(text), "%.2f Hz   Q %.2f", cutoff, q);
+    ui::drawTextClipped(Rectangle{inner.x + 2.0f, inner.y, inner.width * 0.62f, textHeight}, text,
+                        visualFont(inner, 0.13f), withAlpha(t.text, 0.92f));
+    ui::drawTextClipped(Rectangle{inner.x + inner.width * 0.62f, inner.y,
+                                  inner.width * 0.38f - 2.0f, textHeight},
+                        "drag pivot", visualFont(inner, 0.11f), withAlpha(t.textDim, 0.9f),
+                        ui::Align::Right);
 }
 
 }  // namespace

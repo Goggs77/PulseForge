@@ -360,6 +360,12 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
         // Live content (spectrum, level bar, value/time curve, waveform).
         if (visualFraction(node) > 0.0f) {
             drawNodeVisual(state, node, visualRect(node, box), view.zoom);
+            // drawNodeVisual scissorstamps its own body and ends the scissor
+            // when it is done, so the canvas clip has to be re-established or
+            // the next block would be free to draw over other panels.
+            BeginScissorMode(static_cast<int>(viewport.x), static_cast<int>(viewport.y),
+                             static_cast<int>(viewport.width),
+                             static_cast<int>(viewport.height));
         }
         // Mid-height badge with the operator or range; blocks with live content
         // already show what they are doing.
