@@ -444,8 +444,11 @@ bool prepareMonitorAudio(UiState &state, std::string *error) {
             if (source && source->kind == "dsp.dac") {
                 channels = std::clamp(static_cast<int>(source->inputPorts().size()), 1, 8);
             }
+            const double fps = std::max(1.0, state.project.video.fps);
+            const int frameSamples =
+                std::max(1, static_cast<int>(std::lround(rate / fps)));
             state.clip.stopLiveStream();
-            state.clip.startLiveStream(rate, channels);
+            state.clip.startLiveStream(rate, channels, frameSamples);
             return true;
         }
     }
@@ -457,6 +460,44 @@ void resetMonitor(UiState &state) {
     state.clip.clearPlaybackBuffer();
     state.monitorRenderKey.clear();
     state.monitorRoute.clear();
+    state.liveAudioFrame = -1;
+}
+
+// Pushes the DAC window produced by the most recent graph evaluation into the
+// live monitor stream.
+void pushLiveDacWindow(UiState &state) {
+    if (!state.clip.liveStreamActive()) return;
+    const int sink = state.project.graph.audioSinkNodeId();
+    const Link *link = sink ? state.project.graph.findInputLink(sink, 0) : nullptr;
+    const Node *source = link ? state.project.graph.find(link->fromNode) : nullptr;
+    if (source && source->kind == "dsp.dac" && source->audioRenderOutput) {
+        state.clip.pushLiveWindow(*source->audioRenderOutput);
+    }
+}
+
+// Renders the project frames the display skipped, in order, so the live audio
+// stream stays continuous when the display runs below the project frame rate.
+void catchUpLiveAudio(UiState &state, int targetFrame) {
+    if (!state.clip.liveStreamActive()) return;
+    const double fps = std::max(1.0, state.project.video.fps);
+    if (state.liveAudioFrame < 0 || targetFrame < state.liveAudioFrame ||
+        targetFrame - state.liveAudioFrame > 8) {
+        // Seek, loop or a large jump: restart at the new frame.
+        state.liveAudioFrame = targetFrame;
+        return;
+    }
+    while (state.liveAudioFrame < targetFrame) {
+        EvalContext ctx = state.frameContext;
+        ctx.renderer = nullptr;
+        ctx.shaders = nullptr;
+        ctx.offline = false;
+        ctx.frame = state.liveAudioFrame;
+        ctx.time = static_cast<double>(ctx.frame) / fps;
+        ctx.audioTime = state.project.video.trimStart + ctx.time;
+        state.project.graph.evaluate(ctx);
+        pushLiveDacWindow(state);
+        ++state.liveAudioFrame;
+    }
 }
 
 }  // namespace
@@ -492,6 +533,8 @@ void startPlayback(UiState &state) {
     }
     state.monitorRenderKey = monitorRenderKey(state);
     state.monitorRoute = monitorRouteIdentity(state);
+    state.liveAudioFrame = static_cast<int>(std::floor(
+        std::max(0.0, state.playhead) * std::max(1.0, state.project.video.fps)));
     state.playing = true;
     state.clip.seek(state.playhead + state.project.video.trimStart);
     state.clip.startPreview();
@@ -505,6 +548,7 @@ void pausePlayback(UiState &state) {
 void stopPlayback(UiState &state) {
     state.playing = false;
     state.playhead = 0.0;
+    state.liveAudioFrame = -1;
     state.clip.stopPreview();
     state.clip.seek(state.project.video.trimStart);
 }
@@ -1200,6 +1244,7 @@ int runApp(int argc, char **argv) {
                 } else {
                     state.monitorRenderKey = monitorRenderKey(state);
                     state.monitorRoute = route;
+                    state.liveAudioFrame = -1;
                     state.clip.seek(state.playhead + state.project.video.trimStart);
                     state.clip.startPreview();
                 }
@@ -1209,6 +1254,7 @@ int runApp(int argc, char **argv) {
                 if (state.playhead >= duration) {
                     if (state.loopPlayback) {
                         state.playhead = 0.0;
+                        state.liveAudioFrame = -1;
                         state.clip.seek(state.project.video.trimStart);
                         state.clip.startPreview();
                     } else {
@@ -1222,6 +1268,15 @@ int runApp(int argc, char **argv) {
             state.playhead = std::max(0.0, state.clip.previewPosition() - state.project.video.trimStart);
         }
 
+        // Render any audio frames the display skipped before the current frame,
+        // so the live stream stays continuous on a slow display or a hitch.
+        if (state.playing && state.clip.liveStreamActive()) {
+            const double fps = std::max(1.0, state.project.video.fps);
+            catchUpLiveAudio(
+                state, static_cast<int>(std::floor(
+                           std::max(0.0, state.playhead) * fps + 1e-6)));
+        }
+
         // ---- render the pipeline ---------------------------------------
         renderPreviewFrame(state);
 
@@ -1229,12 +1284,9 @@ int runApp(int argc, char **argv) {
         // The region evaluated above just produced this video frame's samples;
         // stream them so the sound follows the video clock frame by frame.
         if (state.playing && state.clip.liveStreamActive()) {
-            const int sink = state.project.graph.audioSinkNodeId();
-            const Link *link = sink ? state.project.graph.findInputLink(sink, 0) : nullptr;
-            const Node *source = link ? state.project.graph.find(link->fromNode) : nullptr;
-            if (source && source->kind == "dsp.dac" && source->audioRenderOutput) {
-                state.clip.pushLiveWindow(*source->audioRenderOutput);
-            }
+            pushLiveDacWindow(state);
+            state.liveAudioFrame =
+                std::max(state.liveAudioFrame, state.frameContext.frame + 1);
         }
 
         // ---- draw -------------------------------------------------------

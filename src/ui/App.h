@@ -78,6 +78,10 @@ struct UiState {
     // wiring signature used to notice a rewire while playing.
     std::string monitorRenderKey;
     std::string monitorRoute;
+    // Next video frame index the live audio region has to render. When the
+    // display skips a project frame, the missing windows are rendered before
+    // the current one so the stream never develops a gap.
+    int liveAudioFrame = -1;
 
     int selectedNode = -1;
     float inspectorScroll = 0.0f;

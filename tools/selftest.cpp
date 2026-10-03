@@ -1475,7 +1475,7 @@ int main(int argc, char **argv) {
                                     clip.startPreview();
                                     const bool silent = !clip.previewPlaying();
                                     clip.clearPlaybackBuffer();
-                                    clip.startLiveStream(48000, 2);
+                                    clip.startLiveStream(48000, 2, 512);
                                     AudioBuffer window;
                                     window.channels = 2;
                                     window.sampleRate = 48000;

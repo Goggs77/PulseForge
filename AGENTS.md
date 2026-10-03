@@ -224,9 +224,12 @@ docs         rendering notes and the README overlay image
   through `Renderer::uploadAnalysisTextures`. `analysisFrom` treats a connected
   Analysis port as authoritative instead of falling back to the project clip.
 - Monitor playback follows the Audio Output live: `AudioClip::startLiveStream` /
-  `pushLiveWindow` queue each video frame's rendered window and feed it in
-  512-frame sub-buffers. The app pushes the DAC buffer right after
-  `renderPreviewFrame`; the region quantises its window to `ctx.frame` so a
+  `pushLiveWindow` queue each video frame's rendered window. The sub-buffer is
+  a power of two at least as large as one video frame's sample count, and two
+  sub-buffers are prefilled before playback so the device cannot drain the ring
+  between video frames. The app pushes the DAC buffer right after
+  `renderPreviewFrame`, and `catchUpLiveAudio` renders any project frames a slow
+  display skipped, in order. The region quantises its window to `ctx.frame` so a
   high-refresh display reuses the same window instead of advancing stateful
   blocks several times per project frame. Export still renders the same
   per-frame pass offline and muxes the resulting track.

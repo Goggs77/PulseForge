@@ -212,12 +212,13 @@ executable when *Save preferences* is pressed.
   clicks and hover, including the CrystalGUI chrome buttons.
 - **Preview playback follows the Audio Output**: a direct link from the Audio
   Source streams the decoded clip, a processed chain (Dynamics, ADC -> DAC, ...)
-  is rendered live one video frame at a time and streamed in small sub-buffers,
-  and an unconnected Audio Output plays silence while the video keeps running.
-  The audio chain follows the video frame clock, so rewiring the graph or moving
-  a slider is heard immediately and the Spectrum Analyzer analyses the same
-  freshly rendered window; seeking and looping restart the stream at the new
-  position.
+  is rendered live one video frame at a time and streamed in sub-buffers sized
+  to a video frame (two are prefilled before playback), and an unconnected Audio
+  Output plays silence while the video keeps running. The audio chain follows
+  the video frame clock, so rewiring the graph or moving a slider is heard
+  immediately and the Spectrum Analyzer analyses the same freshly rendered
+  window; a slow display has the skipped frames rendered in order so the stream
+  stays continuous, and seeking or looping restarts it at the new position.
 - **Starting an export reminds you** when the configured audio bitrate is far
   below the imported file (below 80%), with the source and target rates spelled
   out; *Continue* renders anyway and *Cancel* returns to the dialog.

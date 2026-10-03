@@ -54,7 +54,10 @@ public:
     // frame's samples (with their absolute clip start frame) and the stream
     // feeds them to the device in whole sub-buffers. This keeps the audio chain
     // in step with the video chain instead of pre-rendering the whole track.
-    void startLiveStream(int sampleRate, int channels);
+    // `frameSamples` is the number of audio samples one video frame produces;
+    // the stream sub-buffer is sized from it so the device cannot drain the
+    // whole ring between two video frames.
+    void startLiveStream(int sampleRate, int channels, int frameSamples = 1024);
     void stopLiveStream();
     bool liveStreamActive() const { return liveStream_; }
     void pushLiveWindow(const AudioBuffer &buffer);
@@ -101,6 +104,7 @@ private:
     bool liveStarted_ = false;
     int liveRate_ = 48000;
     int liveChannels_ = 2;
+    int liveSubBufferFrames_ = 1024;
     long long liveNextFrame_ = -1;  // absolute clip frame already queued
     long long liveQueuedFrames_ = 0;
     size_t liveReadFrame_ = 0;
