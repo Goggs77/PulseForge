@@ -82,6 +82,9 @@ public:
     // uniforms its .glsl file uses) resolve them here; when empty, the ports of
     // the definition apply.
     std::vector<PortDesc> dynamicInputs;
+    // Blocks whose outputs follow their configuration (ADC channel count)
+    // resolve them here; when empty, the ports of the definition apply.
+    std::vector<PortDesc> dynamicOutputs;
 
     const std::vector<PortDesc> &inputPorts() const {
         static const std::vector<PortDesc> none;
@@ -90,10 +93,13 @@ public:
     }
     const std::vector<PortDesc> &outputPorts() const {
         static const std::vector<PortDesc> none;
+        if (!dynamicOutputs.empty()) return dynamicOutputs;
         return def ? def->outputs : none;
     }
     void setInputPorts(std::vector<PortDesc> ports) { dynamicInputs = std::move(ports); }
     void clearInputPorts() { dynamicInputs.clear(); }
+    void setOutputPorts(std::vector<PortDesc> ports) { dynamicOutputs = std::move(ports); }
+    void clearOutputPorts() { dynamicOutputs.clear(); }
 
     // Results of the most recent evaluation (valid for the current frame only).
     std::vector<Value> outputs;

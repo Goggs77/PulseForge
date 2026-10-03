@@ -22,11 +22,11 @@ AnalysisPtr analyzeAudio(const AudioBuffer &buffer, const AnalysisSettings &sett
                          const std::function<void(float)> &progress = {},
                          const AudioPtr &source = {});
 
-// Analyses one FFT window ending at `time` (seconds in clip time). Used by the
-// Spectrum Analyzer for a processed Audio input, where no whole-file analysis
-// exists. The returned data holds a single frame and records where its window
-// starts so time lookups land on that frame.
-AnalysisPtr analyzeWindow(const AudioBuffer &buffer, double time, const AnalysisSettings &settings,
-                          const AudioPtr &source = {});
+// Analyses one FFT window ending at `windowEnd` (seconds in clip time). Used by
+// the Spectrum Analyzer for a processed Audio input, where no whole-file
+// analysis exists. The returned data holds a single frame and records where its
+// window starts so time lookups land on that frame.
+AnalysisPtr analyzeWindow(const AudioBuffer &buffer, double windowEnd,
+                          const AnalysisSettings &settings, const AudioPtr &source = {});
 
 }  // namespace pf

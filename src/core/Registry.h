@@ -23,6 +23,9 @@ public:
     // Ports of a Shader block follow the uniforms its .glsl file uses.
     static bool applyShaderPorts(Node &node, const class ShaderLibrary &shaders,
                                  std::string *error = nullptr);
+    // Ports of an ADC/DAC follow their `channels` parameter: left, right, then
+    // ch3, ch4, ... as Scalar ports.
+    static void applyChannelPorts(Node &node);
 
 private:
     Registry();

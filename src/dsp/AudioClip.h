@@ -49,6 +49,16 @@ public:
     void clearPlaybackBuffer();
     bool hasPlaybackOverride() const { return playbackOverride_; }
 
+    // ---- live graph audio ---------------------------------------------------
+    // Playback of the graph-rendered Audio Output: the app pushes each video
+    // frame's samples (with their absolute clip start frame) and the stream
+    // feeds them to the device in whole sub-buffers. This keeps the audio chain
+    // in step with the video chain instead of pre-rendering the whole track.
+    void startLiveStream(int sampleRate, int channels);
+    void stopLiveStream();
+    bool liveStreamActive() const { return liveStream_; }
+    void pushLiveWindow(const AudioBuffer &buffer);
+
     bool audioDeviceReady() const;
     void startPreview();
     void pausePreview();
@@ -62,6 +72,8 @@ private:
     void ensureStream();
     void destroyStream();
     void feed();
+    void feedLive();
+    void clearLiveQueue();
     const AudioBuffer *playbackBuffer() const;
     int playbackSampleRate() const;
     // Absolute clip position <-> index inside the playback buffer.
@@ -84,6 +96,15 @@ private:
     double startPosition_ = 0.0;
     long long feedFrame_ = 0;
     long long startFeedFrame_ = 0;
+
+    bool liveStream_ = false;
+    bool liveStarted_ = false;
+    int liveRate_ = 48000;
+    int liveChannels_ = 2;
+    long long liveNextFrame_ = -1;  // absolute clip frame already queued
+    long long liveQueuedFrames_ = 0;
+    size_t liveReadFrame_ = 0;
+    std::vector<float> liveQueue_;
 };
 
 }  // namespace pf

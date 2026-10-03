@@ -52,9 +52,10 @@ metadata, text editing (caret, selection, clipboard), shader ports derived from 
 audio matching rules, legacy Audio Output migration, ADC/DAC conversion, and the
 exclusive Audio Output routing (processed, dry and silent exports, plus the
 monitor's source/silent/processed decisions). It also checks the ADC -> DAC
-Unity round trip (bit-exact), the per-sample audio-rate tanh chain, and the
-input-driven Spectrum Analyzer (silent / precomputed / live). When NVENC is
-usable it also renders a real GPU export.
+Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
+left/right separation, live frame-window reuse, and the input-driven Spectrum
+Analyzer (silent / precomputed / live). When NVENC is usable it also renders a
+real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
 `selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
@@ -184,12 +185,11 @@ docs         rendering notes and the README overlay image
   `audioSeek` at 0 for the rendered WAV (it already starts at the export offset).
   `buildCommand`'s `muteAudio` flag is what turns an empty override into `-an`;
   without it the empty path would fall back to the media file.
-- Monitor playback follows the same route through `Exporter::renderOutputAudio`
-  plus `AudioClip::setPlaybackBuffer` (nullptr = silent, no stream). The app
-  rebuilds the monitor when `monitorRouteIdentity` changes while playing, so
-  rewiring the Audio Output takes effect immediately; parameter edits apply on
-  the next Play. Pre-rendered DAC buffers must not be overwritten by the live
-  window path (`evalDac` keeps buffers larger than one video frame).
+- Monitor playback follows the route live: `prepareMonitorAudio` starts
+  `AudioClip::startLiveStream` for a processed chain and the app pushes the DAC
+  window after every preview render, so rewiring the Audio Output or editing a
+  parameter is heard on the next displayed frame. `Exporter::renderOutputAudio`
+  remains the offline per-frame renderer used by export.
 - ADC/DAC define **audio-rate regions**. `Graph::evaluate` detects every
   ADC -> Scalar -> DAC path with `buildAudioRatePlan` and evaluates its
   pure-Scalar nodes (Math, Modulation, Timing, Debug) once per audio sample:
@@ -201,19 +201,35 @@ docs         rendering notes and the README overlay image
   downsample back to video rate. `EvalContext::audioRate`/`audioSampleRate` and
   `rateOf()`/`dtOf()` are how rate-aware blocks pick their timing; do not read
   `ctx.fps` directly in a block that can sit inside a region.
+- ADC/DAC are multi-channel: the `channels` parameter (1..8, default 2) builds
+  dynamic Scalar ports named left/right/ch3... via
+  `Registry::applyChannelPorts` (`Node::dynamicOutputs` for ADC,
+  `Node::dynamicInputs` for DAC). `Graph::evaluate` re-syncs them when the
+  parameter changes and drops links to ports that no longer exist. A DAC
+  channel with no link follows the first connected channel, so a legacy
+  single-port chain stays dual-mono instead of losing a side.
 - DAC output buffers are prepared per video frame by `prepareDacBuffer`, which
   keeps the same `audioRenderKey` reuse/append rules as the exporter and never
-  mutates a pre-rendered monitor buffer during live playback. Rendered buffers
-  record where their first sample sits with `AudioBuffer::startFrame`.
+  mutates a buffer currently streamed by the monitor. Rendered buffers record
+  where their first sample sits with `AudioBuffer::startFrame`.
   `Value::carrier` remains only as the fallback for a DAC outside a detected
   region (a frame-rate Scalar applied to a waveform).
 - The Spectrum Analyzer is input-driven: it emits no Analysis when its Audio
   port is unconnected, uses `ctx.analysis` only when that port is exactly the
   decoded clip, and otherwise measures a live window with `analyzeWindow`.
+  `analyzeWindow` ends at the current video frame's end, so the analysis matches
+  the samples the region produced in the same evaluation.
   `AnalysisData::originTime` maps that window in time, and
   `AnalysisData::source` feeds the Spectrum block's spectrum/waveform textures
   through `Renderer::uploadAnalysisTextures`. `analysisFrom` treats a connected
   Analysis port as authoritative instead of falling back to the project clip.
+- Monitor playback follows the Audio Output live: `AudioClip::startLiveStream` /
+  `pushLiveWindow` queue each video frame's rendered window and feed it in
+  512-frame sub-buffers. The app pushes the DAC buffer right after
+  `renderPreviewFrame`; the region quantises its window to `ctx.frame` so a
+  high-refresh display reuses the same window instead of advancing stateful
+  blocks several times per project frame. Export still renders the same
+  per-frame pass offline and muxes the resulting track.
 - `Project::ensureAudioOutput` upgrades files saved before `out.audio` existed,
   wiring it to the end of the chain the old exporter followed; `pf_migrate`
   applies the same migration to files on disk. Keep both paths working whenever

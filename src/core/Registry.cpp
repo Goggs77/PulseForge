@@ -154,13 +154,23 @@ void evalAnalyzer(Node &node, EvalContext &ctx, const std::vector<Value> &in, st
     } else {
         // Processed or foreign audio has no whole-file analysis, so one FFT
         // window is measured for the current video frame.
+        const float fs = rateOf(ctx);
+        double windowEnd = ctx.audioTime + 1.0 / fs;
+        if (!ctx.offline) {
+            // Follow the video frame the preview is showing, not the continuous
+            // display playhead.
+            const double quantized = static_cast<double>(ctx.frame) / fs;
+            windowEnd = ctx.audioTime + (quantized - ctx.time) + 1.0 / fs;
+        }
         char key[160];
         std::snprintf(key, sizeof(key), "%p|%lld|%d", static_cast<const void *>(audio.get()),
-                      std::llround(ctx.audioTime * std::max(1, audio->sampleRate)),
+                      std::llround(windowEnd * std::max(1, audio->sampleRate)),
                       audio->sampleRate);
         if (!node.runtimeAnalysis || node.runtimeAnalysisKey != key) {
+            // Include the video frame's freshly generated samples: the region
+            // ran before this block in the same evaluation.
             node.runtimeAnalysis =
-                analyzeWindow(*audio, ctx.audioTime, AnalysisSettings{}, audio);
+                analyzeWindow(*audio, windowEnd, AnalysisSettings{}, audio);
             node.runtimeAnalysisKey = key;
         }
         analysis = node.runtimeAnalysis;
@@ -450,37 +460,42 @@ void evalAdc(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     AudioPtr carrier;
     if (!in.empty() && in[0].audio) carrier = in[0].audio;
     else if (ctx.audio) carrier = ctx.audio;
-    out[0] = Value::makeScalar(1.0f);
+    const int channels = std::max(1, static_cast<int>(out.size()));
+    for (int c = 0; c < channels; ++c) out[static_cast<size_t>(c)] = Value::makeScalar(1.0f);
     if (!carrier || carrier->frameCount <= 0 || carrier->samples.empty()) {
         node.status = "no audio";
         return;
     }
 
     const int mode = node.pint("mode", 0);
-    float value = 1.0f;  // Unity: the DAC applies the waveform unchanged.
     if (mode != 0) {
         long long start = 0;
         long long end = 0;
         audioWindowBounds(ctx, *carrier, &start, &end);
-        const int channels = std::max(1, carrier->channels);
+        const int sourceChannels = std::max(1, carrier->channels);
         const float *samples = carrier->samples.data();
-        double sumSquares = 0.0;
-        float peak = 0.0f;
-        for (long long frame = start; frame < end; ++frame) {
-            const size_t base = static_cast<size_t>(frame) * static_cast<size_t>(channels);
-            float mono = 0.0f;
-            for (int c = 0; c < channels; ++c) mono += samples[base + static_cast<size_t>(c)];
-            mono /= static_cast<float>(channels);
-            if (!std::isfinite(mono)) mono = 0.0f;
-            sumSquares += static_cast<double>(mono) * mono;
-            peak = std::max(peak, std::fabs(mono));
-        }
         const double count = static_cast<double>(std::max<long long>(1, end - start));
-        value = mode == 2 ? peak : static_cast<float>(std::sqrt(sumSquares / count));
+        for (int c = 0; c < channels; ++c) {
+            const int channel = std::min(c, sourceChannels - 1);
+            double sumSquares = 0.0;
+            float peak = 0.0f;
+            for (long long frame = start; frame < end; ++frame) {
+                const size_t index = static_cast<size_t>(frame) *
+                                         static_cast<size_t>(sourceChannels) +
+                                     static_cast<size_t>(channel);
+                if (index >= carrier->samples.size()) break;
+                float sample = samples[index];
+                if (!std::isfinite(sample)) sample = 0.0f;
+                sumSquares += static_cast<double>(sample) * sample;
+                peak = std::max(peak, std::fabs(sample));
+            }
+            const float value =
+                mode == 2 ? peak : static_cast<float>(std::sqrt(sumSquares / count));
+            out[static_cast<size_t>(c)] = Value::makeScalar(value);
+            node.runtimeState["value." + std::to_string(c)] = value;
+        }
     }
-    node.runtimeState["value"] = value;
-    out[0] = Value::makeScalar(value);
-    out[0].carrier = std::move(carrier);
+    for (int c = 0; c < channels; ++c) out[static_cast<size_t>(c)].carrier = carrier;
 }
 
 // DAC: Scalar -> Audio. With a carrier the Scalar is a per-frame control value
@@ -495,7 +510,8 @@ void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
         (!in.empty() && in[0].type == PortType::Scalar) ? in[0].carrier : nullptr;
     const AudioBuffer *format = carrier ? carrier.get() : ctx.audio.get();
     const int sampleRate = format ? std::clamp(format->sampleRate, 8000, 384000) : 48000;
-    const int channels = format ? std::clamp(format->channels, 1, 8) : 1;
+    const int channels =
+        std::clamp(static_cast<int>(node.inputPorts().size()), 1, 8);
     const long long formatStart = format ? format->startFrame : 0;
     const long long formatFrames = format ? format->frameCount : -1;
     const float fps = ctx.fps > 1.0f ? ctx.fps : 60.0f;
@@ -514,11 +530,30 @@ void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
 
     const bool interpolate = node.pbool("interpolate", true);
     const bool clampOutput = node.pbool("clamp", true);
-    float target = scalarFrom(in, 0);
-    if (!std::isfinite(target)) target = 0.0f;
-    // Without a carrier the Scalar is the sample value itself; with one it is a
-    // control value, so clamping happens on the rendered sample instead.
-    if (clampOutput && !carrier) target = std::clamp(target, -1.0f, 1.0f);
+    float targets[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float previous[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float firstTarget = 0.0f;
+    bool haveTarget = false;
+    for (int c = 0; c < channels; ++c) {
+        const bool connected = c < static_cast<int>(in.size()) &&
+                               in[static_cast<size_t>(c)].type == PortType::Scalar;
+        // Legacy single-port chains keep the mono result on every channel.
+        float target =
+            connected ? in[static_cast<size_t>(c)].scalar : (haveTarget ? firstTarget : 0.0f);
+        if (!std::isfinite(target)) target = 0.0f;
+        // Without a carrier the Scalar is the sample value itself; with one it
+        // is a control value, so clamping happens on the rendered sample.
+        if (clampOutput && !carrier) target = std::clamp(target, -1.0f, 1.0f);
+        targets[c] = target;
+        if (!haveTarget) {
+            firstTarget = target;
+            haveTarget = true;
+        }
+        const auto stored = node.runtimeState.find("dac.previous." + std::to_string(c));
+        previous[c] = stored != node.runtimeState.end()
+                          ? static_cast<float>(stored->second)
+                          : target;
+    }
 
     char key[224];
     std::snprintf(key, sizeof(key), "%p|%p|%lld|%lld|%d|%d|%d|%d",
@@ -526,26 +561,26 @@ void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                   formatStart, formatFrames, sampleRate, channels, interpolate ? 1 : 0,
                   clampOutput ? 1 : 0);
 
-    const auto storedPrevious = node.runtimeState.find("dac.previous");
-    const float previous = storedPrevious != node.runtimeState.end()
-                               ? static_cast<float>(storedPrevious->second)
-                               : target;
-
-    const auto fill = [&](AudioBuffer &buffer, long long offset, long long count, float from,
-                          float to, long long localBase) {
+    const auto fill = [&](AudioBuffer &buffer, long long offset, long long count,
+                          const float *from, const float *to, long long localBase) {
         const size_t base = static_cast<size_t>(offset) * static_cast<size_t>(channels);
+        const int carrierChannels = carrier ? std::max(1, carrier->channels) : 1;
         for (long long i = 0; i < count; ++i) {
             const float t = interpolate && count > 1
                                 ? static_cast<float>(static_cast<double>(i + 1) / count)
                                 : 1.0f;
-            const float control = from + (to - from) * t;
             for (int c = 0; c < channels; ++c) {
+                const float control = from[c] + (to[c] - from[c]) * t;
                 float sample = control;
                 if (carrier) {
+                    const int sourceChannel = std::min(c, carrierChannels - 1);
                     const size_t index =
-                        static_cast<size_t>(localBase + i) * static_cast<size_t>(channels) +
-                        static_cast<size_t>(c);
-                    sample = carrier->samples[index] * control;
+                        static_cast<size_t>(localBase + i) *
+                            static_cast<size_t>(carrierChannels) +
+                        static_cast<size_t>(sourceChannel);
+                    sample = index < carrier->samples.size()
+                                 ? carrier->samples[index] * control
+                                 : 0.0f;
                 }
                 if (clampOutput) sample = std::clamp(sample, -1.0f, 1.0f);
                 buffer.samples[base + static_cast<size_t>(i) * static_cast<size_t>(channels) +
@@ -576,7 +611,7 @@ void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
             const long long offset = node.audioRenderFrames;
             buffer.samples.resize(
                 static_cast<size_t>(offset + frames) * static_cast<size_t>(channels));
-            fill(buffer, offset, frames, append ? previous : target, target, localStart);
+            fill(buffer, offset, frames, append ? previous : targets, targets, localStart);
             node.audioRenderFrames += frames;
             buffer.frameCount = node.audioRenderFrames;
         }
@@ -599,14 +634,17 @@ void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
             buffer.samples.assign(static_cast<size_t>(frames) *
                                       static_cast<size_t>(channels),
                                   0.0f);
-            fill(buffer, 0, frames, restart ? target : previous, target, localStart);
+            fill(buffer, 0, frames, restart ? targets : previous, targets, localStart);
             node.audioRenderStart = absoluteStart;
             node.audioRenderFrames = frames;
             node.audioRenderKey = key;
         }
         out[0].audio = node.audioRenderOutput;
     }
-    node.runtimeState["dac.previous"] = static_cast<double>(target);
+    for (int c = 0; c < channels; ++c) {
+        node.runtimeState["dac.previous." + std::to_string(c)] =
+            static_cast<double>(targets[c]);
+    }
 }
 
 void evalNoise(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
@@ -1500,6 +1538,25 @@ bool Registry::applyShaderPorts(Node &node, const ShaderLibrary &shaders, std::s
     return true;
 }
 
+void Registry::applyChannelPorts(Node &node) {
+    if (node.kind != "dsp.adc" && node.kind != "dsp.dac") return;
+    const int channels = std::clamp(node.pint("channels", 2), 1, 8);
+    std::vector<PortDesc> ports;
+    ports.reserve(static_cast<size_t>(channels));
+    for (int i = 0; i < channels; ++i) {
+        std::string name;
+        if (i == 0) name = "left";
+        else if (i == 1) name = "right";
+        else name = "ch" + std::to_string(i + 1);
+        ports.push_back(PortDesc{name, PortType::Scalar, "sample"});
+    }
+    if (node.kind == "dsp.adc") {
+        node.setOutputPorts(std::move(ports));
+    } else {
+        node.setInputPorts(std::move(ports));
+    }
+}
+
 std::vector<const NodeDef *> Registry::byCategory(const std::string &category) const {
     std::vector<const NodeDef *> result;
     for (const auto &def : definitions_) {
@@ -1726,12 +1783,14 @@ void Registry::registerBuiltins() {
         def.description =
             "Audio to Scalar. On a path to a DAC the Scalar is the waveform at the audio "
             "sample rate, so every Math/Modulation block between them processes every sample. "
+            "Channels are optional Scalar ports (left, right, ...; default 2) for stereo. "
             "Without a DAC downstream, Unity passes the waveform through and RMS/Peak follow "
             "loudness at video rate.";
         def.inputs = {PortDesc{"Audio", PortType::Audio}};
-        def.outputs = {PortDesc{"Value", PortType::Scalar, "control"}};
+        def.outputs = {PortDesc{"left", PortType::Scalar, "sample"}};
         def.params = {
             makeEnumParam("mode", "Mode", {"Unity", "RMS", "Peak"}, 0, "Conversion"),
+            makeIntParam("channels", "Channels", 2, 1, 8, "Conversion"),
         };
         def.evaluate = evalAdc;
         add(std::move(def));
@@ -1744,13 +1803,15 @@ void Registry::registerBuiltins() {
         def.description =
             "Scalar to Audio. Ends an ADC -> DAC region: the per-sample Scalar stream becomes "
             "audio at the incoming rate, so the blocks before it processed the waveform "
-            "itself. Without an ADC upstream the per-frame value becomes the sample. Patch "
-            "the output into an Audio Output to hear it.";
-        def.inputs = {PortDesc{"Value", PortType::Scalar}};
+            "itself. Channels are optional Scalar ports (left, right, ...; default 2) for "
+            "stereo. Without an ADC upstream the per-frame value becomes the sample. Patch the "
+            "output into an Audio Output to hear it.";
+        def.inputs = {PortDesc{"left", PortType::Scalar, "sample"}};
         def.outputs = {PortDesc{"Audio", PortType::Audio, "rendered clip"}};
         def.params = {
             makeBoolParam("interpolate", "Interpolate frames", true, "Conversion"),
             makeBoolParam("clamp", "Clamp to -1..1", true, "Conversion"),
+            makeIntParam("channels", "Channels", 2, 1, 8, "Conversion"),
         };
         def.evaluate = evalDac;
         add(std::move(def));

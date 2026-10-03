@@ -389,9 +389,11 @@ std::string monitorRouteIdentity(const UiState &state) {
     const Node *source = project.graph.find(link->fromNode);
     if (!source || !source->enabled) return "open";
     char text[320];
-    std::snprintf(text, sizeof(text), "%d:%s|%s|%.4f|%.4f", source->id, source->kind.c_str(),
-                  project.audio.path.c_str(), project.video.trimStart,
-                  project.effectiveDuration(project.audio.duration));
+    const size_t channels =
+        source->kind == "dsp.dac" ? source->inputPorts().size() : 0;
+    std::snprintf(text, sizeof(text), "%d:%s|%zu|%s|%.4f|%.4f", source->id,
+                  source->kind.c_str(), channels, project.audio.path.c_str(),
+                  project.video.trimStart, project.effectiveDuration(project.audio.duration));
     return text;
 }
 
@@ -418,28 +420,32 @@ std::string monitorRenderKey(const UiState &state) {
 }
 
 // Applies the current Audio Output route to the monitor: the decoded clip for a
-// direct source link, the rendered track for a processed chain, silence for an
-// unconnected output.
+// direct source link, a live graph-rendered stream for a processed chain,
+// silence for an unconnected output.
 bool prepareMonitorAudio(UiState &state, std::string *error) {
+    (void)error;
+    state.clip.clearPlaybackBuffer();
     switch (Exporter::audioRoute(state.project)) {
         case AudioRoute::Source:
-            state.clip.clearPlaybackBuffer();
+            state.clip.stopLiveStream();
             return true;
         case AudioRoute::Silent:
+            state.clip.stopLiveStream();
             state.clip.setPlaybackBuffer(nullptr);
             return true;
         case AudioRoute::Processed: {
-            const double duration = state.project.effectiveDuration(state.clip.duration());
-            AudioPtr rendered;
-            if (!Exporter::renderOutputAudio(state.project, state.clip.buffer(), state.analysis,
-                                             0.0, duration, {}, {}, &rendered, error)) {
-                return false;
+            // Render the chain live, one video frame at a time, so the audio
+            // follows the video clock and parameter edits are heard at once.
+            const int rate = state.clip.sampleRate() > 0 ? state.clip.sampleRate() : 48000;
+            int channels = 2;
+            const int sink = state.project.graph.audioSinkNodeId();
+            const Link *link = sink ? state.project.graph.findInputLink(sink, 0) : nullptr;
+            const Node *source = link ? state.project.graph.find(link->fromNode) : nullptr;
+            if (source && source->kind == "dsp.dac") {
+                channels = std::clamp(static_cast<int>(source->inputPorts().size()), 1, 8);
             }
-            if (!rendered || rendered->frameCount <= 0) {
-                if (error) *error = "the Audio Output produced no audio";
-                return false;
-            }
-            state.clip.setPlaybackBuffer(rendered);
+            state.clip.stopLiveStream();
+            state.clip.startLiveStream(rate, channels);
             return true;
         }
     }
@@ -447,6 +453,7 @@ bool prepareMonitorAudio(UiState &state, std::string *error) {
 }
 
 void resetMonitor(UiState &state) {
+    state.clip.stopLiveStream();
     state.clip.clearPlaybackBuffer();
     state.monitorRenderKey.clear();
     state.monitorRoute.clear();
@@ -477,17 +484,14 @@ void updateExportExtension(UiState &state) {
 }
 
 void startPlayback(UiState &state) {
-    const std::string key = monitorRenderKey(state);
-    if (!state.clip.hasPlaybackOverride() || key != state.monitorRenderKey) {
-        std::string error;
-        if (!prepareMonitorAudio(state, &error)) {
-            state.playing = false;
-            setStatus(state, "Playback: " + error, true);
-            return;
-        }
-        state.monitorRenderKey = key;
-        state.monitorRoute = monitorRouteIdentity(state);
+    std::string error;
+    if (!prepareMonitorAudio(state, &error)) {
+        state.playing = false;
+        setStatus(state, "Playback: " + error, true);
+        return;
     }
+    state.monitorRenderKey = monitorRenderKey(state);
+    state.monitorRoute = monitorRouteIdentity(state);
     state.playing = true;
     state.clip.seek(state.playhead + state.project.video.trimStart);
     state.clip.startPreview();
@@ -923,8 +927,10 @@ void renderPreviewFrame(UiState &state) {
     ctx.duration = duration;
     ctx.time = state.playhead;
     ctx.frame = static_cast<int>(state.playhead * state.project.video.fps);
-    ctx.audioTime = std::min(state.clip.duration(),
-                             state.project.video.trimStart + state.playhead);
+    const double wantedAudioTime = state.project.video.trimStart + state.playhead;
+    ctx.audioTime = state.clip.duration() > 0.0
+                        ? std::min(state.clip.duration(), wantedAudioTime)
+                        : wantedAudioTime;
     ctx.audio = state.clip.buffer();
     ctx.analysis = state.analysis;
     ctx.offline = false;
@@ -1218,6 +1224,18 @@ int runApp(int argc, char **argv) {
 
         // ---- render the pipeline ---------------------------------------
         renderPreviewFrame(state);
+
+        // ---- live graph audio ------------------------------------------
+        // The region evaluated above just produced this video frame's samples;
+        // stream them so the sound follows the video clock frame by frame.
+        if (state.playing && state.clip.liveStreamActive()) {
+            const int sink = state.project.graph.audioSinkNodeId();
+            const Link *link = sink ? state.project.graph.findInputLink(sink, 0) : nullptr;
+            const Node *source = link ? state.project.graph.find(link->fromNode) : nullptr;
+            if (source && source->kind == "dsp.dac" && source->audioRenderOutput) {
+                state.clip.pushLiveWindow(*source->audioRenderOutput);
+            }
+        }
 
         // ---- draw -------------------------------------------------------
         const bool capture = !shotPath.empty() && frameCounter >= shotFrames &&

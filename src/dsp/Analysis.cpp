@@ -209,8 +209,8 @@ AnalysisPtr analyzeAudio(const AudioBuffer &buffer, const AnalysisSettings &sett
     return result;
 }
 
-AnalysisPtr analyzeWindow(const AudioBuffer &buffer, double time, const AnalysisSettings &settings,
-                          const AudioPtr &source) {
+AnalysisPtr analyzeWindow(const AudioBuffer &buffer, double windowEnd,
+                          const AnalysisSettings &settings, const AudioPtr &source) {
     auto result = std::make_shared<AnalysisData>();
     if (buffer.frameCount <= 0 || buffer.sampleRate <= 0) return result;
 
@@ -231,9 +231,8 @@ AnalysisPtr analyzeWindow(const AudioBuffer &buffer, double time, const Analysis
     // Causal window: the newest FFT-sized slice available at `time`. Rendered
     // buffers only carry frames up to the current evaluation, so the window is
     // zero-padded instead of reading past the end.
-    const long long endLocal =
-        std::clamp<long long>(std::llround(time * sampleRate) - buffer.startFrame, 0,
-                              buffer.frameCount);
+    const long long endLocal = std::clamp<long long>(
+        std::llround(windowEnd * sampleRate) - buffer.startFrame, 0, buffer.frameCount);
     const long long startLocal = std::max<long long>(0, endLocal - fftSize);
     result->originTime =
         static_cast<double>(startLocal + buffer.startFrame) / static_cast<double>(sampleRate);

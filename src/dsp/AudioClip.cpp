@@ -16,6 +16,10 @@ namespace {
 // SetAudioStreamBufferSizeDefault() selects that sub-buffer size (the ring is
 // allocated at twice this value), so the feed chunk has to match it exactly.
 constexpr int kPreviewSubBufferFrames = 2048;  // ~43 ms at 48 kHz
+// Live graph audio waits for smaller chunks so a 60 fps frame (which produces
+// fewer samples than the preview sub-buffer at high rates) can be fed with low
+// latency instead of being held back for several frames.
+constexpr int kLiveSubBufferFrames = 512;
 }  // namespace
 
 AudioClip::~AudioClip() { destroyStream(); }
@@ -23,6 +27,7 @@ AudioClip::~AudioClip() { destroyStream(); }
 bool AudioClip::load(const std::string &path, int sampleRate, std::string *error) {
     // The new file may use another sample rate, and the old stream is bound to
     // the previous one, so playback is torn down first.
+    stopLiveStream();
     stopPreview();
     destroyStream();
     buffer_.reset();
@@ -51,6 +56,7 @@ bool AudioClip::load(const std::string &path, int sampleRate, std::string *error
 }
 
 void AudioClip::clear() {
+    stopLiveStream();
     stopPreview();
     destroyStream();
     buffer_.reset();
@@ -150,12 +156,111 @@ void AudioClip::clearPlaybackBuffer() {
     startPosition_ = position_;
 }
 
+void AudioClip::clearLiveQueue() {
+    liveQueue_.clear();
+    liveReadFrame_ = 0;
+    liveQueuedFrames_ = 0;
+    liveStarted_ = false;
+    liveNextFrame_ = -1;
+}
+
+void AudioClip::startLiveStream(int sampleRate, int channels) {
+    stopLiveStream();
+    liveStream_ = true;
+    liveRate_ = std::clamp(sampleRate, 8000, 384000);
+    liveChannels_ = std::clamp(channels, 1, 8);
+    clearLiveQueue();
+    playing_ = false;
+    ensureStream();
+}
+
+void AudioClip::stopLiveStream() {
+    playing_ = false;
+    if (streamReady_) StopAudioStream(stream_);
+    destroyStream();
+    liveStream_ = false;
+    clearLiveQueue();
+}
+
+void AudioClip::feedLive() {
+    if (!streamReady_ || !liveStream_) return;
+    while (IsAudioStreamProcessed(stream_) && liveQueuedFrames_ >= kLiveSubBufferFrames) {
+        const float *base =
+            liveQueue_.data() + liveReadFrame_ * static_cast<size_t>(liveChannels_);
+        UpdateAudioStream(stream_, base, kLiveSubBufferFrames);
+        liveReadFrame_ += kLiveSubBufferFrames;
+        liveQueuedFrames_ -= kLiveSubBufferFrames;
+    }
+    // Keep the latency bounded: if rendering runs ahead of the device, drop the
+    // oldest audio instead of falling further behind the video.
+    const long long maxQueued = static_cast<long long>(liveRate_) * 2;
+    if (liveQueuedFrames_ > maxQueued) {
+        const long long drop = liveQueuedFrames_ - static_cast<long long>(liveRate_) / 2;
+        liveReadFrame_ += static_cast<size_t>(drop);
+        liveQueuedFrames_ -= drop;
+    }
+    if (liveReadFrame_ >= static_cast<size_t>(liveRate_) * 2 && liveReadFrame_ > 0) {
+        const size_t consumed = liveReadFrame_ * static_cast<size_t>(liveChannels_);
+        liveQueue_.erase(liveQueue_.begin(), liveQueue_.begin() + static_cast<long>(consumed));
+        liveReadFrame_ = 0;
+    }
+}
+
+void AudioClip::pushLiveWindow(const AudioBuffer &buffer) {
+    if (!liveStream_ || buffer.frameCount <= 0 || buffer.samples.empty()) return;
+    const int sourceChannels = std::max(1, buffer.channels);
+    const long long start = buffer.startFrame;
+    const long long end = start + buffer.frameCount;
+    if (liveNextFrame_ < 0) liveNextFrame_ = start;
+    const long long from = std::max(start, liveNextFrame_);
+    if (end <= from) return;
+    const long long frames = end - from;
+    const size_t base = liveQueue_.size();
+    liveQueue_.resize(base + static_cast<size_t>(frames) *
+                                 static_cast<size_t>(liveChannels_));
+    float *out = liveQueue_.data() + base;
+    for (long long frame = from; frame < end; ++frame) {
+        const long long local = frame - start;
+        for (int c = 0; c < liveChannels_; ++c) {
+            const int sourceChannel = std::min(c, sourceChannels - 1);
+            out[static_cast<size_t>(frame - from) * static_cast<size_t>(liveChannels_) +
+                static_cast<size_t>(c)] =
+                buffer.samples[static_cast<size_t>(local) *
+                                   static_cast<size_t>(sourceChannels) +
+                               static_cast<size_t>(sourceChannel)];
+        }
+    }
+    liveQueuedFrames_ += frames;
+    liveNextFrame_ = end;
+    if (!liveStarted_ && liveQueuedFrames_ >= kLiveSubBufferFrames) {
+        ensureStream();
+        if (!streamReady_) return;
+        PlayAudioStream(stream_);
+        liveStarted_ = true;
+        playing_ = true;
+        startClock_ = GetTime();
+        startPosition_ = static_cast<double>(from) / liveRate_;
+    }
+    feedLive();
+}
+
 void AudioClip::ensureStream() {
-    const AudioBuffer *playback = playbackBuffer();
-    if (streamReady_ || !playback || playback->frameCount <= 0 || !audioDeviceReady()) return;
-    SetAudioStreamBufferSizeDefault(kPreviewSubBufferFrames);
-    stream_ = LoadAudioStream(static_cast<unsigned int>(std::max(1, playback->sampleRate)), 32,
-                              static_cast<unsigned int>(std::max(1, playback->channels)));
+    if (streamReady_ || !audioDeviceReady()) return;
+    int rate = 48000;
+    int channels = 2;
+    if (liveStream_) {
+        rate = liveRate_;
+        channels = liveChannels_;
+        SetAudioStreamBufferSizeDefault(kLiveSubBufferFrames);
+    } else {
+        const AudioBuffer *playback = playbackBuffer();
+        if (!playback || playback->frameCount <= 0) return;
+        rate = std::max(1, playback->sampleRate);
+        channels = std::max(1, playback->channels);
+        SetAudioStreamBufferSizeDefault(kPreviewSubBufferFrames);
+    }
+    stream_ = LoadAudioStream(static_cast<unsigned int>(rate), 32,
+                              static_cast<unsigned int>(channels));
     streamReady_ = stream_.buffer != nullptr;
 }
 
@@ -187,6 +292,10 @@ void AudioClip::feed() {
 }
 
 void AudioClip::startPreview() {
+    if (liveStream_) {
+        ensureStream();
+        return;  // playback starts with the first pushed window
+    }
     const AudioBuffer *playback = playbackBuffer();
     if (!playback || playback->frameCount <= 0 || !audioDeviceReady()) return;
     ensureStream();
@@ -203,6 +312,12 @@ void AudioClip::startPreview() {
 }
 
 void AudioClip::pausePreview() {
+    if (liveStream_) {
+        playing_ = false;
+        if (streamReady_) StopAudioStream(stream_);
+        clearLiveQueue();
+        return;
+    }
     // Pausing keeps the position, but the ring is left holding the tail of the
     // old queue, so resume restarts the stream from the stopped position.
     playing_ = false;
@@ -214,6 +329,12 @@ void AudioClip::pausePreview() {
 }
 
 void AudioClip::stopPreview() {
+    if (liveStream_) {
+        playing_ = false;
+        if (streamReady_) StopAudioStream(stream_);
+        clearLiveQueue();
+        return;
+    }
     playing_ = false;
     if (streamReady_) StopAudioStream(stream_);
     feedFrame_ = frameForPosition(position_);
@@ -223,6 +344,14 @@ void AudioClip::stopPreview() {
 }
 
 void AudioClip::seek(double seconds) {
+    if (liveStream_) {
+        playing_ = false;
+        if (streamReady_) StopAudioStream(stream_);
+        clearLiveQueue();
+        const double end = buffer_ ? buffer_->duration() : std::max(0.0, seconds);
+        position_ = std::clamp(seconds, 0.0, std::max(0.0, end));
+        return;
+    }
     const AudioBuffer *playback = playbackBuffer();
     const double end = playback ? positionForFrame(playback->frameCount)
                                 : (buffer_ ? buffer_->duration() : std::max(0.0, seconds));
@@ -238,6 +367,10 @@ void AudioClip::seek(double seconds) {
 }
 
 void AudioClip::updatePreview() {
+    if (liveStream_) {
+        if (playing_) feedLive();
+        return;
+    }
     const AudioBuffer *playback = playbackBuffer();
     if (!playback) return;  // silent output: the app clock drives the playhead
     if (playing_) {

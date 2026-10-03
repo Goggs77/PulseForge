@@ -1193,6 +1193,133 @@ int main(int argc, char **argv) {
                         if (!grownOk) result = fail("audio-rate growing source: " + grownWhat);
                     }
 
+                    // Stereo: the left and right samples must stay separate
+                    // through a two-port ADC -> DAC region.
+                    if (result == 0) {
+                        auto stereo = std::make_shared<AudioBuffer>();
+                        stereo->channels = 2;
+                        stereo->sampleRate = 48000;
+                        stereo->frameCount = 48000;
+                        stereo->samples.resize(static_cast<size_t>(stereo->frameCount) * 2);
+                        for (long long i = 0; i < stereo->frameCount; ++i) {
+                            stereo->samples[static_cast<size_t>(i) * 2] =
+                                0.4f * std::sin(6.2831853f * 440.0f * i / 48000.0f);
+                            stereo->samples[static_cast<size_t>(i) * 2 + 1] =
+                                0.25f * std::sin(6.2831853f * 880.0f * i / 48000.0f);
+                        }
+                        Graph split;
+                        Node *src = split.addNode("src.audio", 0, 0);
+                        Node *adc = split.addNode("dsp.adc", 200, 0);
+                        Node *dac = split.addNode("dsp.dac", 400, 0);
+                        bool stereoOk = src && adc && dac;
+                        std::string stereoWhat;
+                        if (!stereoOk) {
+                            stereoWhat = "blocks missing";
+                        } else if (adc->outputPorts().size() != 2 ||
+                                   dac->inputPorts().size() != 2) {
+                            stereoOk = false;
+                            stereoWhat = "default channel ports are not stereo";
+                        } else {
+                            std::string why;
+                            stereoOk = split.connect(src->id, 0, adc->id, 0, &why) &&
+                                       split.connect(adc->id, 0, dac->id, 0, &why) &&
+                                       split.connect(adc->id, 1, dac->id, 1, &why);
+                            if (!stereoOk) stereoWhat = why;
+                        }
+                        if (stereoOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.offline = true;
+                            ctx.audio = stereo;
+                            for (int frame = 0; frame < 60; ++frame) {
+                                ctx.frame = frame;
+                                ctx.audioTime = static_cast<double>(frame) / 60.0;
+                                split.evaluate(ctx);
+                            }
+                            const AudioBuffer *out = dac->audioRenderOutput.get();
+                            if (!out || out->frameCount != 48000 || out->channels != 2) {
+                                stereoOk = false;
+                                stereoWhat = "wrong stereo window";
+                            } else {
+                                double maxDiff = 0.0;
+                                for (size_t i = 0; i < out->samples.size(); ++i) {
+                                    maxDiff = std::max(
+                                        maxDiff,
+                                        std::fabs(static_cast<double>(out->samples[i]) -
+                                                  stereo->samples[i]));
+                                }
+                                if (maxDiff > 1e-7) {
+                                    stereoOk = false;
+                                    stereoWhat = "stereo diff " + std::to_string(maxDiff);
+                                } else {
+                                    std::printf("  bridges  : stereo left/right kept separate "
+                                                "(diff %.1e)\n",
+                                                maxDiff);
+                                }
+                            }
+                        }
+                        if (!stereoOk) result = fail("stereo ADC/DAC: " + stereoWhat);
+                    }
+
+                    // Live preview follows the video frame: a second display tick
+                    // inside the same frame reuses the rendered window instead of
+                    // advancing the chain again.
+                    if (result == 0) {
+                        auto tone = std::make_shared<AudioBuffer>();
+                        tone->channels = 2;
+                        tone->sampleRate = 48000;
+                        tone->frameCount = 48000;
+                        tone->samples.assign(static_cast<size_t>(tone->frameCount) * 2, 0.1f);
+                        Graph live;
+                        Node *src = live.addNode("src.audio", 0, 0);
+                        Node *adc = live.addNode("dsp.adc", 200, 0);
+                        Node *dac = live.addNode("dsp.dac", 400, 0);
+                        bool liveOk = src && adc && dac;
+                        std::string liveWhat;
+                        if (liveOk) {
+                            std::string why;
+                            liveOk = live.connect(src->id, 0, adc->id, 0, &why) &&
+                                     live.connect(adc->id, 0, dac->id, 0, &why) &&
+                                     live.connect(adc->id, 1, dac->id, 1, &why);
+                            if (!liveOk) liveWhat = why;
+                        } else {
+                            liveWhat = "blocks missing";
+                        }
+                        if (liveOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.offline = false;
+                            ctx.audio = tone;
+                            ctx.frame = 30;
+                            ctx.time = 0.5;
+                            ctx.audioTime = 0.5;
+                            live.evaluate(ctx);
+                            const AudioBuffer *first = dac->audioRenderOutput.get();
+                            const long long firstStart = first ? first->startFrame : -1;
+                            ctx.time += 0.002;
+                            ctx.audioTime += 0.002;
+                            live.evaluate(ctx);  // still frame 30
+                            const bool reused = dac->audioRenderOutput.get() == first;
+                            ctx.frame = 31;
+                            ctx.time = 31.0 / 60.0;
+                            ctx.audioTime = 31.0 / 60.0;
+                            live.evaluate(ctx);
+                            const AudioBuffer *second = dac->audioRenderOutput.get();
+                            const bool advanced =
+                                second && second != first && second->startFrame == 31 * 800;
+                            if (!first || firstStart != 30 * 800 || !reused || !advanced) {
+                                liveOk = false;
+                                liveWhat = "frame quantisation or reuse failed";
+                            } else {
+                                std::printf("  bridges  : live frame reuse ok (start %lld -> %lld)\n",
+                                            firstStart, second->startFrame);
+                            }
+                        }
+                        if (!liveOk) result = fail("live audio region: " + liveWhat);
+                    }
+
                     // The Spectrum Analyzer depends only on the Audio wired into
                     // its port: silent when unconnected, the whole-file analysis
                     // for the source clip, and a live window for processed audio.
@@ -1348,7 +1475,16 @@ int main(int argc, char **argv) {
                                     clip.startPreview();
                                     const bool silent = !clip.previewPlaying();
                                     clip.clearPlaybackBuffer();
-                                    if (!played || !silent) {
+                                    clip.startLiveStream(48000, 2);
+                                    AudioBuffer window;
+                                    window.channels = 2;
+                                    window.sampleRate = 48000;
+                                    window.frameCount = 1024;
+                                    window.samples.assign(2048, 0.05f);
+                                    clip.pushLiveWindow(window);
+                                    const bool livePlaying = clip.previewPlaying();
+                                    clip.stopLiveStream();
+                                    if (!played || !silent || !livePlaying) {
                                         monitorOk = false;
                                         monitorWhat = "the monitor did not follow the override";
                                     }

@@ -211,13 +211,13 @@ executable when *Save preferences* is pressed.
 - **While a dialog or list is open**, everything behind it stops responding to
   clicks and hover, including the CrystalGUI chrome buttons.
 - **Preview playback follows the Audio Output**: a direct link from the Audio
-  Source streams the decoded clip, a processed chain (Dynamics, DAC, ...) is
-  rendered once when playback starts and that result is what you hear, and an
-  unconnected Audio Output plays silence while the video keeps running.
-  Rewiring the Audio Output takes effect immediately; parameter edits are
-  picked up on the next *Play*. The stream still uses whole 2 KiB sub-buffers,
-  so the playhead follows the frames actually handed to the device, and seeking
-  or looping restarts it at the new position.
+  Source streams the decoded clip, a processed chain (Dynamics, ADC -> DAC, ...)
+  is rendered live one video frame at a time and streamed in small sub-buffers,
+  and an unconnected Audio Output plays silence while the video keeps running.
+  The audio chain follows the video frame clock, so rewiring the graph or moving
+  a slider is heard immediately and the Spectrum Analyzer analyses the same
+  freshly rendered window; seeking and looping restart the stream at the new
+  position.
 - **Starting an export reminds you** when the configured audio bitrate is far
   below the imported file (below 80%), with the source and target rates spelled
   out; *Continue* renders anyway and *Cancel* returns to the dialog.
@@ -259,8 +259,8 @@ executable when *Save preferences* is pressed.
 | Envelope Follower | Scalar | Scalar | Attack/release, threshold, gain, floor |
 | Curve / Remap | Scalar | Scalar | Input range to output range with power, smoothstep and clamping |
 | Dynamics | Audio, Pre-gain, Threshold, Ratio, Attack, Release, Post-gain | Audio | Zero-latency single-band compressor / downward expander with an optional 0 dBFS limiter (Hard Clip or Soft Clip and independent attack/release). The block draws dry and wet loudness in a 4:3 dBFS graph; the modulation ports follow the usual conventions (levels scale by `1 + input`, threshold adds 24 dB per unit, times shift by octaves) |
-| ADC | Audio | Value | Starts an audio-rate region: the Scalar is the waveform at the audio sample rate, so Math, Modulation, Timing and Debug blocks between it and a DAC process every sample (x2.0838 then tanh is real saturation, not a gain) |
-| DAC | Value | Audio | Ends an audio-rate region and converts the per-sample Scalar stream back to Audio at the same rate. A DAC without an ADC upstream still synthesises from the per-frame Scalar. Patch it into an Audio Output to hear it |
+| ADC | Audio | left, right, ... | Starts an audio-rate region: each channel becomes a Scalar stream at the audio sample rate, so Math, Modulation, Timing and Debug blocks between it and a DAC process every sample (x2.0838 then tanh is real saturation, not a gain). `Channels` defaults to 2 (left/right) and can be 1..8 |
+| DAC | left, right, ... | Audio | Ends an audio-rate region and converts the per-channel Scalar streams back to Audio at the same rate. An unconnected channel follows the first connected one, so legacy single-port chains stay dual-mono. `Channels` defaults to 2 |
 
 ### Math
 
@@ -475,6 +475,13 @@ at audio rate; window producers such as the Spectrum Analyzer and Dynamics stay
 at video rate and hold their value inside the region. Nodes downstream of the
 region are evaluated after the sample loop with the last sample, which is the
 downsample back to video rate.
+
+The bridge is multi-channel: ADC emits one Scalar stream per channel
+(left/right/..., two by default), the blocks between it and DAC process each
+channel per sample, and DAC writes the channels back interleaved. Preview runs
+the region for the current video frame as it is displayed and streams the
+samples directly; export runs the same per-frame pass offline, so both stay on
+the video clock.
 
 Analysis is computed once per media load, in parallel across all cores: FFT
 frames (default 2048/512) are reduced to 64 log-spaced bands plus per-frame rms,

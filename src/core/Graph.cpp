@@ -39,7 +39,8 @@ Node *Graph::addNodeWithId(int id, const std::string &kind) {
     node.def = def;
     node.title = def->label;
     node.ensureParams(*def);
-    node.outputs.resize(def->outputs.size());
+    Registry::applyChannelPorts(node);
+    node.outputs.resize(node.outputPorts().size());
     nodes.push_back(std::move(node));
     nextId = std::max(nextId, id + 1);
     return &nodes.back();
@@ -203,6 +204,37 @@ bool isPureScalarBlock(const Node &node) {
     return false;
 }
 
+// Keeps ADC/DAC channel ports in step with their `channels` parameter. Links
+// that pointed at ports which no longer exist are dropped.
+void syncDynamicChannelPorts(Graph &graph) {
+    for (Node &node : graph.nodes) {
+        if (node.kind != "dsp.adc" && node.kind != "dsp.dac") continue;
+        const int channels = std::clamp(node.pint("channels", 2), 1, 8);
+        const bool adc = node.kind == "dsp.adc";
+        const size_t current =
+            adc ? node.outputPorts().size() : node.inputPorts().size();
+        if (current == static_cast<size_t>(channels)) continue;
+        Registry::applyChannelPorts(node);
+        if (adc) {
+            graph.links.erase(
+                std::remove_if(graph.links.begin(), graph.links.end(),
+                               [&](const Link &link) {
+                                   return link.fromNode == node.id && link.fromPort >= channels;
+                               }),
+                graph.links.end());
+            node.outputs.resize(static_cast<size_t>(channels));
+        } else {
+            graph.links.erase(
+                std::remove_if(graph.links.begin(), graph.links.end(),
+                               [&](const Link &link) {
+                                   return link.toNode == node.id && link.toPort >= channels;
+                               }),
+                graph.links.end());
+            node.inputScratch.clear();
+        }
+    }
+}
+
 struct AudioRatePlan {
     bool active = false;
     std::vector<int> region;  // topological order
@@ -356,64 +388,99 @@ void evaluateFrameNode(Graph &graph, Node &node, EvalContext &ctx, bool measure)
     propagateCarrier(node, node.inputScratch);
 }
 
-void sampleAdcNode(const Graph &graph, Node &node, const EvalContext &ctx) {
+// Resolved input used by the per-sample ADC/DAC path so the loop does not
+// search the link list for every sample.
+struct ChannelInput {
+    const Node *source = nullptr;
+    int port = 0;
+};
+
+void sampleAdcNode(Node &node, const EvalContext &ctx, const ChannelInput &input) {
+    const int channels = std::max(1, static_cast<int>(node.outputPorts().size()));
+    node.outputs.assign(static_cast<size_t>(channels), Value{});
     const AudioBuffer *buffer = nullptr;
-    const Link *link = graph.findInputLink(node.id, 0);
-    if (link) {
-        const Node *source = graph.find(link->fromNode);
-        if (source && source->enabled && link->fromPort >= 0 &&
-            link->fromPort < static_cast<int>(source->outputs.size())) {
-            buffer = source->outputs[static_cast<size_t>(link->fromPort)].audio.get();
-        }
+    if (input.source && input.port >= 0 &&
+        input.port < static_cast<int>(input.source->outputs.size())) {
+        buffer = input.source->outputs[static_cast<size_t>(input.port)].audio.get();
     }
     if (!buffer) buffer = ctx.audio.get();
-    float value = 0.0f;
+    const int sourceChannels = buffer ? std::max(1, buffer->channels) : 1;
+    long long local = -1;
     if (buffer && buffer->frameCount > 0 && !buffer->samples.empty()) {
-        const long long local =
-            std::llround(ctx.audioTime * buffer->sampleRate) - buffer->startFrame;
-        if (local >= 0 && local < buffer->frameCount) {
-            value = buffer->monoAt(static_cast<double>(local));
-        }
+        local = std::llround(ctx.audioTime * buffer->sampleRate) - buffer->startFrame;
+        if (local < 0 || local >= buffer->frameCount) local = -1;
     }
-    node.outputs.assign(1, Value{});
-    node.outputs[0] = Value::makeScalar(value);
-    node.runtimeState["value"] = value;
+    for (int c = 0; c < channels; ++c) {
+        float value = 0.0f;
+        if (local >= 0) {
+            const int sourceChannel = std::min(c, sourceChannels - 1);
+            const size_t index = static_cast<size_t>(local) *
+                                     static_cast<size_t>(sourceChannels) +
+                                 static_cast<size_t>(sourceChannel);
+            if (index < buffer->samples.size()) value = buffer->samples[index];
+        }
+        node.outputs[static_cast<size_t>(c)] = Value::makeScalar(value);
+        node.runtimeState["value." + std::to_string(c)] = value;
+    }
 }
 
-void sampleDacNode(const Graph &graph, Node &node, const EvalContext &ctx) {
-    float value = 0.0f;
-    const Link *link = graph.findInputLink(node.id, 0);
-    if (link) {
-        const Node *source = graph.find(link->fromNode);
-        if (source && source->enabled && link->fromPort >= 0 &&
-            link->fromPort < static_cast<int>(source->outputs.size())) {
-            value = source->outputs[static_cast<size_t>(link->fromPort)].asScalar(0.0f);
+void sampleDacNode(Node &node, const EvalContext &ctx,
+                   const std::vector<ChannelInput> &inputs) {
+    const int channels = static_cast<int>(inputs.size());
+    const bool clampOutput = node.pbool("clamp", true);
+    float values[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    bool haveValue = false;
+    float firstValue = 0.0f;
+    for (int c = 0; c < channels && c < 8; ++c) {
+        const ChannelInput &input = inputs[static_cast<size_t>(c)];
+        if (!input.source || input.port < 0 ||
+            input.port >= static_cast<int>(input.source->outputs.size())) {
+            continue;
+        }
+        values[c] = input.source->outputs[static_cast<size_t>(input.port)].asScalar(0.0f);
+        if (!std::isfinite(values[c])) values[c] = 0.0f;
+        if (!haveValue) {
+            firstValue = values[c];
+            haveValue = true;
         }
     }
-    if (!std::isfinite(value)) value = 0.0f;
-    if (node.pbool("clamp", true)) value = std::clamp(value, -1.0f, 1.0f);
+    // Legacy single-port chains had no channel concept: an unconnected channel
+    // follows the first connected one so the result stays dual-mono instead of
+    // silencing the right side.
+    for (int c = 0; c < channels && c < 8; ++c) {
+        const ChannelInput &input = inputs[static_cast<size_t>(c)];
+        const bool connected =
+            input.source && input.port >= 0 &&
+            input.port < static_cast<int>(input.source->outputs.size());
+        if (!connected) values[c] = haveValue ? firstValue : 0.0f;
+        if (clampOutput) values[c] = std::clamp(values[c], -1.0f, 1.0f);
+    }
     AudioBuffer *buffer = node.audioRenderOutput.get();
     if (node.audioRenderWrite >= 0 && buffer) {
-        const int channels = std::max(1, buffer->channels);
+        const int bufferChannels = std::max(1, buffer->channels);
         const size_t base = static_cast<size_t>(node.audioRenderWrite) *
-                            static_cast<size_t>(channels);
-        if (base + static_cast<size_t>(channels) <= buffer->samples.size()) {
-            for (int c = 0; c < channels; ++c) {
+                            static_cast<size_t>(bufferChannels);
+        if (base + static_cast<size_t>(bufferChannels) <= buffer->samples.size()) {
+            for (int c = 0; c < bufferChannels; ++c) {
+                const float value = c < 8 ? values[c] : firstValue;
                 buffer->samples[base + static_cast<size_t>(c)] = value;
             }
         }
         ++node.audioRenderWrite;
     }
-    node.runtimeState["value"] = value;
+    for (int c = 0; c < channels && c < 8; ++c) {
+        node.runtimeState["value." + std::to_string(c)] = values[c];
+    }
     node.outputs.assign(1, Value{});
     node.outputs[0].type = PortType::Audio;
     node.outputs[0].audio = node.audioRenderOutput;
+    (void)ctx;
 }
 
-void prepareDacBuffer(Node &node, const EvalContext &ctx, int rate, int channels,
-                      const void *source, long long sourceEnd, long long startFrame,
-                      long long endFrame) {
+void prepareDacBuffer(Node &node, const EvalContext &ctx, int rate, const void *source,
+                      long long sourceEnd, long long startFrame, long long endFrame) {
     const long long frames = std::max<long long>(0, endFrame - startFrame);
+    const int channels = std::max(1, static_cast<int>(node.inputPorts().size()));
     char key[224];
     // The source buffer may grow while a Dynamics chain feeds it, so only its
     // identity (not its current length) belongs in the key; otherwise every
@@ -465,7 +532,6 @@ void prepareDacBuffer(Node &node, const EvalContext &ctx, int rate, int channels
 
 void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &ctx) {
     int rate = ctx.audio ? std::max(1, ctx.audio->sampleRate) : 48000;
-    int channels = ctx.audio ? std::max(1, ctx.audio->channels) : 1;
     const void *source = ctx.audio.get();
     long long sourceEnd = -1;
     for (const int id : plan.region) {
@@ -478,7 +544,6 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
             const AudioPtr buffer = input->outputs[static_cast<size_t>(link->fromPort)].audio;
             if (buffer) {
                 rate = std::max(1, buffer->sampleRate);
-                channels = std::max(1, buffer->channels);
                 source = buffer.get();
                 sourceEnd = buffer->startFrame + buffer->frameCount;
             }
@@ -489,20 +554,56 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
     }
 
     const double fps = ctx.fps > 1.0f ? ctx.fps : 60.0f;
-    long long startFrame = std::max<long long>(0, std::llround(ctx.audioTime * rate));
-    long long endFrame = std::llround((ctx.audioTime + 1.0 / fps) * rate);
+    // In preview the display playhead is continuous while the graph is a video
+    // frame graph: quantise to the current video frame so a 144 Hz display does
+    // not run stateful audio blocks several times for the same frame.
+    double clipFrameStart = ctx.audioTime;
+    if (!ctx.offline) {
+        const double quantized = static_cast<double>(ctx.frame) / fps;
+        clipFrameStart = ctx.audioTime + (quantized - ctx.time);
+    }
+    long long startFrame = std::max<long long>(0, std::llround(clipFrameStart * rate));
+    long long endFrame = std::llround((clipFrameStart + 1.0 / fps) * rate);
     if (sourceEnd >= 0) endFrame = std::min(endFrame, sourceEnd);
     if (endFrame < startFrame) endFrame = startFrame;
 
+    // Resolve the links once per frame; the sample loop must not search them
+    // per audio sample.
+    std::unordered_map<int, ChannelInput> adcInputs;
+    std::unordered_map<int, std::vector<ChannelInput>> dacInputs;
+    for (const int id : plan.region) {
+        Node *node = graph.find(id);
+        if (!node) continue;
+        if (node->kind == "dsp.adc") {
+            ChannelInput input;
+            if (const Link *link = graph.findInputLink(id, 0)) {
+                input.source = graph.find(link->fromNode);
+                input.port = link->fromPort;
+            }
+            adcInputs[id] = input;
+        } else if (node->kind == "dsp.dac") {
+            std::vector<ChannelInput> inputs(static_cast<size_t>(node->inputPorts().size()));
+            for (size_t port = 0; port < inputs.size(); ++port) {
+                if (const Link *link = graph.findInputLink(id, static_cast<int>(port))) {
+                    inputs[port].source = graph.find(link->fromNode);
+                    inputs[port].port = link->fromPort;
+                }
+            }
+            dacInputs[id] = std::move(inputs);
+        }
+    }
+
     std::vector<int> dacs;
+    bool needsRender = ctx.offline;
     for (const int id : plan.region) {
         Node *node = graph.find(id);
         if (!node || node->kind != "dsp.dac") continue;
-        prepareDacBuffer(*node, ctx, rate, channels, source, sourceEnd, startFrame, endFrame);
+        prepareDacBuffer(*node, ctx, rate, source, sourceEnd, startFrame, endFrame);
+        if (node->audioRenderWrite >= 0) needsRender = true;
         dacs.push_back(id);
     }
 
-    for (long long frame = startFrame; frame < endFrame; ++frame) {
+    for (long long frame = startFrame; needsRender && frame < endFrame; ++frame) {
         EvalContext sample = ctx;
         sample.audioRate = true;
         sample.audioSampleRate = rate;
@@ -512,9 +613,9 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
             Node *node = graph.find(id);
             if (!node || !node->enabled) continue;
             if (node->kind == "dsp.adc") {
-                sampleAdcNode(graph, *node, sample);
+                sampleAdcNode(*node, sample, adcInputs[id]);
             } else if (node->kind == "dsp.dac") {
-                sampleDacNode(graph, *node, sample);
+                sampleDacNode(*node, sample, dacInputs[id]);
             } else {
                 evaluateFrameNode(graph, *node, sample, false);
             }
@@ -538,6 +639,7 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
 }  // namespace
 
 bool Graph::evaluate(EvalContext &ctx) {
+    syncDynamicChannelPorts(*this);
     std::vector<int> order;
     if (!topologicalOrder(order, &lastError)) return false;
 

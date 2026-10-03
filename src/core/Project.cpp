@@ -774,6 +774,9 @@ bool Project::fromJson(const json::Value &root, const std::string &projectDir, s
             }
         }
         node->ensureParams(*node->def);
+        if (resolvedKind == "dsp.adc" || resolvedKind == "dsp.dac") {
+            Registry::applyChannelPorts(*node);
+        }
         // The Shader block's ports follow its file, so they have to exist before
         // the saved connections are validated below.
         if (resolvedKind == "render.shader" && shaders) {
