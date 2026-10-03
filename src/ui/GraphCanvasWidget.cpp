@@ -530,8 +530,9 @@ void addNodeFromKind(UiState &state, const std::string &kind) {
     // Place the new block near the centre of the current view with a small
     // offset so consecutive additions do not overlap exactly.
     const int count = state.project.graph.nodeCount();
-    const float x = 80.0f + static_cast<float>(count % 5) * 40.0f;
-    const float y = 80.0f + static_cast<float>(count % 7) * ui::s(90.0f);
+    //Keep new nodes in view.
+    const float x = - state.project.view.panX + 250.0f + static_cast<float>(count % 31) * 4.0f;
+    const float y = - state.project.view.panY + 160.0f + static_cast<float>(count % 11) * ui::s(24.0f);
     Node *node = state.project.graph.addNode(kind, x, y);
     if (!node) {
         setStatus(state, "Unknown block kind: " + kind, true);
