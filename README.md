@@ -8,8 +8,10 @@ watch it render live, then export it to any container/codec ffmpeg supports.
 
 ## Developmental Notes
 
-This project is built with deepseek-flash under manual supervision.
-The app is still in early stages, so expect minor bugs.
+This project is built with deepseek-flash under manual supervision and tuning.
+The GUI is unpolished but usable, at least.
+I've not extensively experimented with the Shader block, let me know if there's bugs.
+The app is still in early stages, so expect minor bugs and glitches.
 
 ## Contents
 
@@ -72,6 +74,8 @@ The app is still in early stages, so expect minor bugs.
 
 ## Building
 
+You may want to install FFMpeg and FFProbe first if you haven't.
+
 ```powershell
 cd build
 cmake -S .. -B . -G Ninja
@@ -79,7 +83,7 @@ cmake --build . --parallel
 ```
 
 The executable lands in `build/bin/PulseForge.exe`. The post-build step copies
-`assets/` (shader presets) and the CrystalGUI `resource/` folder (fonts and the
+`assets/` (shader presets), `templates/` (project templates) and the CrystalGUI `resource/` folder (fonts and the
 box shader) next to it, because CrystalGUI resolves those relative to the
 working directory.
 
@@ -115,25 +119,13 @@ window size every frame, so dragging the window edge reflows the editor live:
 inspector.
 
 Startup and **File > New** load `template.pforge` from next to
-`PulseForge.exe` (or the working directory) when it exists, so the default
+`PulseForge.exe` (or the working directory and the `templates/`) when it exists, so the default
 pipeline can be edited without rebuilding. If the template is missing or
 invalid, the built-in demo pipeline is used instead.
 
 ## The editor
 
-```
-┌────────────┬──────────────────────────────────────┬──────────────┐
-│ top bar    │ New Open Save Export Play Stop ...   │              │
-├────────────┼──────────────────────────────────────┼──────────────┤
-│ palette    │ graph canvas                         │ preview      │
-│ (add block)│  pan: middle drag or space+drag      ├──────────────┤
-│            │  zoom: wheel, drag blocks,           │ inspector    │
-│            ├──────────────────────────────────────┤ (parameters) │
-│            │ timeline: waveform, automation lanes │              │
-├────────────┴──────────────────────────────────────┴──────────────┤
-│ status bar                                                       │
-└──────────────────────────────────────────────────────────────────┘
-```
+<img width="2550" height="1384" alt="image" src="https://github.com/user-attachments/assets/6ddb7960-de6d-4af4-bacc-06f1f930f17b" />
 
 Interaction:
 
@@ -456,6 +448,9 @@ last Dynamics in the path, or the Audio Source for a dry project). `pf_migrate`
 does the same for files on disk, in place, and keeps the previous revision as a
 `.bak`.
 
+This project does not yet have multi-output support but allows having multiple
+outputs in projects, be careful.
+
 ## How it works
 
 ```
@@ -474,14 +469,14 @@ its outputs into the node, which downstream blocks read. Image values are shared
 pointers to render targets owned by the renderer's pool, which is recycled at the
 end of each frame.
 
-An **ADC -> ... -> DAC** path changes that walk: the evaluator compiles the
-region between them and runs its pure-Scalar blocks (Math, Modulation, Timing,
-Debug) once per audio sample instead of once per video frame, so a multiply or a
-`tanh` shapes the waveform itself. Scalar processors feeding the region also run
-at audio rate; window producers such as the Spectrum Analyzer and Dynamics stay
-at video rate and hold their value inside the region. Nodes downstream of the
-region are evaluated after the sample loop with the last sample, which is the
-downsample back to video rate.
+An **ADC -> ... -> DAC** path changes that walk: Inspired by plugdata,
+the evaluator compiles the region between them and runs its pure-Scalar blocks 
+(Math, Modulation, Timing, Debug) once per audio sample instead of once per video
+frame, so a multiply or a `tanh` shapes the waveform itself. 
+Scalar processors feeding the region also run at audio rate; window producers
+such as the Spectrum Analyzer and Dynamics stay at video rate and hold their 
+value inside the region. Nodes downstream of the region are evaluated after the
+sample loop with the last sample, which is the downsample back to video rate.
 
 The bridge is multi-channel: ADC emits one Scalar stream per channel
 (left/right/..., two by default), the blocks between it and DAC process each
