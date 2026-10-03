@@ -225,9 +225,11 @@ docs         rendering notes and the README overlay image
   Analysis port as authoritative instead of falling back to the project clip.
 - Monitor playback follows the Audio Output live: `AudioClip::startLiveStream` /
   `pushLiveWindow` queue each video frame's rendered window. The sub-buffer is
-  a power of two at least as large as one video frame's sample count, and two
-  sub-buffers are prefilled before playback so the device cannot drain the ring
-  between video frames. The app pushes the DAC buffer right after
+  sized to at least one video frame's sample count *and* the real device
+  sub-buffer (`detectStreamSubBufferFrames` probes it, because raylib silently
+  raises a small request to the device period and zero-fills the remainder of
+  every update); two sub-buffers are prefilled before playback so the device
+  cannot drain the ring between video frames. The app pushes the DAC buffer right after
   `renderPreviewFrame`, and `catchUpLiveAudio` renders any project frames a slow
   display skipped, in order. The region quantises its window to `ctx.frame` so a
   high-refresh display reuses the same window instead of advancing stateful

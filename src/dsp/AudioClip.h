@@ -105,6 +105,9 @@ private:
     int liveRate_ = 48000;
     int liveChannels_ = 2;
     int liveSubBufferFrames_ = 1024;
+    // Actual stream sub-buffer size (raylib raises it to the device period when
+    // the requested size is smaller).
+    int streamSubBufferFrames_ = 2048;
     long long liveNextFrame_ = -1;  // absolute clip frame already queued
     long long liveQueuedFrames_ = 0;
     size_t liveReadFrame_ = 0;

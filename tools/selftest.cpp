@@ -1479,8 +1479,8 @@ int main(int argc, char **argv) {
                                     AudioBuffer window;
                                     window.channels = 2;
                                     window.sampleRate = 48000;
-                                    window.frameCount = 1024;
-                                    window.samples.assign(2048, 0.05f);
+                                    window.frameCount = 8192;
+                                    window.samples.assign(8192 * 2, 0.05f);
                                     clip.pushLiveWindow(window);
                                     const bool livePlaying = clip.previewPlaying();
                                     clip.stopLiveStream();

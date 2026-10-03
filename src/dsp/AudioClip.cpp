@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <utility>
 
 #include "dsp/Analysis.h"
 #include "export/FFmpeg.h"
@@ -20,12 +22,62 @@ constexpr int kPreviewSubBufferFrames = 2048;  // ~43 ms at 48 kHz
 // fewer samples than the preview sub-buffer at high rates) can be fed with low
 // latency instead of being held back for several frames.
 constexpr int kLiveSubBufferMinFrames = 512;
-constexpr int kLiveSubBufferMaxFrames = 8192;
+constexpr int kLiveSubBufferMaxFrames = 16384;
 
 int nextPowerOfTwo(int value) {
     int result = 1;
     while (result < value && result < kLiveSubBufferMaxFrames) result <<= 1;
     return result;
+}
+
+bool gStreamOverflow = false;
+
+void captureStreamTrace(int level, const char *text, va_list args) {
+    (void)level;
+    (void)args;
+    if (text && std::strstr(text, "too many frames to buffer")) gStreamOverflow = true;
+}
+
+// raylib raises a stream's sub-buffer to the device period when the requested
+// size is smaller, but UpdateAudioStream still expects a whole sub-buffer and
+// zero-fills the remainder. Detect the real size once per sample rate so the
+// preview always feeds exactly one sub-buffer.
+int detectStreamSubBufferFrames(int sampleRate, int channels) {
+    static std::vector<std::pair<int, int>> cache;
+    for (const auto &entry : cache) {
+        if (entry.first == sampleRate) return entry.second;
+    }
+    SetTraceLogCallback(captureStreamTrace);
+    const auto fits = [&](int frames) {
+        SetAudioStreamBufferSizeDefault(1);
+        AudioStream stream = LoadAudioStream(static_cast<unsigned int>(sampleRate), 32,
+                                             static_cast<unsigned int>(channels));
+        if (stream.buffer == nullptr) return false;
+        std::vector<float> data(static_cast<size_t>(frames) * static_cast<size_t>(channels),
+                                0.0f);
+        gStreamOverflow = false;
+        UpdateAudioStream(stream, data.data(), frames);
+        UnloadAudioStream(stream);
+        return !gStreamOverflow;
+    };
+    int low = 1;
+    int high = 1;
+    while (high <= kLiveSubBufferMaxFrames && fits(high)) {
+        low = high;
+        high *= 2;
+    }
+    while (low + 1 < high) {
+        const int mid = low + (high - low) / 2;
+        if (fits(mid)) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    const int detected = std::clamp(low, kLiveSubBufferMinFrames, kLiveSubBufferMaxFrames);
+    cache.emplace_back(sampleRate, detected);
+    SetTraceLogCallback(nullptr);
+    return detected;
 }
 }  // namespace
 
@@ -176,9 +228,12 @@ void AudioClip::startLiveStream(int sampleRate, int channels, int frameSamples) 
     liveStream_ = true;
     liveRate_ = std::clamp(sampleRate, 8000, 384000);
     liveChannels_ = std::clamp(channels, 1, 8);
+    // The real sub-buffer is raised to the device period, so feed exactly that
+    // size instead of a smaller frame-sized chunk (which would be zero-filled).
+    const int deviceSub = detectStreamSubBufferFrames(liveRate_, liveChannels_);
     liveSubBufferFrames_ =
-        std::clamp(nextPowerOfTwo(std::max(256, frameSamples)), kLiveSubBufferMinFrames,
-                   kLiveSubBufferMaxFrames);
+        std::clamp(std::max(nextPowerOfTwo(std::max(256, frameSamples)), deviceSub),
+                   kLiveSubBufferMinFrames, kLiveSubBufferMaxFrames);
     clearLiveQueue();
     playing_ = false;
     ensureStream();
@@ -263,13 +318,16 @@ void AudioClip::ensureStream() {
     if (liveStream_) {
         rate = liveRate_;
         channels = liveChannels_;
-        SetAudioStreamBufferSizeDefault(liveSubBufferFrames_);
+        streamSubBufferFrames_ = liveSubBufferFrames_;
+        SetAudioStreamBufferSizeDefault(streamSubBufferFrames_);
     } else {
         const AudioBuffer *playback = playbackBuffer();
         if (!playback || playback->frameCount <= 0) return;
         rate = std::max(1, playback->sampleRate);
         channels = std::max(1, playback->channels);
-        SetAudioStreamBufferSizeDefault(kPreviewSubBufferFrames);
+        streamSubBufferFrames_ =
+            std::max(kPreviewSubBufferFrames, detectStreamSubBufferFrames(rate, channels));
+        SetAudioStreamBufferSizeDefault(streamSubBufferFrames_);
     }
     stream_ = LoadAudioStream(static_cast<unsigned int>(rate), 32,
                               static_cast<unsigned int>(channels));
@@ -293,13 +351,14 @@ void AudioClip::feed() {
         if (remaining <= 0) return;
         // Exactly one sub-buffer per call: raylib zero-fills the remainder, so
         // anything shorter would insert trailing silence.
-        const int frames = static_cast<int>(std::min<long long>(kPreviewSubBufferFrames, remaining));
+        const int frames =
+            static_cast<int>(std::min<long long>(streamSubBufferFrames_, remaining));
         const float *base =
             playback->samples.data() +
             static_cast<size_t>(feedFrame_) * static_cast<size_t>(playback->channels);
         UpdateAudioStream(stream_, base, frames);
         feedFrame_ += frames;
-        if (frames < kPreviewSubBufferFrames) return;  // final, partial chunk
+        if (frames < streamSubBufferFrames_) return;  // final, partial chunk
     }
 }
 
