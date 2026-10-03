@@ -230,11 +230,28 @@ bool Graph::evaluate(EvalContext &ctx) {
     return true;
 }
 
+namespace {
+
+int firstSinkWithInput(const Graph &graph, PortType type) {
+    for (const auto &node : graph.nodes) {
+        if (!node.def || !node.def->isSink) continue;
+        const std::vector<PortDesc> &inputs = node.inputPorts();
+        if (!inputs.empty() && inputs[0].type == type) return node.id;
+    }
+    return 0;
+}
+
+}  // namespace
+
 int Graph::sinkNodeId() const {
     for (const auto &node : nodes) {
         if (node.def && node.def->isSink) return node.id;
     }
     return 0;
 }
+
+int Graph::videoSinkNodeId() const { return firstSinkWithInput(*this, PortType::Image); }
+
+int Graph::audioSinkNodeId() const { return firstSinkWithInput(*this, PortType::Audio); }
 
 }  // namespace pf

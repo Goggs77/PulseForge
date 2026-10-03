@@ -17,45 +17,20 @@ namespace pf {
 
 namespace {
 
-// Follows the Audio links from the project's source and returns the last block
-// that transforms the stream (a Dynamics node), or 0 when the audio is dry.
-int audioProcessorSink(const Graph &graph) {
-    int current = 0;
-    for (const Node &node : graph.nodes) {
-        if (node.enabled && node.kind == "src.audio") {
-            current = node.id;
-            break;
-        }
-    }
-    if (!current) return 0;
-
-    int processor = 0;
-    for (int step = 0; step < 256; ++step) {
-        const Node *node = graph.find(current);
-        if (!node) break;
-        int audioOut = -1;
-        const std::vector<PortDesc> &ports = node->outputPorts();
-        for (size_t port = 0; port < ports.size(); ++port) {
-            if (ports[port].type == PortType::Audio) {
-                audioOut = static_cast<int>(port);
-                break;
-            }
-        }
-        if (audioOut < 0) break;
-        const Link *next = nullptr;
-        for (const Link &link : graph.links) {
-            if (link.fromNode == current && link.fromPort == audioOut) {
-                next = &link;
-                break;
-            }
-        }
-        if (!next) break;
-        current = next->toNode;
-        const Node *target = graph.find(current);
-        if (!target || !target->enabled) break;
-        if (target->kind == "dsp.dynamics") processor = current;
-    }
-    return processor;
+// Returns the node feeding the project's Audio Output: 0 when the graph has no
+// Audio Output block, -1 when the block exists but nothing is wired into it.
+// Export follows this link exclusively; the pre-Output exporter instead reached
+// into the graph for the last Dynamics node.
+int audioOutputSource(const Graph &graph) {
+    const int sinkId = graph.audioSinkNodeId();
+    if (sinkId == 0) return 0;
+    const Node *sink = graph.find(sinkId);
+    if (!sink || !sink->enabled) return -1;
+    const Link *link = graph.findInputLink(sinkId, 0);
+    if (!link) return -1;
+    const Node *source = graph.find(link->fromNode);
+    if (!source || !source->enabled) return -1;
+    return source->id;
 }
 
 void writeLE16(std::ofstream &out, unsigned short value) {
@@ -305,6 +280,12 @@ bool Exporter::run(Renderer &renderer, Project &project, const ExportRequest &re
     const double span = std::max(1e-3, end - start);
     const double fps = std::max(1.0, project.video.fps);
     const int frameCount = std::max(1, static_cast<int>(std::ceil(span * fps)));
+    // With no decoded media the graph can still synthesise a track (DAC), so
+    // the audio clock follows the video clock instead of being pinned to 0.
+    const auto audioTimeFor = [&](double videoTime) {
+        const double wanted = project.video.trimStart + videoTime;
+        return audioDuration > 0.0 ? std::min(audioDuration, wanted) : wanted;
+    };
 
     if (project.output.container.empty()) {
         if (error) *error = "no output container configured";
@@ -343,80 +324,110 @@ bool Exporter::run(Renderer &renderer, Project &project, const ExportRequest &re
         }
     }
 
+    // ---- audio routing -------------------------------------------------------
+    // Only the signal patched into the Audio Output is muxed. A direct link from
+    // the Audio Source keeps the original file and its matched encoder; anything
+    // else (Dynamics, DAC, a processed chain) is rendered by the graph. No Audio
+    // Output, or an unconnected one, means a silent export.
+    const int audioSourceId = audioOutputSource(project.graph);
+    const Node *audioSourceNode =
+        audioSourceId > 0 ? project.graph.find(audioSourceId) : nullptr;
+    const bool graphAudio = audioSourceNode && audioSourceNode->kind != "src.audio";
+    if (audioSourceId <= 0) {
+        audioPath.clear();
+        copyAudio = false;
+    }
+    // A fresh export starts with empty DSP buffers: the audio pass fills them
+    // and the video pass below reuses the rendered windows.
+    for (Node &node : project.graph.nodes) {
+        node.audioRenderOutput.reset();
+        node.audioRenderStart = -1;
+        node.audioRenderFrames = 0;
+        node.audioRenderKey.clear();
+    }
+
     // ---- graph audio rendering ----------------------------------------------
-    // A Dynamics block transforms the Audio stream. ffmpeg wants the whole track
-    // before the first video frame is written, so the graph is evaluated once up
-    // front with the renderer detached: the same per-frame evaluation supplies
-    // the modulated parameters, and the audio buffers the nodes keep let the
-    // render pass below reuse the result instead of processing the clip twice.
+    // ffmpeg wants the whole track before the first video frame is written, so
+    // the graph is evaluated once up front with the renderer detached: the same
+    // per-frame evaluation supplies the modulated parameters, and the audio
+    // buffers the nodes keep let the render pass reuse the result instead of
+    // processing the clip twice.
     std::string processedAudioPath;
     double audioSeek = -1.0;
-    const int processorId = audioProcessorSink(project.graph);
-    if (audio && processorId != 0) {
+    if (graphAudio) {
         std::error_code pathError;
         const std::filesystem::path tempDir = std::filesystem::temp_directory_path(pathError);
-        if (!pathError) {
-            const std::filesystem::path tempPath = tempDir / "pulseforge_graph_audio.wav";
-            std::vector<std::pair<int, std::unordered_map<std::string, double>>> savedState;
-            savedState.reserve(project.graph.nodes.size());
-            for (Node &node : project.graph.nodes) {
-                savedState.emplace_back(node.id, node.runtimeState);
-                node.runtimeState.clear();
-                node.audioRenderOutput.reset();
-                node.audioRenderStart = -1;
-                node.audioRenderFrames = 0;
-                node.audioRenderKey.clear();
+        if (pathError) {
+            if (!tempAudioPath.empty()) std::filesystem::remove(tempAudioPath);
+            if (error) *error = "could not locate a temporary directory for the rendered audio";
+            return false;
+        }
+        const std::filesystem::path tempPath = tempDir / "pulseforge_graph_audio.wav";
+        std::vector<std::pair<int, std::unordered_map<std::string, double>>> savedState;
+        savedState.reserve(project.graph.nodes.size());
+        for (Node &node : project.graph.nodes) {
+            savedState.emplace_back(node.id, node.runtimeState);
+            node.runtimeState.clear();
+        }
+        EvalContext audioCtx;
+        audioCtx.width = project.video.width;
+        audioCtx.height = project.video.height;
+        audioCtx.fps = static_cast<float>(fps);
+        audioCtx.duration = totalDuration;
+        audioCtx.offline = true;
+        audioCtx.audio = audio;
+        audioCtx.analysis = analysis;
+        bool audioCancelled = false;
+        for (int frame = 0; frame < frameCount; ++frame) {
+            const double videoTime = start + static_cast<double>(frame) / fps;
+            audioCtx.time = videoTime;
+            audioCtx.frame = frame;
+            audioCtx.audioTime = audioTimeFor(videoTime);
+            project.graph.evaluate(audioCtx);
+            if (shouldCancel && shouldCancel()) {
+                audioCancelled = true;
+                break;
             }
-            EvalContext audioCtx;
-            audioCtx.width = project.video.width;
-            audioCtx.height = project.video.height;
-            audioCtx.fps = static_cast<float>(fps);
-            audioCtx.duration = totalDuration;
-            audioCtx.offline = true;
-            audioCtx.audio = audio;
-            audioCtx.analysis = analysis;
-            bool audioCancelled = false;
-            for (int frame = 0; frame < frameCount; ++frame) {
-                const double videoTime = start + static_cast<double>(frame) / fps;
-                audioCtx.time = videoTime;
-                audioCtx.frame = frame;
-                audioCtx.audioTime = std::min(audioDuration, project.video.trimStart + videoTime);
-                project.graph.evaluate(audioCtx);
-                if (shouldCancel && shouldCancel()) {
-                    audioCancelled = true;
-                    break;
-                }
-                if (onProgress && frame % 32 == 0) {
-                    ExportProgress progress;
-                    progress.frame = frame;
-                    progress.frameCount = frameCount;
-                    progress.videoTime = videoTime;
-                    progress.status = "audio";
-                    onProgress(progress);
-                }
-            }
-            const Node *sink = project.graph.find(processorId);
-            std::string wavError;
-            if (!audioCancelled && sink && sink->audioRenderOutput &&
-                writeFloatWav(tempPath, *sink->audioRenderOutput, 0, sink->audioRenderFrames,
-                              &wavError)) {
-                processedAudioPath = tempPath.string();
-                audioPath = processedAudioPath;
-                copyAudio = false;
-                audioSeek = 0.0;  // the rendered clip already starts at the export offset
-            }
-            // The render pass below needs the pre-export modulation state, not
-            // the state left behind by the audio pass. Rendered audio buffers
-            // stay so the nodes can reuse them.
-            for (const auto &entry : savedState) {
-                if (Node *node = project.graph.find(entry.first)) node->runtimeState = entry.second;
-            }
-            if (audioCancelled) {
-                std::filesystem::remove(tempPath);
-                if (error) *error = "export cancelled";
-                return false;
+            if (onProgress && frame % 32 == 0) {
+                ExportProgress progress;
+                progress.frame = frame;
+                progress.frameCount = frameCount;
+                progress.videoTime = videoTime;
+                progress.status = "audio";
+                onProgress(progress);
             }
         }
+        const Node *sink = project.graph.find(audioSourceId);
+        std::string wavError;
+        const bool wrote =
+            !audioCancelled && sink && sink->audioRenderOutput && sink->audioRenderFrames > 0 &&
+            writeFloatWav(tempPath, *sink->audioRenderOutput, 0, sink->audioRenderFrames,
+                          &wavError);
+        // The render pass below needs the pre-export modulation state, not the
+        // state left behind by the audio pass. Rendered audio buffers stay so
+        // the nodes can reuse them.
+        for (const auto &entry : savedState) {
+            if (Node *node = project.graph.find(entry.first)) node->runtimeState = entry.second;
+        }
+        if (audioCancelled) {
+            std::filesystem::remove(tempPath);
+            if (!tempAudioPath.empty()) std::filesystem::remove(tempAudioPath);
+            if (error) *error = "export cancelled";
+            return false;
+        }
+        if (!wrote) {
+            std::filesystem::remove(tempPath);
+            if (!tempAudioPath.empty()) std::filesystem::remove(tempAudioPath);
+            if (error) {
+                *error = "the Audio Output produced no audio";
+                if (!wavError.empty()) *error += ": " + wavError;
+            }
+            return false;
+        }
+        processedAudioPath = tempPath.string();
+        audioPath = processedAudioPath;
+        copyAudio = false;
+        audioSeek = 0.0;  // the rendered clip already starts at the export offset
     }
     const std::vector<std::string> arguments =
         buildCommand(project, request, frameCount, audioPath, copyAudio, audioSeek);
@@ -448,7 +459,7 @@ bool Exporter::run(Renderer &renderer, Project &project, const ExportRequest &re
         const double videoTime = start + static_cast<double>(frame) / fps;
         ctx.time = videoTime;
         ctx.frame = frame;
-        ctx.audioTime = std::min(audioDuration, project.video.trimStart + videoTime);
+        ctx.audioTime = audioTimeFor(videoTime);
 
         std::string renderError;
         ImageBufferPtr image = renderer.renderFrame(project.graph, ctx, &renderError);

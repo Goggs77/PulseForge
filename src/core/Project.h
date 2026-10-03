@@ -70,6 +70,12 @@ public:
     // Fills in the demo pipeline used by File > New.
     void resetToDefault();
 
+    // Adds an Audio Output when the graph has none and wires it to the end of
+    // the audio chain the pre-Output exporter used. Returns true when a block
+    // was added. Called on load so projects saved before the block existed keep
+    // their soundtrack.
+    bool ensureAudioOutput();
+
     // Duration in seconds used for rendering (audio length unless overridden).
     double effectiveDuration(double audioDuration) const;
 

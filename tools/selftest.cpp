@@ -97,6 +97,37 @@ bool generateTestWav(const std::string &path, double seconds, int sampleRate) {
     return true;
 }
 
+// A pure sine on disk, used where the exporter has to read the media file
+// itself (the dry Audio Output path) instead of the in-memory buffer.
+bool writeSineWav(const std::string &path, double seconds, int sampleRate, float amplitude) {
+    const int frames = static_cast<int>(seconds * sampleRate);
+    std::ofstream out(path.c_str(), std::ios::binary);
+    if (!out.good()) return false;
+    const unsigned int dataBytes = static_cast<unsigned int>(frames * 4);
+    out.write("RIFF", 4);
+    writeLE32(out, 36 + dataBytes);
+    out.write("WAVE", 4);
+    out.write("fmt ", 4);
+    writeLE32(out, 16);
+    writeLE16(out, 1);  // PCM
+    writeLE16(out, 2);  // stereo, so decoding to 2 channels does not rescale the level
+    writeLE32(out, static_cast<unsigned int>(sampleRate));
+    writeLE32(out, static_cast<unsigned int>(sampleRate * 4));
+    writeLE16(out, 4);
+    writeLE16(out, 16);
+    out.write("data", 4);
+    writeLE32(out, dataBytes);
+    for (int i = 0; i < frames; ++i) {
+        const float sample =
+            amplitude * std::sin(6.2831853f * 100.0f * static_cast<float>(i) / sampleRate);
+        const unsigned short value = static_cast<unsigned short>(
+            static_cast<short>(std::lround(sample * 32767.0f)));
+        writeLE16(out, value);
+        writeLE16(out, value);
+    }
+    return true;
+}
+
 int fail(const std::string &message) {
     std::printf("FAIL: %s\n", message.c_str());
     return 1;
@@ -213,11 +244,20 @@ int main(int argc, char **argv) {
                                                 reloaded.video.height == project.video.height &&
                                                 std::fabs(reloaded.video.fps - project.video.fps) < 1e-6;
                         const bool mediaOk = reloaded.audio.path == project.audio.path;
-                        std::printf("  project  : %d/%d blocks, %d/%d links, metadata %s, media %s\n",
+                        const int audioOutId = reloaded.graph.audioSinkNodeId();
+                        const Link *audioLink =
+                            audioOutId ? reloaded.graph.findInputLink(audioOutId, 0) : nullptr;
+                        const bool audioOutOk =
+                            audioOutId != 0 && audioLink &&
+                            reloaded.graph.find(audioLink->fromNode) &&
+                            reloaded.graph.find(audioLink->fromNode)->kind == "src.audio";
+                        std::printf("  project  : %d/%d blocks, %d/%d links, metadata %s, media %s, "
+                                    "audio out %s\n",
                                     blocksAfter, blocksBefore, linksAfter, linksBefore,
-                                    metadataOk ? "ok" : "MISMATCH", mediaOk ? "ok" : "MISMATCH");
+                                    metadataOk ? "ok" : "MISMATCH", mediaOk ? "ok" : "MISMATCH",
+                                    audioOutOk ? "ok" : "MISMATCH");
                         if (blocksAfter != blocksBefore || linksAfter != linksBefore || !metadataOk ||
-                            !mediaOk) {
+                            !mediaOk || !audioOutOk) {
                             result = fail("project round trip mismatch");
                         }
                     }
@@ -415,6 +455,48 @@ int main(int argc, char **argv) {
                                 "shader.pass migration ok\n");
                 } else {
                     result = fail("shader block: " + what);
+                }
+
+                // A project saved before the Audio Output existed gets one
+                // wired to the last Audio-emitting block of its old chain.
+                if (result == 0) {
+                    const std::string legacyAudioPath = "selftest_legacy_audio.pforge";
+                    std::ofstream legacyAudio(legacyAudioPath.c_str(), std::ios::binary);
+                    legacyAudio << R"({
+  "application": "PulseForge",
+  "version": 1,
+  "name": "Legacy Audio",
+  "video": { "width": 320, "height": 180, "fps": 30 },
+  "output": { "container": "mp4" },
+  "media": {},
+  "blocks": [
+    { "id": 1, "kind": "src.audio", "title": "Audio Source", "x": 0, "y": 0, "enabled": true,
+      "params": {} },
+    { "id": 2, "kind": "dsp.dynamics", "title": "Dynamics", "x": 200, "y": 0, "enabled": true,
+      "params": {} },
+    { "id": 3, "kind": "out.video", "title": "Video Output", "x": 400, "y": 0, "enabled": true,
+      "params": {} }
+  ],
+  "connections": [
+    { "from": 1, "fromPort": 0, "to": 2, "toPort": 0 }
+  ]
+})";
+                    legacyAudio.close();
+                    Project legacy;
+                    std::string legacyError;
+                    if (!legacy.load(legacyAudioPath, &legacyError)) {
+                        result = fail("legacy audio project failed to load: " + legacyError);
+                    } else {
+                        const int audioOut = legacy.graph.audioSinkNodeId();
+                        const Link *link = audioOut ? legacy.graph.findInputLink(audioOut, 0) : nullptr;
+                        const Node *source = link ? legacy.graph.find(link->fromNode) : nullptr;
+                        if (!audioOut || !source || source->kind != "dsp.dynamics") {
+                            result = fail("legacy audio project did not gain an Audio Output "
+                                          "at the end of its Dynamics chain");
+                        } else {
+                            std::printf("  legacy   : Audio Output added after Dynamics\n");
+                        }
+                    }
                 }
 
                 // The export file name has to follow the output container.
@@ -789,6 +871,68 @@ int main(int argc, char **argv) {
                                         compression, expanded, settled, limited.back(), dryDb, wetDb);
                         } else {
                             result = fail("dynamics block: " + dynWhat);
+                        }
+                    }
+
+                    // Audio bridges: a DAC turns a Scalar into samples and an
+                    // ADC measures the stream back at the video frame rate.
+                    if (result == 0) {
+                        Graph bridge;
+                        Node *constant = bridge.addNode("math.constant", 0, 0);
+                        Node *dac = bridge.addNode("dsp.dac", 200, 0);
+                        Node *adc = bridge.addNode("dsp.adc", 400, 0);
+                        bool bridgeOk = constant && dac && adc;
+                        std::string bridgeWhat;
+                        if (!bridgeOk) {
+                            bridgeWhat = "the ADC/DAC blocks are not registered";
+                        } else {
+                            constant->setFloat("value", 0.25f);
+                            dac->setBool("interpolate", true);
+                            std::string why;
+                            bridgeOk = bridge.connect(constant->id, 0, dac->id, 0, &why) &&
+                                       bridge.connect(dac->id, 0, adc->id, 0, &why);
+                            if (!bridgeOk) bridgeWhat = why;
+                        }
+                        auto source = std::make_shared<AudioBuffer>();
+                        source->channels = 1;
+                        source->sampleRate = 48000;
+                        source->frameCount = 96000;
+                        source->samples.assign(96000, 0.5f);
+                        EvalContext bridgeCtx;
+                        bridgeCtx.fps = 60.0f;
+                        bridgeCtx.duration = 1.0;
+                        bridgeCtx.offline = true;
+                        bridgeCtx.audio = source;
+                        float adcValue = 0.0f;
+                        if (bridgeOk) {
+                            // Start at 1 s so the rendered buffer carries a
+                            // non-zero startFrame, the case a downstream ADC has
+                            // to map onto the clip.
+                            for (int step = 0; step < 60; ++step) {
+                                bridgeCtx.frame = 60 + step;
+                                bridgeCtx.audioTime = 1.0 + static_cast<double>(step) / 60.0;
+                                bridge.evaluate(bridgeCtx);
+                            }
+                            adcValue = adc->outputs[0].asScalar();
+                            const AudioBuffer *rendered = dac->audioRenderOutput.get();
+                            if (!rendered || rendered->frameCount != 48000 ||
+                                rendered->startFrame != 48000) {
+                                bridgeOk = false;
+                                bridgeWhat = "the DAC did not render the 1 s window";
+                            } else if (std::fabs(rendered->samples[24000] - 0.25f) > 0.01f) {
+                                bridgeOk = false;
+                                bridgeWhat = "the DAC sample does not match the Scalar";
+                            } else if (std::fabs(adcValue - 0.25f) > 0.01f) {
+                                bridgeOk = false;
+                                bridgeWhat = "the ADC did not measure the DAC stream";
+                            }
+                        }
+                        if (bridgeOk) {
+                            std::printf("  bridges  : DAC rendered %.3f, ADC measured %.3f\n",
+                                        static_cast<double>(dac->audioRenderOutput->samples[24000]),
+                                        static_cast<double>(adcValue));
+                        } else {
+                            result = fail("ADC/DAC blocks: " + bridgeWhat);
                         }
                     }
 
@@ -1184,12 +1328,16 @@ int main(int argc, char **argv) {
                 Graph &graph = dynProject.graph;
                 Node *source = nullptr;
                 Node *analyzer = nullptr;
+                Node *audioOut = nullptr;
                 for (Node &node : graph.nodes) {
                     if (node.kind == "src.audio") source = &node;
                     if (node.kind == "dsp.analyze") analyzer = &node;
+                    if (node.kind == "out.audio") audioOut = &node;
                 }
-                if (!source || !analyzer) {
-                    result = fail("dynamics export: the default pipeline is missing source/analyzer");
+                if (!source || !analyzer || !audioOut) {
+                    result = fail(
+                        "dynamics export: the default pipeline is missing source/analyzer/audio "
+                        "output");
                 } else {
                     graph.disconnectInput(analyzer->id, 0);
                     Node *dynamics = graph.addNode("dsp.dynamics", 0, 0);
@@ -1208,7 +1356,8 @@ int main(int argc, char **argv) {
                         std::string why;
                         const bool wired =
                             graph.connect(source->id, 0, dynamics->id, 0, &why) &&
-                            graph.connect(dynamics->id, 0, analyzer->id, 0, &why);
+                            graph.connect(dynamics->id, 0, analyzer->id, 0, &why) &&
+                            graph.connect(dynamics->id, 0, audioOut->id, 0, &why);
                         if (!wired) {
                             result = fail("dynamics export: " + why);
                         } else {
@@ -1232,29 +1381,29 @@ int main(int argc, char **argv) {
                                 }
                             }
                         }
+                        ExportRequest dynRequest;
+                        dynRequest.outputPath = "selftest_dynamics.mp4";
+                        dynRequest.overwrite = true;
+                        dynRequest.endTime = 1.0;
+                        // A deterministic source: 100 Hz at -6 dBFS through a
+                        // 4:1 compressor at -18 dBFS has to land 9 dB down, so
+                        // the exported RMS is -18 dBFS RMS, not a guess based on
+                        // whatever programme material was passed in.
+                        auto synthetic = std::make_shared<AudioBuffer>();
+                        // Stereo: decodeAudioFloat() upmixes mono to two
+                        // channels, which shaves 3 dB off a mono probe.
+                        synthetic->channels = 2;
+                        synthetic->sampleRate = 48000;
+                        synthetic->frameCount = 48000 * 4;
+                        synthetic->samples.resize(static_cast<size_t>(synthetic->frameCount) *
+                                                  synthetic->channels);
+                        for (long long i = 0; i < synthetic->frameCount; ++i) {
+                            const float sample =
+                                0.5f * std::sin(6.2831853f * 100.0f * i / 48000.0f);
+                            synthetic->samples[static_cast<size_t>(i) * 2] = sample;
+                            synthetic->samples[static_cast<size_t>(i) * 2 + 1] = sample;
+                        }
                         if (result == 0) {
-                            ExportRequest dynRequest;
-                            dynRequest.outputPath = "selftest_dynamics.mp4";
-                            dynRequest.overwrite = true;
-                            dynRequest.endTime = 1.0;
-                            // A deterministic source: 100 Hz at -6 dBFS through a
-                            // 4:1 compressor at -18 dBFS has to land 9 dB down,
-                            // so the exported RMS is -18 dBFS RMS, not a guess
-                            // based on whatever programme material was passed in.
-                            auto synthetic = std::make_shared<AudioBuffer>();
-                            // Stereo: decodeAudioFloat() upmixes mono to two
-                            // channels, which shaves 3 dB off a mono probe.
-                            synthetic->channels = 2;
-                            synthetic->sampleRate = 48000;
-                            synthetic->frameCount = 48000 * 4;
-                            synthetic->samples.resize(static_cast<size_t>(synthetic->frameCount) *
-                                                      synthetic->channels);
-                            for (long long i = 0; i < synthetic->frameCount; ++i) {
-                                const float sample =
-                                    0.5f * std::sin(6.2831853f * 100.0f * i / 48000.0f);
-                                synthetic->samples[static_cast<size_t>(i) * 2] = sample;
-                                synthetic->samples[static_cast<size_t>(i) * 2 + 1] = sample;
-                            }
                             std::string dynError;
                             const bool exported =
                                 Exporter::run(renderer, dynProject, dynRequest, synthetic,
@@ -1293,6 +1442,115 @@ int main(int argc, char **argv) {
                                         "  dynamics : exported audio %.1f -> %.1f dBFS "
                                         "(graph processed, expected %.1f)\n",
                                         sourceDb, exportedDb, expectedDb);
+                                }
+                            }
+                        }
+
+                        // The Audio Output is exclusive: point it back at the
+                        // source and the same project must export the untouched
+                        // signal instead of the compressor's output.
+                        if (result == 0) {
+                            const std::string drySource = "selftest_dry_source.wav";
+                            if (!writeSineWav(drySource, 4.0, 48000, 0.5f)) {
+                                result = fail("exclusive routing: could not write the source wav");
+                            }
+                            if (result == 0) {
+                                dynProject.audio.path = drySource;
+                                graph.disconnectInput(audioOut->id, 0);
+                            if (!graph.connect(source->id, 0, audioOut->id, 0, &why)) {
+                                result = fail("exclusive routing: " + why);
+                            } else {
+                                ExportRequest dryRequest = dynRequest;
+                                dryRequest.outputPath = "selftest_dry.mp4";
+                                std::string dryError;
+                                const bool dryExported = Exporter::run(
+                                    renderer, dynProject, dryRequest, synthetic, analysis, {},
+                                    []() { return false; }, &dryError);
+                                int dryChannels = 0;
+                                std::vector<float> drySamples;
+                                std::string dryDecodeError;
+                                const bool dryDecoded = ffmpeg::decodeAudioFloat(
+                                    dryRequest.outputPath, 48000, &dryChannels, &drySamples,
+                                    &dryDecodeError);
+                                if (!dryExported) {
+                                    result = fail("exclusive routing: " + dryError);
+                                } else if (!dryDecoded || drySamples.empty()) {
+                                    result = fail("exclusive routing decode: " + dryDecodeError);
+                                } else {
+                                    AudioBuffer dry;
+                                    dry.channels = std::max(1, dryChannels);
+                                    dry.sampleRate = 48000;
+                                    dry.samples = std::move(drySamples);
+                                    dry.frameCount =
+                                        static_cast<long long>(dry.samples.size()) / dry.channels;
+                                    const float dryDb = loudnessDb(dry, 9600, 33600);
+                                    const float sourceLevel =
+                                        loudnessDb(*synthetic, 9600, 33600);
+                                    if (std::fabs(dryDb - sourceLevel) > 1.5f) {
+                                        result = fail(
+                                            "exclusive routing: dry export is " +
+                                            std::to_string(dryDb) + " dBFS, source is " +
+                                            std::to_string(sourceLevel) + " dBFS");
+                                    } else {
+                                        std::printf("  routing  : dry Audio Output kept the "
+                                                    "source (%.1f dBFS)\n",
+                                                    dryDb);
+                                    }
+                                }
+                            }
+                            }
+                        }
+
+                        // A DAC-driven Audio Output renders the soundtrack from
+                        // Scalars: a constant 0.5 has to land at -6 dBFS.
+                        if (result == 0) {
+                            Node *constant = graph.addNode("math.constant", 0, 140);
+                            Node *dac = graph.addNode("dsp.dac", 200, 140);
+                            if (!constant || !dac) {
+                                result = fail("DAC export: could not add the blocks");
+                            } else {
+                                constant->setFloat("value", 0.5f);
+                                graph.disconnectInput(audioOut->id, 0);
+                                std::string dacWhy;
+                                if (!graph.connect(constant->id, 0, dac->id, 0, &dacWhy) ||
+                                    !graph.connect(dac->id, 0, audioOut->id, 0, &dacWhy)) {
+                                    result = fail("DAC export: " + dacWhy);
+                                } else {
+                                    ExportRequest dacRequest = dynRequest;
+                                    dacRequest.outputPath = "selftest_dac.mp4";
+                                    std::string dacError;
+                                    const bool dacExported = Exporter::run(
+                                        renderer, dynProject, dacRequest, synthetic, analysis, {},
+                                        []() { return false; }, &dacError);
+                                    int dacChannels = 0;
+                                    std::vector<float> dacSamples;
+                                    std::string dacDecodeError;
+                                    const bool dacDecoded = ffmpeg::decodeAudioFloat(
+                                        dacRequest.outputPath, 48000, &dacChannels, &dacSamples,
+                                        &dacDecodeError);
+                                    if (!dacExported) {
+                                        result = fail("DAC export: " + dacError);
+                                    } else if (!dacDecoded || dacSamples.empty()) {
+                                        result = fail("DAC export decode: " + dacDecodeError);
+                                    } else {
+                                        AudioBuffer rendered;
+                                        rendered.channels = std::max(1, dacChannels);
+                                        rendered.sampleRate = 48000;
+                                        rendered.samples = std::move(dacSamples);
+                                        rendered.frameCount = static_cast<long long>(
+                                                                 rendered.samples.size()) /
+                                                             rendered.channels;
+                                        const float dacDb = loudnessDb(rendered, 9600, 33600);
+                                        if (std::fabs(dacDb + 6.02f) > 1.5f) {
+                                            result = fail("DAC export: rendered " +
+                                                          std::to_string(dacDb) +
+                                                          " dBFS, expected -6.02 dBFS");
+                                        } else {
+                                            std::printf("  dac      : exported synthesised "
+                                                        "soundtrack (%.1f dBFS)\n",
+                                                        dacDb);
+                                        }
+                                    }
                                 }
                             }
                         }

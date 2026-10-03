@@ -173,4 +173,7 @@ if (PF_BUILD_TOOLS)
     add_executable(pf_stage tools/stage_dump.cpp)
     target_link_libraries(pf_stage PRIVATE pulseforge_core)
     target_include_directories(pf_stage PRIVATE "${CRYSTALGUI_DIR}/deps/raylib/src/external")
+
+    add_executable(pf_migrate tools/migrate.cpp)
+    target_link_libraries(pf_migrate PRIVATE pulseforge_core)
 endif ()

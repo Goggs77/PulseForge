@@ -47,8 +47,12 @@ public:
     // lastError if the graph cannot be evaluated.
     bool evaluate(EvalContext &ctx);
 
-    // The node whose Image output drives the export; first sink found wins.
+    // Output terminals. `sinkNodeId` returns the first sink whichever type it
+    // is; the typed helpers pick the terminal that carries Images (the render
+    // target) or Audio (the exported soundtrack).
     int sinkNodeId() const;
+    int videoSinkNodeId() const;
+    int audioSinkNodeId() const;
 
     int nodeCount() const { return static_cast<int>(nodes.size()); }
 };

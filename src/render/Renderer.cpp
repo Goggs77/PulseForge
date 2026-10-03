@@ -430,7 +430,7 @@ ImageBufferPtr Renderer::renderFrame(Graph &graph, EvalContext &ctx, std::string
     stats_.nodesEvaluated = graph.nodeCount();
 
     ImageBufferPtr result;
-    const int sinkId = graph.sinkNodeId();
+    const int sinkId = graph.videoSinkNodeId();
     if (sinkId != 0) {
         const Node *sink = graph.find(sinkId);
         if (sink && sink->enabled) {

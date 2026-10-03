@@ -53,6 +53,10 @@ struct AudioBuffer {
     int channels = 1;
     int sampleRate = 48000;
     long long frameCount = 0;  // samples per channel
+    // Position of samples[0] inside the source clip. Rendered buffers (Dynamics,
+    // DAC) only carry the frames produced so far, so consumers need this to map
+    // a playback time onto the buffer; a whole decoded clip starts at 0.
+    long long startFrame = 0;
 
     double duration() const {
         return sampleRate > 0 ? static_cast<double>(frameCount) / sampleRate : 0.0;

@@ -329,6 +329,7 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
             node.audioRenderOutput->channels = channels;
             node.audioRenderOutput->sampleRate = sampleRate;
             node.audioRenderOutput->frameCount = 0;
+            node.audioRenderOutput->startFrame = startFrame;
             node.audioRenderStart = startFrame;
             node.audioRenderFrames = 0;
             node.audioRenderKey = key;
@@ -377,6 +378,155 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     Node::pushHistory(node.historyA, dryDb, kMeterHistory);
     Node::pushHistory(node.historyB, wetDb, kMeterHistory);
     ++node.historyCount;
+}
+
+// ---------------------------------------------------------------------------
+// Audio bridges
+// ---------------------------------------------------------------------------
+
+// Maps the current video-frame window onto an AudioBuffer. Rendered buffers
+// (Dynamics, DAC) carry only the frames produced so far, so their startFrame is
+// subtracted; a whole decoded clip starts at frame 0.
+void audioWindowBounds(const EvalContext &ctx, const AudioBuffer &buffer, long long *start,
+                       long long *end) {
+    const int sampleRate = std::max(8000, buffer.sampleRate);
+    const double dt = 1.0 / std::max(1.0f, ctx.fps > 1.0f ? ctx.fps : 60.0f);
+    long long from = std::llround(ctx.audioTime * sampleRate) - buffer.startFrame;
+    long long to = std::llround((ctx.audioTime + dt) * sampleRate) - buffer.startFrame;
+    from = std::clamp(from, 0LL, buffer.frameCount);
+    to = std::clamp(to, from, buffer.frameCount);
+    if (to == from && from < buffer.frameCount) to = from + 1;
+    *start = from;
+    *end = to;
+}
+
+// ADC: measures the current video frame's slice of an Audio stream and emits it
+// as a Scalar, so Math and Modulation blocks can process audio at frame rate.
+void evalAdc(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+             std::vector<Value> &out) {
+    const AudioBuffer *source = nullptr;
+    if (!in.empty() && in[0].audio) source = in[0].audio.get();
+    else if (ctx.audio) source = ctx.audio.get();
+    out[0] = Value::makeScalar(0.0f);
+    if (!source || source->frameCount <= 0 || source->samples.empty()) {
+        node.status = "no audio";
+        return;
+    }
+    long long start = 0;
+    long long end = 0;
+    audioWindowBounds(ctx, *source, &start, &end);
+    const int channels = std::max(1, source->channels);
+    const float *samples = source->samples.data();
+    double sumSquares = 0.0;
+    float peak = 0.0f;
+    for (long long frame = start; frame < end; ++frame) {
+        const size_t base = static_cast<size_t>(frame) * static_cast<size_t>(channels);
+        float mono = 0.0f;
+        for (int c = 0; c < channels; ++c) mono += samples[base + static_cast<size_t>(c)];
+        mono /= static_cast<float>(channels);
+        if (!std::isfinite(mono)) mono = 0.0f;
+        sumSquares += static_cast<double>(mono) * mono;
+        peak = std::max(peak, std::fabs(mono));
+    }
+    const double count = static_cast<double>(std::max<long long>(1, end - start));
+    const float value =
+        node.pint("mode", 0) == 1 ? peak : static_cast<float>(std::sqrt(sumSquares / count));
+    node.runtimeState["value"] = value;
+    out[0] = Value::makeScalar(value);
+}
+
+// DAC: converts one Scalar per video frame back into audio at the clip's rate.
+// Consecutive frames ramp between values (or hold them), which is what lets a
+// Math/Modulation chain drive an Audio Output. Offline passes accumulate the
+// exported track; interactive playback keeps only the current window.
+void evalDac(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+             std::vector<Value> &out) {
+    out[0].type = PortType::Audio;
+    const int sampleRate = ctx.audio ? std::clamp(ctx.audio->sampleRate, 8000, 384000) : 48000;
+    const int channels = ctx.audio ? std::clamp(ctx.audio->channels, 1, 8) : 1;
+    const float fps = ctx.fps > 1.0f ? ctx.fps : 60.0f;
+    const long long sourceFrames = ctx.audio ? ctx.audio->frameCount : -1;
+    long long startFrame = std::max<long long>(0, std::llround(ctx.audioTime * sampleRate));
+    long long endFrame = std::llround((ctx.audioTime + 1.0 / fps) * sampleRate);
+    if (sourceFrames >= 0) {
+        startFrame = std::min(startFrame, sourceFrames);
+        endFrame = std::min(std::max(endFrame, startFrame), sourceFrames);
+    }
+    const long long frames = std::max<long long>(0, endFrame - startFrame);
+
+    const bool interpolate = node.pbool("interpolate", true);
+    const bool clampOutput = node.pbool("clamp", true);
+    float target = scalarFrom(in, 0);
+    if (!std::isfinite(target)) target = 0.0f;
+    if (clampOutput) target = std::clamp(target, -1.0f, 1.0f);
+
+    char key[192];
+    std::snprintf(key, sizeof(key), "%p|%d|%d|%lld|%d|%d",
+                  static_cast<const void *>(ctx.audio.get()), sampleRate, channels, sourceFrames,
+                  interpolate ? 1 : 0, clampOutput ? 1 : 0);
+
+    const auto storedPrevious = node.runtimeState.find("dac.previous");
+    const float previous = storedPrevious != node.runtimeState.end()
+                               ? static_cast<float>(storedPrevious->second)
+                               : target;
+
+    const auto fill = [&](AudioBuffer &buffer, long long offset, long long count, float from,
+                          float to) {
+        const size_t base = static_cast<size_t>(offset) * static_cast<size_t>(channels);
+        for (long long i = 0; i < count; ++i) {
+            const float t = interpolate && count > 1
+                                ? static_cast<float>(static_cast<double>(i + 1) / count)
+                                : 1.0f;
+            const float value = from + (to - from) * t;
+            for (int c = 0; c < channels; ++c) {
+                buffer.samples[base + static_cast<size_t>(i) * static_cast<size_t>(channels) +
+                               static_cast<size_t>(c)] = value;
+            }
+        }
+    };
+
+    if (ctx.offline) {
+        const bool reusable = node.audioRenderOutput && node.audioRenderKey == key &&
+                              startFrame >= node.audioRenderStart &&
+                              endFrame <= node.audioRenderStart + node.audioRenderFrames;
+        if (!reusable) {
+            const bool append = node.audioRenderOutput && node.audioRenderKey == key &&
+                                startFrame == node.audioRenderStart + node.audioRenderFrames;
+            if (!append) {
+                node.audioRenderOutput = std::make_shared<AudioBuffer>();
+                node.audioRenderOutput->channels = channels;
+                node.audioRenderOutput->sampleRate = sampleRate;
+                node.audioRenderOutput->startFrame = startFrame;
+                node.audioRenderStart = startFrame;
+                node.audioRenderFrames = 0;
+                node.audioRenderKey = key;
+            }
+            AudioBuffer &buffer = *node.audioRenderOutput;
+            const long long offset = node.audioRenderFrames;
+            buffer.samples.resize(
+                static_cast<size_t>(offset + frames) * static_cast<size_t>(channels));
+            fill(buffer, offset, frames, append ? previous : target, target);
+            node.audioRenderFrames += frames;
+            buffer.frameCount = node.audioRenderFrames;
+        }
+        out[0].audio = node.audioRenderOutput;
+    } else {
+        if (!node.audioRenderOutput) node.audioRenderOutput = std::make_shared<AudioBuffer>();
+        AudioBuffer &buffer = *node.audioRenderOutput;
+        const bool restart = node.audioRenderKey != key ||
+                             startFrame != node.audioRenderStart + node.audioRenderFrames;
+        buffer.channels = channels;
+        buffer.sampleRate = sampleRate;
+        buffer.startFrame = startFrame;
+        buffer.frameCount = frames;
+        buffer.samples.assign(static_cast<size_t>(frames) * static_cast<size_t>(channels), 0.0f);
+        fill(buffer, 0, frames, restart ? target : previous, target);
+        node.audioRenderStart = startFrame;
+        node.audioRenderFrames = frames;
+        node.audioRenderKey = key;
+        out[0].audio = node.audioRenderOutput;
+    }
+    node.runtimeState["dac.previous"] = static_cast<double>(target);
 }
 
 void evalNoise(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
@@ -1189,6 +1339,13 @@ void evalOutput(Node &node, EvalContext &ctx, const std::vector<Value> &in, std:
     }
 }
 
+void evalAudioOutput(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                     std::vector<Value> &out) {
+    (void)ctx;
+    (void)out;
+    node.status = (in.size() > 0 && in[0].audio) ? "receiving" : "not connected";
+}
+
 // ---------------------------------------------------------------------------
 // Parameter and port builders
 // ---------------------------------------------------------------------------
@@ -1473,6 +1630,41 @@ void Registry::registerBuiltins() {
             limiterRelease,
         };
         def.evaluate = evalDynamics;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "dsp.adc";
+        def.category = "DSP";
+        def.label = "ADC";
+        def.description =
+            "Audio to Scalar. Measures the incoming Audio over the current video frame and "
+            "emits it at frame rate, so Math and Modulation blocks can process the signal. "
+            "RMS is the loudness; Peak follows transients.";
+        def.inputs = {PortDesc{"Audio", PortType::Audio}};
+        def.outputs = {PortDesc{"Value", PortType::Scalar, "0..1"}};
+        def.params = {
+            makeEnumParam("mode", "Measure", {"RMS", "Peak"}, 0, "Conversion"),
+        };
+        def.evaluate = evalAdc;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "dsp.dac";
+        def.category = "DSP";
+        def.label = "DAC";
+        def.description =
+            "Scalar to Audio. Each video frame's Scalar becomes one frame of samples at the "
+            "clip's rate; consecutive values ramp by default. Patch the output into an Audio "
+            "Output to hear it.";
+        def.inputs = {PortDesc{"Value", PortType::Scalar}};
+        def.outputs = {PortDesc{"Audio", PortType::Audio, "synthesised clip"}};
+        def.params = {
+            makeBoolParam("interpolate", "Interpolate frames", true, "Conversion"),
+            makeBoolParam("clamp", "Clamp to -1..1", true, "Conversion"),
+        };
+        def.evaluate = evalDac;
         add(std::move(def));
     }
 
@@ -2005,6 +2197,22 @@ void Registry::registerBuiltins() {
         def.inputs = {PortDesc{"Image", PortType::Image}};
         def.params = {};
         def.evaluate = evalOutput;
+        def.isSink = true;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "out.audio";
+        def.category = "Output";
+        def.label = "Audio Output";
+        def.description =
+            "Terminal block: the Audio signal connected here is the only audio the export "
+            "carries. Leave it disconnected for a silent video, or patch a DAC into it to "
+            "synthesise the soundtrack from Scalars.";
+        def.inputs = {PortDesc{"Audio", PortType::Audio}};
+        def.outputs = {};
+        def.params = {};
+        def.evaluate = evalAudioOutput;
         def.isSink = true;
         add(std::move(def));
     }

@@ -417,8 +417,9 @@ void Project::resetToDefault() {
     Node *clock = graph.addNode("time.clock", 470.0f, 350.0f);
     Node *post = graph.addNode("fx.postfx", 705.0f, 520.0f);
     Node *output = graph.addNode("out.video", 940.0f, 520.0f);
+    Node *audioOutput = graph.addNode("out.audio", 1175.0f, 520.0f);
     if (!audioNode || !analyzer || !bass || !lfo || !clock || !spectrum || !geometry || !post ||
-        !output || !automation) {
+        !output || !audioOutput || !automation) {
         return;
     }
 
@@ -458,7 +459,92 @@ void Project::resetToDefault() {
     graph.connect(geometry->id, 0, post->id, 0);
     graph.connect(automation->id, 0, post->id, 1);  // automation -> bloom
     graph.connect(post->id, 0, output->id, 0);
+    graph.connect(audioNode->id, 0, audioOutput->id, 0);
     dirty = false;
+}
+
+bool Project::ensureAudioOutput() {
+    for (const Node &node : graph.nodes) {
+        if (node.kind == "out.audio") return false;  // already in the current format
+    }
+
+    // Walk the legacy audio path the way the old exporter did: follow the first
+    // Audio link from the source and remember the last block that both receives
+    // and emits Audio. Blocks that leave audio land (an Analyzer, for example)
+    // do not move the sink, so a dry project still ends on the source.
+    int sinkId = 0;
+    int sinkPort = 0;
+    for (const Node &node : graph.nodes) {
+        if (!node.enabled || node.kind != "src.audio") continue;
+        sinkId = node.id;
+        const std::vector<PortDesc> &outputs = node.outputPorts();
+        for (size_t port = 0; port < outputs.size(); ++port) {
+            if (outputs[port].type == PortType::Audio) {
+                sinkPort = static_cast<int>(port);
+                break;
+            }
+        }
+        break;
+    }
+    if (sinkId != 0) {
+        int current = sinkId;
+        for (int step = 0; step < 256; ++step) {
+            const Node *node = graph.find(current);
+            if (!node) break;
+            int audioOut = -1;
+            const std::vector<PortDesc> &outputs = node->outputPorts();
+            for (size_t port = 0; port < outputs.size(); ++port) {
+                if (outputs[port].type == PortType::Audio) {
+                    audioOut = static_cast<int>(port);
+                    break;
+                }
+            }
+            if (audioOut < 0) break;
+            const Link *link = nullptr;
+            for (const Link &candidate : graph.links) {
+                if (candidate.fromNode == current && candidate.fromPort == audioOut) {
+                    link = &candidate;
+                    break;
+                }
+            }
+            if (!link) break;
+            const Node *target = graph.find(link->toNode);
+            if (!target || !target->enabled) break;
+            int targetAudioOut = -1;
+            const std::vector<PortDesc> &targetOutputs = target->outputPorts();
+            for (size_t port = 0; port < targetOutputs.size(); ++port) {
+                if (targetOutputs[port].type == PortType::Audio) {
+                    targetAudioOut = static_cast<int>(port);
+                    break;
+                }
+            }
+            if (targetAudioOut < 0) break;  // left the Audio domain, keep the last sink
+            current = target->id;
+            sinkId = target->id;
+            sinkPort = targetAudioOut;
+        }
+    }
+
+    // Park the new terminal next to Video Output when it exists, otherwise at
+    // the right edge of the graph.
+    float x = 0.0f;
+    float y = 0.0f;
+    const Node *video = nullptr;
+    float maxX = 0.0f;
+    for (const Node &node : graph.nodes) {
+        maxX = std::max(maxX, node.x);
+        if (node.kind == "out.video") video = &node;
+    }
+    if (video) {
+        x = video->x;
+        y = video->y + 160.0f;
+    } else {
+        x = maxX + 235.0f;
+    }
+    Node *output = graph.addNode("out.audio", x, y);
+    if (!output) return false;
+    if (sinkId != 0) graph.connect(sinkId, sinkPort, output->id, 0);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -768,6 +854,9 @@ bool Project::fromJson(const json::Value &root, const std::string &projectDir, s
             break;
         }
     }
+    // Projects saved before the Audio Output block existed keep their legacy
+    // soundtrack by adding a terminal at the end of the old audio path.
+    ensureAudioOutput();
     dirty = false;
     return true;
 }

@@ -408,7 +408,7 @@ void updateExportExtension(UiState &state) {
 
 void newProject(UiState &state) {
     state.project.resetToDefault();
-    selectNode(state, state.project.graph.sinkNodeId());
+    selectNode(state, state.project.graph.videoSinkNodeId());
     state.playhead = 0.0;
     state.playing = false;
     state.clip.stopPreview();
@@ -1010,7 +1010,7 @@ int runApp(int argc, char **argv) {
     ui::theme().uiScale = state.preferences.guiScale;
     ui::setDarkTheme(state.preferences.defaultDarkTheme);
     state.project.resetToDefault();
-    selectNode(state, state.project.graph.sinkNodeId());
+    selectNode(state, state.project.graph.videoSinkNodeId());
     updateExportExtension(state);  // "output.<container>" next to the project
     // The chrome is positioned in screen coordinates, so the layout has to exist
     // before it is built.

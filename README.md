@@ -48,9 +48,11 @@ The app is still in early stages, so expect minor bugs.
   and drive any scalar input, including other modulation blocks.
 - **Real export.** Frames are rendered off-screen at the project resolution and
   piped to ffmpeg as raw RGBA, so MP4/H.264, WebM/VP9, MKV, MOV and AVI all work
-  with a single code path. The audio comes straight from the source file unless
-  a **Dynamics** block is patched into the Audio path, in which case the graph
-  renders the processed track first and that is what gets muxed.
+  with a single code path. The soundtrack is whatever is patched into the
+  **Audio Output** terminal: a direct link from the Audio Source muxes the
+  original file with its matched encoder, while a Dynamics, ADC/DAC or any
+  other processing chain is rendered by the graph first. An unconnected Audio
+  Output exports a silent video.
 - **Drag and drop.** Drop an audio file or a `.pforge` project onto the window.
   Audio above 100 MB or above 192 kHz is refused with an explanation,
   I guess realtime for this kind of quality is absurd,
@@ -254,6 +256,8 @@ executable when *Save preferences* is pressed.
 | Envelope Follower | Scalar | Scalar | Attack/release, threshold, gain, floor |
 | Curve / Remap | Scalar | Scalar | Input range to output range with power, smoothstep and clamping |
 | Dynamics | Audio, Pre-gain, Threshold, Ratio, Attack, Release, Post-gain | Audio | Zero-latency single-band compressor / downward expander with an optional 0 dBFS limiter (Hard Clip or Soft Clip and independent attack/release). The block draws dry and wet loudness in a 4:3 dBFS graph; the modulation ports follow the usual conventions (levels scale by `1 + input`, threshold adds 24 dB per unit, times shift by octaves) |
+| ADC | Audio | Value | Measures the current video frame's slice of the stream (RMS or Peak) so Math and Modulation blocks can process audio at frame rate |
+| DAC | Value | Audio | Turns one Scalar per video frame into samples at the clip's rate, ramping between frames by default; patch the output into an Audio Output to hear it |
 
 ### Math
 
@@ -320,6 +324,7 @@ readout.
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
 | Video Output | Image | - | Terminal block; whatever reaches it is previewed and exported |
+| Audio Output | Audio | - | Terminal block; the signal connected here is the only audio the export carries. Unconnected exports a silent video |
 
 ## Writing shaders
 
@@ -392,12 +397,14 @@ Container presets:
 | mov | libx264 | aac | `+faststart` |
 | avi | mpeg4 (qscale) | libmp3lame | |
 
-The audio is taken from the original file with `-ss <trim start>`, so it is
-encoded exactly once. `-shortest` keeps the mux in step with the video. When a
-**Dynamics** block sits in the Audio path, the graph is evaluated once before
-the video starts (one video frame at a time, so modulations apply) and the
-processed track is written to a temporary 32-bit float WAV that ffmpeg muxes
-instead. The preview monitor streams the decoded source clip.
+The **Audio Output** block decides the soundtrack. A direct link from the Audio
+Source is taken from the original file with `-ss <trim start>`, so it is encoded
+exactly once. Anything else (Dynamics, DAC, a processed chain) makes the graph
+render the track first: it is evaluated once before the video starts, one video
+frame at a time so modulations apply, and the result is written to a temporary
+32-bit float WAV that ffmpeg muxes. A missing or unconnected Audio Output exports
+no audio track at all. `-shortest` keeps the mux in step with the video; the
+preview monitor still streams the decoded source clip.
 
 `pf_selftest` exercises this path end to end:
 
@@ -432,6 +439,12 @@ the project and its audio together keeps working. Blocks are stored by their
 registry kind, and unknown parameters are ignored, so older files keep loading
 when a block gains new parameters.
 
+Projects saved before the Audio Output block existed are upgraded on load: an
+Audio Output is added at the end of the chain the previous exporter used (the
+last Dynamics in the path, or the Audio Source for a dry project). `pf_migrate`
+does the same for files on disk, in place, and keeps the previous revision as a
+`.bak`.
+
 ## How it works
 
 ```
@@ -441,7 +454,7 @@ src/
   render/  Renderer, ShaderLibrary, Geometry, FrameReadback, Palette
   export/  FFmpeg (process + pipes), Exporter           - encode and mux
   ui/      App, GraphCanvas, Timeline, Inspector, Preview, Browser, Widgets, Theme
-tools/     pf_selftest, pf_stage, pf_probe              - verification helpers
+tools/     pf_selftest, pf_stage, pf_probe, pf_migrate - verification helpers
 ```
 
 Evaluation is a topological walk over the graph. Each block receives its inputs
@@ -496,6 +509,7 @@ cd build/bin
 ./pf_selftest.exe      # decode -> analyse -> render -> export -> probe + project round trip
 ./pf_probe.exe         # documents the render-target orientation rules
 ./pf_stage.exe selftest_input.wav 3 stage.png 1.5   # one frame of a named pipeline stage
+./pf_migrate.exe my.pforge                          # rewrite a project in the current format
 ./PulseForge.exe --shot ui.png selftest_input.wav   # headless UI capture
 ```
 

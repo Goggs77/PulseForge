@@ -30,8 +30,8 @@ cmake --build I:\Goggs\Works\c++\PulseForge\build --parallel 8
 - ffmpeg/ffprobe are located on `PATH` (`PF_FFMPEG_EXE`/`PF_FFPROBE_EXE` cache
   entries) and baked into the binary as defaults.
 - Binaries land in `build/bin` (`PulseForge.exe`, `pf_selftest.exe`,
-  `pf_probe.exe`, `pf_stage.exe`). The app expects `resource/` and `assets/`
-  next to the executable, or beside the working directory.
+  `pf_probe.exe`, `pf_stage.exe`, `pf_migrate.exe`). The app expects `resource/`
+  and `assets/` next to the executable, or beside the working directory.
 - Full rebuild: add `--clean-first`. Warnings are on (`-Wall -Wextra`) but there
   are a few known, accepted ones (an unused helper in `Registry.cpp`/`Project.cpp`
   and the vendored `jar_mod.h`).
@@ -49,11 +49,15 @@ It covers decode -> analysis -> in-process rendering -> export -> probe, plus
 specific regressions: math/matrix blocks, project save/load round trip, project
 metadata, text editing (caret, selection, clipboard), shader ports derived from a
 `.glsl` file and `shader.pass` migration, per-family encoder arguments and the
-audio matching rules. When NVENC is usable it also renders a real GPU export.
+audio matching rules, legacy Audio Output migration, ADC/DAC conversion, and the
+exclusive Audio Output routing (processed vs. dry exports measured in dBFS).
+When NVENC is usable it also renders a real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
-`selftest_legacy.pforge` and (when GPUs are available) `selftest_nvenc.mp4` into
-the current directory - delete them when you are done.
+`selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
+`selftest_dynamics.pforge`, `selftest_dynamics.mp4`, `selftest_dry_source.wav`,
+`selftest_dry.mp4`, `selftest_dac.mp4` and (when GPUs are available)
+`selftest_nvenc.mp4` into the current directory - delete them when you are done.
 
 Other tools:
 
@@ -61,6 +65,8 @@ Other tools:
   pipeline stage (`--help` is not implemented; the stage numbers are documented
   at the top of `tools/stage_dump.cpp`).
 - `pf_probe.exe` - OpenGL/readback probe for render-target experiments.
+- `pf_migrate.exe <project.pforge> [...]` - loads projects through the current
+  migrations and rewrites them in place, keeping `<name>.pforge.bak`.
 
 ### Verifying the UI
 
@@ -162,15 +168,25 @@ docs         rendering notes and the README overlay image
   short audio track from cutting the video. GPU encoders are probed with
   `ffmpeg::canRunVideoEncoder` before a run, and
   `exportPathForContainer` keeps the file extension in step with the container.
-- Blocks that transform the **Audio** stream (Dynamics) must fill
-  `Node::audioRenderOutput`/`audioRenderFrames` while the graph is evaluated
-  forward. `Exporter` follows the Audio links from `src.audio`, renders the
-  processed track one video frame at a time with the renderer detached (so
-  modulation still applies), writes it to a temporary 32-bit float WAV and muxes
-  that instead of the source file; the render pass then reuses the same buffer
-  through `audioRenderKey`. Keep the per-frame window logic contiguous so this
-  path stays sample-exact, and keep `buildCommand`'s `audioSeek` at 0 for the
-  rendered WAV (it already starts at the export offset).
+- The export's soundtrack is **exclusively** the signal wired into `out.audio`.
+  A direct link from `src.audio` muxes the media file with its matched encoder;
+  any other source node must fill `Node::audioRenderOutput`/`audioRenderFrames`
+  while the graph is evaluated forward (Dynamics, DAC). `Exporter` renders that
+  path one video frame at a time with the renderer detached (so modulation still
+  applies), writes it to a temporary 32-bit float WAV and muxes that; the render
+  pass then reuses the same buffer through `audioRenderKey`. A missing or
+  unconnected Audio Output exports no audio track. Keep the per-frame window
+  logic contiguous so this path stays sample-exact, and keep `buildCommand`'s
+  `audioSeek` at 0 for the rendered WAV (it already starts at the export offset).
+- ADC/DAC are the bridge between the Audio and Scalar domains: ADC measures the
+  current video frame's slice of the stream (RMS/Peak), DAC synthesises that
+  frame's samples at the clip's rate and ramps between frames. Rendered buffers
+  record where their first sample sits with `AudioBuffer::startFrame`, which is
+  what lets a downstream ADC map `audioTime` onto a partially rendered buffer.
+- `Project::ensureAudioOutput` upgrades files saved before `out.audio` existed,
+  wiring it to the end of the chain the old exporter followed; `pf_migrate`
+  applies the same migration to files on disk. Keep both paths working whenever
+  the Audio Output or the audio chain changes.
 - Project files are JSON (`<name>.pforge`); a UTF-8 BOM is tolerated. Audio and
   video encoder choices are project metadata (`output.audioCodec`,
   `output.videoCodec`), so keep them round-tripping through `Project::toJson`/
