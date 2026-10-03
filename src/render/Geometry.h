@@ -12,10 +12,6 @@ enum class Shape : int {
     None = 0,
     Circle,
     Ring,
-    RadialBars,
-    BarSpectrum,
-    WaveformRing,
-    WaveformLine,
     PolygonGrid,
     Sparks,
     Orbit,
@@ -41,14 +37,6 @@ struct GeomSpec {
     Color colorB = WHITE;
     float alpha = 1.0f;
     bool additive = true;
-
-    float reactivity = 0.0f;  // scalar input driving size/energy
-    int band = 0;             // selected band for bar shapes
-
-    const float *spectrum = nullptr;  // magnitudes 0..1
-    int spectrumCount = 0;
-    const float *wave = nullptr;      // samples -1..1
-    int waveCount = 0;
 
     std::string text;
     float textSize = 72.0f;

@@ -77,6 +77,7 @@ private:
     struct PooledTarget {
         ImageBufferPtr buffer;
         bool inUse = false;
+        unsigned long long tick = 0;  // LRU stamp for size-varying targets
     };
 
     struct UniformLocs {
@@ -111,6 +112,7 @@ private:
     void updateBeatPhase(const EvalContext &ctx);
 
     std::vector<PooledTarget> pool_;
+    unsigned long long poolTick_ = 0;
     std::unordered_map<int, ImageBufferPtr> persistent_;
     std::unordered_map<unsigned int, UniformLocs> locationCache_;
     ShaderLibrary shaders_;

@@ -99,8 +99,6 @@
         "rotationMod": 0,
         "xMod": 0.25,
         "yMod": 0,
-        "reactivity": 0.8000000119,
-        "band": 0,
         "colorA": "#66D9FFFF",
         "colorB": "#FF6EC7FF",
         "alpha": 1,

@@ -133,6 +133,12 @@ public:
     std::vector<float> historyA;
     std::vector<float> historyB;
     int historyCount = 0;  // samples pushed so far, used to fade in
+    // O(1) ring used by the Ringbuffer block at audio rate. `ringHead` is the
+    // oldest sample while ringCount > 0. Never serialised.
+    std::vector<float> ringValues;
+    int ringHead = 0;
+    int ringCount = 0;
+    double ringSum = 0.0;
 
     // Pushes a sample into one of the rolling buffers (oldest first once full).
     static void pushHistory(std::vector<float> &buffer, float value, int capacity);

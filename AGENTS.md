@@ -208,6 +208,25 @@ docs         rendering notes and the README overlay image
   parameter changes and drops links to ports that no longer exist. A DAC
   channel with no link follows the first connected channel, so a legacy
   single-port chain stays dual-mono instead of losing a side.
+- Audio sources inside a region are explicit: `sampleAdcNode` and `evalAdc`
+  never fall back to `ctx.audio` when the Audio input is unconnected, because
+  that is silence. Keep the graph walk tied to the actual Audio Output path.
+- Audio-rate blocks must stay O(1) per sample. Ringbuffer keeps a
+  `Node::ringValues` ring with `ringSum`/`ringHead` and only refreshes its
+  visual history once per video frame; do not reintroduce per-sample O(N) sums
+  or full-buffer shifts. Dynamics uses a linear-domain static curve
+  (`detector^exponent * factor`) instead of a log10 + pow pair per sample.
+- Resolution-modulating blocks must not reallocate targets per frame: Spectrum
+  quantises the modulated scale and keeps its feedback texture at the base
+  scale, and `Renderer::acquire` caps the target pool at 12 with LRU eviction.
+- Geometry (`geom.primitives`) owns primitives only and must not read
+  `ctx.audio`/`ctx.analysis`. Spectrum and waveform shapes are
+  `render.spectrum` effects; `Project::fromJson` converts old Geometry shapes
+  3..6 to Spectrum (`radial_spectrum`/`bars`/`waveform_scope`), remaps the old
+  Scale input to the Spectrum Scale port and wires the project analyzer to the
+  Analysis input. `remapGeometryShape` shifts the remaining primitive enum
+  values (old 7..10 -> new 3..6). Keep `pf_migrate` in step, and never
+  reintroduce Analysis/Audio inputs or global-analysis use in Geometry.
 - DAC output buffers are prepared per video frame by `prepareDacBuffer`, which
   keeps the same `audioRenderKey` reuse/append rules as the exporter and never
   mutates a buffer currently streamed by the monitor. Rendered buffers record

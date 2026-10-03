@@ -31,11 +31,13 @@ struct DynamicsState {
     // the reduction read the same for a sine as for DC of the same peak.
     float detector = 0.0f;
     float gainDb = 0.0f;       // current gain reduction, <= 0
+    float gain = 1.0f;         // linear-domain gain (1 = untouched)
     float limiterGain = 1.0f;  // 1 = untouched, < 1 = limiting
 
     void reset() {
         detector = 0.0f;
         gainDb = 0.0f;
+        gain = 1.0f;
         limiterGain = 1.0f;
     }
 };

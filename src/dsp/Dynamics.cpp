@@ -60,6 +60,13 @@ void processDynamicsBlock(const float *input, float *output, long long frames, i
     const float limiterRelease = timeCoefficient(settings.limiterReleaseMs, rate);
     const float preGain = dbToLinear(std::clamp(settings.preGainDb, -60.0f, 60.0f));
     const float postGain = dbToLinear(std::clamp(settings.postGainDb, -60.0f, 60.0f));
+    // Linear-domain static curve: gain = detector^exponent * factor. This
+    // replaces the per-sample log10 + pow pair with a single pow.
+    const float ratio = std::clamp(settings.ratio, 1.0f, 100.0f);
+    const float exponent = settings.expand ? (ratio - 1.0f) : (1.0f / ratio - 1.0f);
+    const float thresholdDb = std::clamp(settings.thresholdDb, -96.0f, 24.0f);
+    const float thresholdLinear = dbToLinear(thresholdDb);
+    const float curveFactor = dbToLinear(-thresholdDb * exponent);
 
     std::vector<float> gained(static_cast<size_t>(channels));
     for (long long frame = 0; frame < frames; ++frame) {
@@ -77,13 +84,18 @@ void processDynamicsBlock(const float *input, float *output, long long frames, i
         peak *= preGain;
         const float detectorCoefficient = peak > state.detector ? attack : release;
         state.detector += detectorCoefficient * (peak - state.detector);
-        const float levelDb = linearToDb(state.detector);
 
         // Attack when the reduction grows, release when it recovers.
-        const float target = dynamicsGainDb(settings, levelDb);
-        const float gainCoefficient = target < state.gainDb ? attack : release;
-        state.gainDb += gainCoefficient * (target - state.gainDb);
-        const float gain = dbToLinear(state.gainDb) * preGain * postGain;
+        float targetGain = 1.0f;
+        const bool inRange =
+            settings.expand ? state.detector < thresholdLinear
+                            : state.detector > thresholdLinear;
+        if (inRange) {
+            targetGain = std::pow(std::max(state.detector, 1.0e-9f), exponent) * curveFactor;
+        }
+        const float gainCoefficient = targetGain < state.gain ? attack : release;
+        state.gain += gainCoefficient * (targetGain - state.gain);
+        const float gain = state.gain * preGain * postGain;
 
         float outputPeak = 0.0f;
         for (int channel = 0; channel < channels; ++channel) {
@@ -112,6 +124,7 @@ void processDynamicsBlock(const float *input, float *output, long long frames, i
             destination[channel] = sample;
         }
     }
+    state.gainDb = linearToDb(state.gain);
 }
 
 float loudnessDb(const AudioBuffer &buffer, long long startFrame, long long frames) {

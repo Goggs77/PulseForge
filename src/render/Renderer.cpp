@@ -150,6 +150,7 @@ ImageBufferPtr Renderer::acquire(int width, int height) {
         if (!entry.inUse && entry.buffer && entry.buffer->width == width &&
             entry.buffer->height == height) {
             entry.inUse = true;
+            entry.tick = ++poolTick_;
             ++liveTargets_;
             peakTargets_ = std::max(peakTargets_, liveTargets_);
             return entry.buffer;
@@ -157,7 +158,27 @@ ImageBufferPtr Renderer::acquire(int width, int height) {
     }
     ImageBufferPtr created = allocate(width, height);
     if (!created) return nullptr;
-    pool_.push_back(PooledTarget{created, true});
+    // Bound the pool: a block that modulates its resolution can otherwise keep
+    // every visited size alive. Evict the least-recently-used free target.
+    constexpr size_t kMaxPooledTargets = 12;
+    if (pool_.size() >= kMaxPooledTargets) {
+        size_t victim = pool_.size();
+        unsigned long long oldest = ~0ull;
+        for (size_t i = 0; i < pool_.size(); ++i) {
+            if (pool_[i].inUse || !pool_[i].buffer) continue;
+            if (pool_[i].tick < oldest) {
+                oldest = pool_[i].tick;
+                victim = i;
+            }
+        }
+        if (victim < pool_.size()) {
+            if (pool_[victim].buffer->valid()) {
+                UnloadRenderTexture(pool_[victim].buffer->texture);
+            }
+            pool_.erase(pool_.begin() + static_cast<long>(victim));
+        }
+    }
+    pool_.push_back(PooledTarget{created, true, ++poolTick_});
     ++liveTargets_;
     peakTargets_ = std::max(peakTargets_, liveTargets_);
     stats_.pooledTargets = static_cast<int>(pool_.size());

@@ -303,7 +303,7 @@ input on **Geometry**.
 | LFO | Phase, Frequency, Amplitude, Offset | Value | sine/triangle/saw/square/random, free-running or tempo-synced; the frequency input shifts by octaves, amplitude scales and offset is added |
 | Automation | Depth, Offset | Value | Keyframed curve edited in the block; unipolar 0..1 or bipolar -1..1, with modulatable depth/offset |
 | Amount / VCA | In, Amount, Gain, Offset | Out | Scales a signal by a constant or by a second modulation input, with quantising; gain scales and offset is added |
-| Ringbuffer | In, Speed | Input, Average, Buffer | Records the scalar into a loop buffer of 2..1024 samples; `Input` is the live value, `Average` the running average of the buffer and `Buffer` the sample the looping read pointer (loops/second, octave modulation) is passing over. The block draws the buffer with the read position marked |
+| Ringbuffer | In, Speed | Input, Average, Buffer | Records the scalar into a loop buffer of 2..1024 samples with an O(1) running sum, so it is usable at audio rate; `Input` is the live value, `Average` the running average and `Buffer` the sample the looping read pointer (loops/second, octave modulation) is passing over. The block draws the buffer with the read position marked |
 | Signal Filter | In, Cutoff, Resonance | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Its sample rate is the current evaluation rate: the project frame rate for modulation, or the audio sample rate inside an ADC -> DAC region; the cutoff and resonance inputs shift by octaves. The block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)) |
 
 Modulated parameters are live: the inspector handles (and the Signal Filter's
@@ -323,11 +323,11 @@ readout.
 
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
-| Spectrum | Analysis, Scale, Feedback, Colour A/B | Image | Draws the analysis with a built-in spectrum effect; the Scale/Feedback/Colour inputs modulate the matching parameters |
+| Spectrum | Analysis, Scale, Feedback, Colour A/B | Image | Draws the analysis with a built-in spectrum effect; the Scale/Feedback/Colour inputs modulate the matching parameters. Scale is quantised and feedback stays at the base resolution, so a modulating Scale does not reallocate the render/feedback targets every frame |
 | Shader | uPrev, ...derived | Image | Applies a `.glsl` file to the incoming image; the ports follow the uniforms the file uses (`uPrev`, `uInput2`, `uUser[0..7]`, `uColorA/B`, `uVector2/3/4`, `uMatrix`). Compile errors are reported on the block instead of silently falling back |
 | Blend | A, B | Image | Cross fade, add, screen, multiply, difference, overlay, min, max |
 | Post FX | Image, 8 scalars | Image | Bloom, chromatic aberration, vignette, grain, scanlines, feedback, saturation, hue |
-| Geometry | Layer, Scale, Rotation, X, Y | Image | Circle, ring, radial bars, bar spectrum, waveform ring/line, polygon grid, sparks, orbit, text |
+| Geometry | Layer, Scale, Rotation, X, Y | Image | Primitives only: circle, ring, polygon grid, sparks, orbit, text. Spectrum and waveform visuals live in the Spectrum block; old projects with those Geometry shapes migrate to Spectrum effects on load |
 
 ### Output
 

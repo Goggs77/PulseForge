@@ -226,6 +226,62 @@ int main(int argc, char **argv) {
                             stats.frameMs, stats.shaderPasses, stats.pooledTargets);
             }
 
+            // Modulating Spectrum's Scale must not allocate a target per frame:
+            // the scale is quantised, feedback stays at the base resolution and
+            // the renderer pool is capped.
+            if (result == 0) {
+                Graph scaleGraph;
+                Node *src = scaleGraph.addNode("src.audio", 0, 0);
+                Node *analyzer = scaleGraph.addNode("dsp.analyze", 200, 0);
+                Node *scaleSource = scaleGraph.addNode("math.constant", 200, 140);
+                Node *spectrum = scaleGraph.addNode("render.spectrum", 420, 0);
+                Node *output = scaleGraph.addNode("out.video", 700, 0);
+                bool scaleOk = src && analyzer && scaleSource && spectrum && output;
+                std::string scaleWhat;
+                if (!scaleOk) {
+                    scaleWhat = "blocks missing";
+                } else {
+                    spectrum->setInt("preset", 4);  // radial_spectrum
+                    spectrum->setBool("useFeedback", true);
+                    spectrum->setFloat("feedback", 0.4f);
+                    std::string why;
+                    scaleOk = scaleGraph.connect(src->id, 0, analyzer->id, 0, &why) &&
+                              scaleGraph.connect(analyzer->id, 0, spectrum->id, 0, &why) &&
+                              scaleGraph.connect(scaleSource->id, 0, spectrum->id, 1, &why) &&
+                              scaleGraph.connect(spectrum->id, 0, output->id, 0, &why);
+                    if (!scaleOk) scaleWhat = why;
+                }
+                if (scaleOk) {
+                    EvalContext ctx;
+                    ctx.width = 320;
+                    ctx.height = 180;
+                    ctx.fps = 60.0f;
+                    ctx.duration = 2.0;
+                    ctx.audio = clip.buffer();
+                    ctx.analysis = analysis;
+                    const double started = GetTime();
+                    for (int frame = 0; frame < 120; ++frame) {
+                        const float phase = static_cast<float>(frame) / 120.0f;
+                        scaleSource->setFloat("value", std::sin(phase * 6.2831853f) * 0.5f);
+                        ctx.frame = frame;
+                        ctx.time = static_cast<double>(frame) / 60.0;
+                        ctx.audioTime = ctx.time;
+                        std::string renderError;
+                        renderer.renderFrame(scaleGraph, ctx, &renderError);
+                    }
+                    const int pooled = renderer.stats().pooledTargets;
+                    if (pooled > 12) {
+                        scaleOk = false;
+                        scaleWhat = "target pool grew to " + std::to_string(pooled);
+                    } else {
+                        std::printf("  spectrum : Scale modulation stable (%d pooled targets, "
+                                    "%.1f ms)\n",
+                                    pooled, (GetTime() - started) * 1000.0);
+                    }
+                }
+                if (!scaleOk) result = fail("Spectrum Scale modulation: " + scaleWhat);
+            }
+
             // --- project round trip ------------------------------------
             if (result == 0) {
                 const std::string projectPath = "selftest_project.pforge";
@@ -495,6 +551,62 @@ int main(int argc, char **argv) {
                                           "at the end of its Dynamics chain");
                         } else {
                             std::printf("  legacy   : Audio Output added after Dynamics\n");
+                        }
+                    }
+                }
+
+                // Geometry's old spectrum/waveform shapes migrate to Spectrum,
+                // and the remaining primitive indices are remapped.
+                if (result == 0) {
+                    const std::string legacyGeometryPath = "selftest_legacy_geometry.pforge";
+                    std::ofstream legacyGeometry(legacyGeometryPath.c_str(), std::ios::binary);
+                    legacyGeometry << R"({
+  "application": "PulseForge",
+  "version": 1,
+  "name": "Legacy Geometry",
+  "video": { "width": 320, "height": 180, "fps": 30 },
+  "output": { "container": "mp4" },
+  "media": {},
+  "blocks": [
+    { "id": 1, "kind": "dsp.analyze", "title": "Spectrum Analyzer", "x": 0, "y": 0,
+      "enabled": true, "params": {} },
+    { "id": 2, "kind": "geom.primitives", "title": "Geometry", "x": 200, "y": 0,
+      "enabled": true, "params": { "shape": 3, "colorA": "#FF0000FF" } },
+    { "id": 3, "kind": "geom.primitives", "title": "Geometry", "x": 400, "y": 0,
+      "enabled": true, "params": { "shape": 7 } },
+    { "id": 4, "kind": "out.video", "title": "Video Output", "x": 600, "y": 0,
+      "enabled": true, "params": {} }
+  ],
+  "connections": [
+    { "from": 2, "fromPort": 0, "to": 4, "toPort": 0 }
+  ]
+})";
+                    legacyGeometry.close();
+                    Project legacy;
+                    std::string legacyError;
+                    if (!legacy.load(legacyGeometryPath, &legacyError,
+                                     &renderer.shaders())) {
+                        result = fail("legacy geometry project failed to load: " + legacyError);
+                    } else {
+                        const Node *spectrum = legacy.graph.find(2);
+                        const Node *primitive = legacy.graph.find(3);
+                        const std::vector<std::string> &effects = ShaderLibrary::effectNames();
+                        int radialIndex = 0;
+                        for (size_t i = 0; i < effects.size(); ++i) {
+                            if (effects[i] == "radial_spectrum") radialIndex = static_cast<int>(i);
+                        }
+                        const bool spectrumOk =
+                            spectrum && spectrum->kind == "render.spectrum" &&
+                            spectrum->pint("preset", -1) == radialIndex &&
+                            legacy.graph.findInputLink(2, 0) != nullptr;
+                        const bool primitiveOk =
+                            primitive && primitive->kind == "geom.primitives" &&
+                            primitive->pint("shape", -1) == 3;
+                        if (!spectrumOk || !primitiveOk) {
+                            result = fail("legacy geometry was not migrated to Spectrum/primitives");
+                        } else {
+                            std::printf("  legacy   : Geometry spectrum shape -> Spectrum, "
+                                        "primitive indices remapped\n");
                         }
                     }
                 }
@@ -1190,6 +1302,63 @@ int main(int argc, char **argv) {
                             }
                         }
                         if (!grownOk) result = fail("audio-rate growing source: " + grownWhat);
+                    }
+
+                    // An ADC with no Audio input is silence, never the imported
+                    // clip, both inside a region and on its own.
+                    if (result == 0) {
+                        auto loud = std::make_shared<AudioBuffer>();
+                        loud->channels = 2;
+                        loud->sampleRate = 48000;
+                        loud->frameCount = 48000;
+                        loud->samples.assign(96000, 0.5f);
+                        Graph silentRegion;
+                        Node *adc = silentRegion.addNode("dsp.adc", 0, 0);
+                        Node *dac = silentRegion.addNode("dsp.dac", 200, 0);
+                        bool silentOk = adc && dac;
+                        std::string silentWhat;
+                        if (silentOk) {
+                            std::string why;
+                            silentOk = silentRegion.connect(adc->id, 0, dac->id, 0, &why);
+                            if (!silentOk) silentWhat = why;
+                        } else {
+                            silentWhat = "blocks missing";
+                        }
+                        if (silentOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.offline = true;
+                            ctx.audio = loud;
+                            for (int frame = 0; frame < 60; ++frame) {
+                                ctx.frame = frame;
+                                ctx.audioTime = static_cast<double>(frame) / 60.0;
+                                silentRegion.evaluate(ctx);
+                            }
+                            const AudioBuffer *out = dac->audioRenderOutput.get();
+                            float peak = 0.0f;
+                            if (out) {
+                                for (float sample : out->samples) {
+                                    peak = std::max(peak, std::fabs(sample));
+                                }
+                            }
+                            // A disconnected ADC on its own must be silent too.
+                            Graph solo;
+                            Node *soloAdc = solo.addNode("dsp.adc", 0, 0);
+                            if (soloAdc) solo.evaluate(ctx);
+                            const float soloValue =
+                                soloAdc && !soloAdc->outputs.empty()
+                                    ? soloAdc->outputs[0].asScalar()
+                                    : 1.0f;
+                            if (!out || peak > 1e-6f || std::fabs(soloValue) > 1e-6f) {
+                                silentOk = false;
+                                silentWhat = "an unconnected ADC produced audio";
+                            } else {
+                                std::printf("  bridges  : unconnected ADC is silent (region and "
+                                            "direct)\n");
+                            }
+                        }
+                        if (!silentOk) result = fail("ADC silence: " + silentWhat);
                     }
 
                     // Stereo: the left and right samples must stay separate

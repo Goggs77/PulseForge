@@ -384,7 +384,7 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
             node.audioRenderFrames = 0;
             node.audioRenderKey = key;
             node.runtimeState.erase("dyn.detector");
-            node.runtimeState.erase("dyn.gainDb");
+            node.runtimeState.erase("dyn.gain");
             node.runtimeState.erase("dyn.limiterGain");
             out[0].audio = node.audioRenderOutput;
         }
@@ -400,13 +400,13 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                 return it == node.runtimeState.end() ? fallback : static_cast<float>(it->second);
             };
             state.detector = stored("dyn.detector", 0.0f);
-            state.gainDb = stored("dyn.gainDb", 0.0f);
+            state.gain = stored("dyn.gain", 1.0f);
             state.limiterGain = stored("dyn.limiterGain", 1.0f);
             processDynamicsBlock(source->samples.data() + static_cast<size_t>(startFrame) * channels,
                                  rendered.samples.data() + base, frames, channels, sampleRate, settings,
                                  state);
             node.runtimeState["dyn.detector"] = state.detector;
-            node.runtimeState["dyn.gainDb"] = state.gainDb;
+            node.runtimeState["dyn.gain"] = state.gain;
             node.runtimeState["dyn.limiterGain"] = state.limiterGain;
             node.audioRenderFrames += frames;
             rendered.frameCount = node.audioRenderFrames;
@@ -458,14 +458,17 @@ void audioWindowBounds(const EvalContext &ctx, const AudioBuffer &buffer, long l
 void evalAdc(Node &node, EvalContext &ctx, const std::vector<Value> &in,
              std::vector<Value> &out) {
     AudioPtr carrier;
-    if (!in.empty() && in[0].audio) carrier = in[0].audio;
-    else if (ctx.audio) carrier = ctx.audio;
+    if (!in.empty() && in[0].type == PortType::Audio) carrier = in[0].audio;
     const int channels = std::max(1, static_cast<int>(out.size()));
-    for (int c = 0; c < channels; ++c) out[static_cast<size_t>(c)] = Value::makeScalar(1.0f);
     if (!carrier || carrier->frameCount <= 0 || carrier->samples.empty()) {
+        // Silence without an Audio input; never fall back to the imported clip.
+        for (int c = 0; c < channels; ++c) {
+            out[static_cast<size_t>(c)] = Value::makeScalar(0.0f);
+        }
         node.status = "no audio";
         return;
     }
+    for (int c = 0; c < channels; ++c) out[static_cast<size_t>(c)] = Value::makeScalar(1.0f);
 
     const int mode = node.pint("mode", 0);
     if (mode != 0) {
@@ -1046,16 +1049,26 @@ void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                     std::vector<Value> &out) {
     const float value = scalarFrom(in, 0);
     const int size = std::clamp(node.pint("size", 64), 2, 1024);
-    Node::pushHistory(node.historyA, value, size);
-    ++node.historyCount;
-    const int count = std::max(1, std::min(node.historyCount, size));
-
-    float sum = 0.0f;
-    for (int i = 0; i < count; ++i) {
-        const float position = count > 1 ? static_cast<float>(i) / static_cast<float>(count - 1)
-                                         : 1.0f;
-        sum += Node::historyAt(node.historyA, size, node.historyCount, position);
+    // O(1) ring: push, running sum and read pointer all avoid the old O(size)
+    // shift/sum, which was too slow inside an audio-rate region.
+    if (static_cast<int>(node.ringValues.size()) != size) {
+        node.ringValues.assign(static_cast<size_t>(size), 0.0f);
+        node.ringHead = 0;
+        node.ringCount = 0;
+        node.ringSum = 0.0;
     }
+    if (node.ringCount < size) {
+        const int write = (node.ringHead + node.ringCount) % size;
+        node.ringValues[static_cast<size_t>(write)] = value;
+        node.ringSum += value;
+        ++node.ringCount;
+    } else {
+        node.ringSum += value - node.ringValues[static_cast<size_t>(node.ringHead)];
+        node.ringValues[static_cast<size_t>(node.ringHead)] = value;
+        node.ringHead = (node.ringHead + 1) % size;
+    }
+    const int count = std::max(1, node.ringCount);
+    const float average = static_cast<float>(node.ringSum / count);
 
     // Read pointer: `speed` loops per second, advanced one evaluation at a time
     // so the movement is independent of the evaluation rate (video frame rate
@@ -1070,11 +1083,23 @@ void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     double phase = node.runtimeState["phase"] + speed / fs;
     phase -= std::floor(phase);
     node.runtimeState["phase"] = phase;
-    const float buffered = Node::historyAt(node.historyA, size, node.historyCount,
-                                           static_cast<float>(phase));
+    const int readIndex = std::clamp(static_cast<int>(phase * count), 0, count - 1);
+    const int physical = (node.ringHead + readIndex) % size;
+    const float buffered = node.ringValues[static_cast<size_t>(physical)];
+
+    // The in-block display is a video-rate view: at audio rate push one sample
+    // per video frame instead of one per audio sample.
+    const bool pushVisual =
+        !ctx.audioRate || node.runtimeState["ring.visualFrame"] !=
+                              static_cast<double>(ctx.frame);
+    if (pushVisual) {
+        Node::pushHistory(node.historyA, value, size);
+        ++node.historyCount;
+        node.runtimeState["ring.visualFrame"] = static_cast<double>(ctx.frame);
+    }
 
     out[0] = Value::makeScalar(value);
-    out[1] = Value::makeScalar(sum / static_cast<float>(count));
+    out[1] = Value::makeScalar(average);
     out[2] = Value::makeScalar(buffered);
 }
 
@@ -1196,6 +1221,9 @@ void evalSpectrum(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     float scale = node.pfloat("scale", 1.0f);
     if (scaleConnected) scale *= std::max(0.0f, 1.0f + in[1].scalar);
     scale = std::clamp(scale, 0.15f, 4.0f);
+    // Quantise the modulated resolution so a sweeping Scale input cannot
+    // allocate a new render target (and feedback texture) every frame.
+    scale = std::round(scale * 10.0f) / 10.0f;
     float feedbackAmount = node.pfloat("feedback", 0.6f);
     if (feedbackConnected) feedbackAmount += in[2].scalar * 0.5f;
     feedbackAmount = std::clamp(feedbackAmount, 0.0f, 0.98f);
@@ -1204,14 +1232,21 @@ void evalSpectrum(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     if (in.size() > 3 && in[3].type == PortType::Color) colorA = in[3].color;
     if (in.size() > 4 && in[4].type == PortType::Color) colorB = in[4].color;
 
-    const int width = std::max(2, static_cast<int>(ctx.width * scale));
-    const int height = std::max(2, static_cast<int>(ctx.height * scale));
+    const auto align32 = [](int value) { return std::max(32, (value + 31) & ~31); };
+    const int width = align32(static_cast<int>(ctx.width * scale));
+    const int height = align32(static_cast<int>(ctx.height * scale));
 
     float user[8] = {0};
     Texture2D feedback{};
     ImageBufferPtr feedbackTarget;
     if (node.pbool("useFeedback", false)) {
-        feedbackTarget = ctx.renderer->persistent(node.id, width, height);
+        // Feedback lives at the base (unmodulated) resolution so Scale
+        // modulation never reallocates the persistent texture.
+        float baseScale = std::clamp(node.pfloat("scale", 1.0f), 0.15f, 4.0f);
+        baseScale = std::round(baseScale * 10.0f) / 10.0f;
+        feedbackTarget = ctx.renderer->persistent(
+            node.id, align32(static_cast<int>(ctx.width * baseScale)),
+            align32(static_cast<int>(ctx.height * baseScale)));
         if (feedbackTarget) {
             feedback = feedbackTarget->texture.texture;
             user[0] = std::max(user[0], feedbackAmount);
@@ -1389,20 +1424,8 @@ void evalPostFx(Node &node, EvalContext &ctx, const std::vector<Value> &in, std:
     out[0] = Value::makeImage(target);
 }
 
-void fillWaveWindow(const EvalContext &ctx, std::vector<float> &out) {
-    out.assign(512, 0.0f);
-    if (!ctx.audio || ctx.audio->frameCount <= 0) return;
-    const double window = 0.04;  // +/- seconds
-    for (size_t i = 0; i < out.size(); ++i) {
-        const double t = ctx.audioTime - window + 2.0 * window * (static_cast<double>(i) / (out.size() - 1));
-        out[i] = std::clamp(ctx.audio->monoAt(t * ctx.audio->sampleRate), -1.0f, 1.0f);
-    }
-}
-
 void evalGeometry(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
     if (!ctx.renderer) return;
-    static thread_local std::vector<float> wave;
-    fillWaveWindow(ctx, wave);
 
     ImageBufferPtr target = ctx.renderer->acquire(ctx.width, ctx.height);
     if (!target) return;
@@ -1431,20 +1454,11 @@ void evalGeometry(Node &node, EvalContext &ctx, const std::vector<Value> &in, st
     spec.colorB = node.pcolor("colorB");
     spec.alpha = std::clamp(node.pfloat("alpha", 1.0f), 0.0f, 1.0f);
     spec.additive = node.pbool("additive", true);
-    spec.reactivity = node.pfloat("reactivity", 0.5f) *
-                      (ctx.analysis ? ctx.analysis->valueAt(ctx.audioTime, 1) : 0.0f);
-    spec.band = node.pint("band", 0);
     spec.text = node.pstr("text");
     spec.textSize = node.pfloat("textSize", 72.0f);
     spec.stateKey = node.id;
     spec.dt = dtOf(ctx);
     spec.time = ctx.time;
-    if (ctx.analysis) {
-        spec.spectrum = ctx.analysis->spectrumRow(ctx.audioTime);
-        spec.spectrumCount = ctx.analysis->spectrumBins;
-    }
-    spec.wave = wave.data();
-    spec.waveCount = static_cast<int>(wave.size());
 
     const int shapeIndex = std::clamp(node.pint("shape", 0), 0, static_cast<int>(geometry::Shape::Count) - 1);
     geometry::drawPrimitive(static_cast<geometry::Shape>(shapeIndex), spec);
@@ -2301,8 +2315,10 @@ void Registry::registerBuiltins() {
         def.category = "Render";
         def.label = "Geometry";
         def.description =
-            "Draws geometric elements on top of an optional image layer. Scale, rotation "
-            "and position can be driven by scalar inputs.";
+            "Draws geometric primitives (circle, ring, polygon grid, sparks, orbit, text) "
+            "on top of an optional image layer. Scale, rotation and position can be driven "
+            "by scalar/vector inputs; spectrum and waveform visuals live in the Spectrum "
+            "block instead.";
         def.inputs = {PortDesc{"Layer", PortType::Image, "optional background"},
                       PortDesc{"Scale", PortType::Scalar},
                       PortDesc{"Rotation", PortType::Scalar},
@@ -2323,8 +2339,6 @@ void Registry::registerBuiltins() {
             makeParam("rotationMod", "Rotation mod", 0.0f, -4.0f, 4.0f, 0.01f, "Modulation"),
             makeParam("xMod", "X mod", 0.25f, -4.0f, 4.0f, 0.01f, "Modulation"),
             makeParam("yMod", "Y mod", 0.0f, -4.0f, 4.0f, 0.01f, "Modulation"),
-            makeParam("reactivity", "Reactivity", 0.5f, -4.0f, 4.0f, 0.01f, "Modulation"),
-            makeIntParam("band", "Band", 0, 0, 255, "Modulation"),
             colorParam("colorA", "Colour A", 0x59B2FF, "Look"),
             colorParam("colorB", "Colour B", 0xFF7BD1, "Look"),
             makeParam("alpha", "Opacity", 1.0f, 0.0f, 1.0f, 0.01f, "Look"),

@@ -403,7 +403,8 @@ void sampleAdcNode(Node &node, const EvalContext &ctx, const ChannelInput &input
         input.port < static_cast<int>(input.source->outputs.size())) {
         buffer = input.source->outputs[static_cast<size_t>(input.port)].audio.get();
     }
-    if (!buffer) buffer = ctx.audio.get();
+    // No Audio input means silence: never fall back to the project's imported
+    // clip, otherwise an unconnected ADC keeps playing the source.
     const int sourceChannels = buffer ? std::max(1, buffer->channels) : 1;
     long long local = -1;
     if (buffer && buffer->frameCount > 0 && !buffer->samples.empty()) {

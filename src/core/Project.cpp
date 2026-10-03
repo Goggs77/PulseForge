@@ -22,6 +22,34 @@ std::string readFile(const std::string &path) {
     return buffer.str();
 }
 
+// Geometry no longer owns spectrum/waveform shapes (they live in Spectrum
+// now), so the remaining primitive indices are shifted by the removal.
+int remapGeometryShape(int oldShape) {
+    switch (oldShape) {
+        case 0: return 0;   // None
+        case 1: return 1;   // Circle
+        case 2: return 2;   // Ring
+        case 7: return 3;   // Polygon Grid
+        case 8: return 4;   // Sparks
+        case 9: return 5;   // Orbit
+        case 10: return 6;  // Text
+        default: return 1;  // removed spectrum/waveform shapes -> Circle
+    }
+}
+
+// The old Geometry spectrum/waveform shape becomes the closest Spectrum
+// built-in effect during migration.
+int geometrySpectrumPreset(int oldShape) {
+    const char *wanted = "radial_spectrum";
+    if (oldShape == 4) wanted = "bars";
+    else if (oldShape >= 5) wanted = "waveform_scope";
+    const std::vector<std::string> &names = ShaderLibrary::effectNames();
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == wanted) return static_cast<int>(i);
+    }
+    return 0;
+}
+
 std::string paramKindName(ParamKind kind) {
     switch (kind) {
         case ParamKind::Int: return "int";
@@ -469,7 +497,6 @@ void Project::resetToDefault(const ShaderLibrary *shaders) {
     geometry->setFloat("thickness", 5.0f);
     geometry->setFloat("spin", 0.03f);
     geometry->setFloat("scaleMod", 0.55f);
-    geometry->setFloat("reactivity", 0.8f);
     geometry->setColor("colorA", palette::fromHex(0x66D9FF));
     geometry->setColor("colorB", palette::fromHex(0xFF6EC7));
 
@@ -765,6 +792,17 @@ bool Project::fromJson(const json::Value &root, const std::string &projectDir, s
             const std::string file = item["params"]["shader"].asString();
             resolvedKind = file.empty() ? "render.spectrum" : "render.shader";
         }
+        // Geometry used to draw spectrum/waveform items from the global
+        // analysis. Those shapes migrate to a Spectrum block; the remaining
+        // primitive indices are remapped below.
+        const bool legacyGeometry = kind == "geom.primitives";
+        int legacyGeometryShape = -1;
+        bool geometryToSpectrum = false;
+        if (legacyGeometry) {
+            legacyGeometryShape = item["params"]["shape"].asInt(1);
+            geometryToSpectrum = legacyGeometryShape >= 3 && legacyGeometryShape <= 6;
+            if (geometryToSpectrum) resolvedKind = "render.spectrum";
+        }
         Node *node = graph.addNodeWithId(id > 0 ? id : graph.nextId, resolvedKind);
         if (!node) continue;
         node->x = item["x"].asFloat(0.0f);
@@ -773,8 +811,9 @@ bool Project::fromJson(const json::Value &root, const std::string &projectDir, s
         // The retired block was called "Shader Pass"; keep real custom names but
         // let the default title follow the new label ("Spectrum").
         const std::string storedTitle = item["title"].asString(node->def->label);
-        const std::string title =
-            legacyShaderPass && storedTitle == "Shader Pass" ? node->def->label : storedTitle;
+        std::string title = storedTitle;
+        if (legacyShaderPass && storedTitle == "Shader Pass") title = node->def->label;
+        if (geometryToSpectrum && storedTitle == "Geometry") title = node->def->label;
         if (!title.empty() && title != node->def->label) node->title = title;
 
         const json::Value &params = item["params"];
@@ -805,8 +844,15 @@ bool Project::fromJson(const json::Value &root, const std::string &projectDir, s
                 }
                 default: param.value = value.asFloat(param.value); break;
             }
+            if (legacyGeometry && !geometryToSpectrum && param.key == "shape") {
+                param.value = static_cast<float>(remapGeometryShape(legacyGeometryShape));
+            }
         }
         node->ensureParams(*node->def);
+        if (geometryToSpectrum) {
+            node->setInt("preset", geometrySpectrumPreset(legacyGeometryShape));
+            node->setBool("useFeedback", false);
+        }
         if (resolvedKind == "dsp.adc" || resolvedKind == "dsp.dac") {
             Registry::applyChannelPorts(*node);
         }
@@ -844,6 +890,15 @@ bool Project::fromJson(const json::Value &root, const std::string &projectDir, s
                 migratedSpectrumNodes.push_back(node->id);
             }
             legacy[id > 0 ? id : node->id] = migration;
+        }
+        if (geometryToSpectrum) {
+            // Old Geometry inputs: Layer, Scale, Rotation, X, Y, Position.
+            // Only Scale has an equivalent on Spectrum (its Scale input).
+            migration.portMap.assign(6, -1);
+            migration.portMap[1] = 1;
+            migration.rewireAnalysis = false;
+            legacy[id > 0 ? id : node->id] = migration;
+            migratedSpectrumNodes.push_back(node->id);
         }
     }
 
