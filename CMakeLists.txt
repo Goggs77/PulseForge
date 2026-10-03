@@ -138,6 +138,9 @@ if (PF_BUILD_APP)
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets"
                 "$<TARGET_FILE_DIR:PulseForge>/assets"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/templates"
+                "$<TARGET_FILE_DIR:PulseForge>/templates"
         # CrystalGUI loads its shader and fonts from "resource/" relative to the
         # working directory, so keep a copy next to the executable.
         COMMAND ${CMAKE_COMMAND} -E make_directory

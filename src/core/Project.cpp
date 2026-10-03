@@ -412,6 +412,7 @@ void Project::resetToDefault(const ShaderLibrary *shaders) {
         }
     };
     addCandidate(directory + "template.pforge");
+    addCandidate(directory + "templates/template.pforge");
     addCandidate("template.pforge");
     for (const std::string &path : candidates) {
         std::ifstream probe(path.c_str(), std::ios::binary);
