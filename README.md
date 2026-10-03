@@ -286,6 +286,15 @@ input on **Geometry**.
 | LFO | Phase | Value | sine/triangle/saw/square/random, free-running or tempo-synced |
 | Automation | - | Value | Keyframed curve edited in the block; unipolar 0..1 or bipolar -1..1, with depth/offset |
 | Amount / VCA | In, Amount | Out | Scales a signal by a constant or by a second modulation input, with quantising |
+| Ringbuffer | In | Input, Average, Buffer | Records the scalar into a loop buffer of 2..1024 samples; `Input` is the live value, `Average` the running average of the buffer and `Buffer` the sample the looping read pointer (loops/second) is passing over. The block draws the buffer with the read position marked |
+| Signal Filter | In | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Modulation runs one sample per video frame, so the filter's sample rate **is the project frame rate**; the block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)) |
+
+### Debug
+
+| Block | Inputs | Outputs | Notes |
+| --- | --- | --- | --- |
+| VU / Digital Meter | In | Out | Pure pass-through that shows the value either as a classic VU meter (0 VU = **-18 dBFS**, fast attack/slow release, peak-hold tick) or as a 4-second value/time diagram |
+| Guard | In | Out | Silences non-finite scalars: NaN and +/-Inf become 0. Three lamps flash for +Inf, -Inf and NaN, labelled with the matching symbols |
 
 ### Render
 

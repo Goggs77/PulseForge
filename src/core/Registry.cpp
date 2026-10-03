@@ -21,6 +21,8 @@ namespace {
 
 // Samples kept for the Frequency Band block's live input/output bar.
 constexpr int kBandHistory = 48;
+// Samples kept for the VU / Digital Meter's value-time diagram (4 s at 60 fps).
+constexpr int kMeterHistory = 240;
 
 float dtOf(const EvalContext &ctx) { return ctx.fps > 1.0f ? 1.0f / ctx.fps : 1.0f / 60.0f; }
 
@@ -585,6 +587,106 @@ void evalAmount(Node &node, EvalContext &ctx, const std::vector<Value> &in, std:
     out[0] = Value::makeScalar(result);
 }
 
+// Ringbuffer: records the incoming scalar and hands back the live value, the
+// running average of the buffer and whatever the looping read pointer is over.
+void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                    std::vector<Value> &out) {
+    const float value = scalarFrom(in, 0);
+    const int size = std::clamp(node.pint("size", 64), 2, 1024);
+    Node::pushHistory(node.historyA, value, size);
+    ++node.historyCount;
+    const int count = std::max(1, std::min(node.historyCount, size));
+
+    float sum = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        const float position = count > 1 ? static_cast<float>(i) / static_cast<float>(count - 1)
+                                         : 1.0f;
+        sum += Node::historyAt(node.historyA, size, node.historyCount, position);
+    }
+
+    // Read pointer: `speed` loops per second, advanced one video frame at a time
+    // so the movement is independent of the project frame rate.
+    const float fps = std::max(1.0f, ctx.fps);
+    double phase = node.runtimeState["phase"] + node.pfloat("speed", 0.5f) / fps;
+    phase -= std::floor(phase);
+    node.runtimeState["phase"] = phase;
+    const float buffered = Node::historyAt(node.historyA, size, node.historyCount,
+                                           static_cast<float>(phase));
+
+    out[0] = Value::makeScalar(value);
+    out[1] = Value::makeScalar(sum / static_cast<float>(count));
+    out[2] = Value::makeScalar(buffered);
+}
+
+// Signal Filter: RBJ biquad in transposed direct form II. The modulation runs at
+// the video frame rate, so one sample is processed per frame with fs = fps.
+void evalSignalFilter(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                      std::vector<Value> &out) {
+    const double input = scalarFrom(in, 0);
+    const double fs = std::max(1.0f, ctx.fps);
+    const int mode = std::clamp(node.pint("mode", 0), 0, 2);
+    const double q = std::clamp(node.pfloat("resonance", 0.707f), 0.05f, 20.0f);
+    const double cutoff = node.pfloat("cutoff", 4.0f);
+    const BiquadCoefficients coefficients = biquadCoefficients(mode, cutoff, q, fs);
+
+    double z1 = node.runtimeState["z1"];
+    double z2 = node.runtimeState["z2"];
+    const double output = coefficients.b0 * input + z1;
+    z1 = coefficients.b1 * input - coefficients.a1 * output + z2;
+    z2 = coefficients.b2 * input - coefficients.a2 * output;
+    node.runtimeState["z1"] = z1;
+    node.runtimeState["z2"] = z2;
+    out[0] = Value::makeScalar(static_cast<float>(output));
+}
+
+// ---------------------------------------------------------------------------
+// Debug
+// ---------------------------------------------------------------------------
+
+// VU / Digital Meter: the value passes through unchanged, the movement is what
+// gets displayed. 0 VU sits at -18 dBFS.
+void evalMeter(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+               std::vector<Value> &out) {
+    (void)ctx;
+    const float value = scalarFrom(in, 0);
+    out[0] = Value::makeScalar(value);
+
+    const double magnitude = std::fabs(static_cast<double>(value));
+    const float dbfs = magnitude > 1.0e-6 ? static_cast<float>(20.0 * std::log10(magnitude))
+                                          : -120.0f;
+    const float vu = dbfs + 18.0f;  // 0 VU = -18 dBFS
+    const float release = std::clamp(node.pfloat("ballistics", 0.55f), 0.0f, 0.95f);
+    double needle = node.runtimeState["needle"];
+    needle = vu >= needle ? vu : needle * release + vu * (1.0 - release);
+    node.runtimeState["needle"] = needle;
+    node.runtimeState["vu"] = vu;
+    node.runtimeState["db"] = dbfs;
+    node.runtimeState["peak"] = std::max<double>(vu, node.runtimeState["peak"] * 0.99);
+    Node::pushHistory(node.historyA, value, kMeterHistory);
+    ++node.historyCount;
+}
+
+// Guard: non-finite scalars are silenced and the matching lamp is lit. The lamps
+// decay so a single event stays visible for a moment.
+void evalGuard(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+               std::vector<Value> &out) {
+    const float value = scalarFrom(in, 0);
+    const bool isNan = std::isnan(value);
+    const bool positiveInf = std::isinf(value) && value > 0.0f;
+    const bool negativeInf = std::isinf(value) && value < 0.0f;
+    const double fade = std::exp(-static_cast<double>(dtOf(ctx)) / 0.25);
+    auto lamp = [&](const char *key, bool seen) {
+        node.runtimeState[key] = seen ? 1.0 : node.runtimeState[key] * fade;
+    };
+    lamp("nan", isNan);
+    lamp("pos", positiveInf);
+    lamp("neg", negativeInf);
+
+    const bool blocked = isNan || positiveInf || negativeInf;
+    node.runtimeState["blocked"] = blocked ? 1.0 : 0.0;
+    out[0] = Value::makeScalar(blocked ? 0.0f : value);
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -1053,10 +1155,14 @@ void Registry::registerBuiltins() {
         def.description = "Selects a frequency range from the analysis and turns it into a scalar.";
         def.inputs = {PortDesc{"Analysis", PortType::Analysis}};
         def.outputs = {PortDesc{"Value", PortType::Scalar}};
+        // Logarithmic: the ear and the analysis bands are both log-spaced.
+        Param lowHz = makeParam("lowHz", "Low (Hz)", 40.0f, 20.0f, 16000.0f, 1.0f, "Band", true);
+        Param highHz = makeParam("highHz", "High (Hz)", 250.0f, 21.0f, 20000.0f, 1.0f, "Band", true);
+        lowHz.valueFormat = "%.0f Hz";
+        highHz.valueFormat = "%.0f Hz";
         def.params = {
-            // Logarithmic: the ear and the analysis bands are both log-spaced.
-            makeParam("lowHz", "Low (Hz)", 40.0f, 20.0f, 16000.0f, 1.0f, "Band", true),
-            makeParam("highHz", "High (Hz)", 250.0f, 21.0f, 20000.0f, 1.0f, "Band", true),
+            lowHz,
+            highHz,
             makeEnumParam("mode", "Mode", {"Average", "Peak", "Sum"}, 0, "Band"),
             makeParam("gain", "Gain", 1.0f, 0.0f, 8.0f, 0.01f, "Shape"),
             makeParam("curve", "Curve", 1.0f, 0.05f, 4.0f, 0.01f, "Shape"),
@@ -1427,6 +1533,47 @@ void Registry::registerBuiltins() {
         def.evaluate = evalAmount;
         add(std::move(def));
     }
+    {
+        NodeDef def;
+        def.kind = "mod.ringbuffer";
+        def.category = "Modulation";
+        def.label = "Ringbuffer";
+        def.description =
+            "Records the incoming Scalar into a loop buffer. Outputs the live input, the running "
+            "average of the buffer, and the value the read pointer is currently passing over.";
+        def.inputs = {PortDesc{"In", PortType::Scalar}};
+        def.outputs = {PortDesc{"Input", PortType::Scalar},
+                       PortDesc{"Average", PortType::Scalar},
+                       PortDesc{"Buffer", PortType::Scalar}};
+        def.params = {
+            makeIntParam("size", "Size (samples)", 64, 2, 1024, "Buffer"),
+            makeParam("speed", "Loop speed (loops/s)", 0.5f, 0.01f, 8.0f, 0.01f, "Buffer"),
+        };
+        def.evaluate = evalRingbuffer;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "mod.filter";
+        def.category = "Modulation";
+        def.label = "Signal Filter";
+        def.description =
+            "Zero-latency biquad (RBJ, transposed direct form II) for modulation signals: low "
+            "pass, high pass or band pass. Modulation runs one sample per video frame, so the "
+            "filter's sample rate is the project frame rate.";
+        def.inputs = {PortDesc{"In", PortType::Scalar}};
+        def.outputs = {PortDesc{"Out", PortType::Scalar}};
+        Param cutoff = makeParam("cutoff", "Cutoff (Hz)", 4.0f, 0.01f, 200.0f, 0.01f, "Filter",
+                                 true);
+        cutoff.valueFormat = "%.2f Hz";
+        def.params = {
+            makeEnumParam("mode", "Mode", {"Low pass", "High pass", "Band pass"}, 0, "Filter"),
+            cutoff,
+            makeParam("resonance", "Resonance (Q)", 0.707f, 0.05f, 20.0f, 0.001f, "Filter"),
+        };
+        def.evaluate = evalSignalFilter;
+        add(std::move(def));
+    }
 
     // ---- Render ----------------------------------------------------------
     {
@@ -1578,6 +1725,39 @@ void Registry::registerBuiltins() {
         def.params = {};
         def.evaluate = evalOutput;
         def.isSink = true;
+        add(std::move(def));
+    }
+
+    // ---- Debug -----------------------------------------------------------
+    {
+        NodeDef def;
+        def.kind = "dbg.meter";
+        def.category = "Debug";
+        def.label = "VU / Digital Meter";
+        def.description =
+            "Passes a Scalar through untouched and shows it as a classic VU meter (0 VU = "
+            "-18 dBFS) or as a value/time diagram. The needle has fast attack and slow release.";
+        def.inputs = {PortDesc{"In", PortType::Scalar}};
+        def.outputs = {PortDesc{"Out", PortType::Scalar}};
+        def.params = {
+            makeEnumParam("mode", "Display", {"VU meter", "Value graph"}, 0, "Display"),
+            makeParam("ballistics", "Release", 0.55f, 0.0f, 0.95f, 0.01f, "Display"),
+        };
+        def.evaluate = evalMeter;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "dbg.guard";
+        def.category = "Debug";
+        def.label = "Guard";
+        def.description =
+            "Silences non-finite scalars: NaN and +/-Inf inputs become 0. Three lamps show which "
+            "kind of value was last seen.";
+        def.inputs = {PortDesc{"In", PortType::Scalar}};
+        def.outputs = {PortDesc{"Out", PortType::Scalar}};
+        def.params = {};
+        def.evaluate = evalGuard;
         add(std::move(def));
     }
 }

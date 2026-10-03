@@ -17,6 +17,11 @@ constexpr float kVisualHeightSpectrum = 58.0f;
 constexpr float kVisualHeightBand = 34.0f;
 constexpr float kVisualHeightCurve = 64.0f;
 constexpr float kVisualHeightWave = 40.0f;
+constexpr float kVisualHeightVumeter = 74.0f;
+constexpr float kVisualHeightGraph = 52.0f;
+constexpr float kVisualHeightGuard = 46.0f;
+constexpr float kVisualHeightRing = 46.0f;
+constexpr float kVisualHeightFilter = 84.0f;
 
 // Number of columns the spectrum is reduced to. 64 columns with bilinear-ish
 // interpolation is the sweet spot for legibility versus per-frame cost.
@@ -308,6 +313,283 @@ void drawWaveVisual(UiState &state, const Node &node, Rectangle body, float zoom
              withAlpha(t.warn, 0.75f));
 }
 
+// ---------------------------------------------------------------------------
+// Debug: VU / digital meter and guard lamps
+// ---------------------------------------------------------------------------
+
+// VU scale: -20 .. +18 VU, where 0 VU = -18 dBFS.
+constexpr float kVuMin = -20.0f;
+constexpr float kVuMax = 18.0f;
+
+void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
+    (void)zoom;
+    const ui::Theme &t = ui::theme();
+    const Rectangle inner{body.x + ui::s(3.0f), body.y + ui::s(3.0f), body.width - ui::s(6.0f),
+                          body.height - ui::s(6.0f)};
+    drawVisualBackground(body);
+
+    auto reading = [&](const char *key, double fallback) {
+        const auto it = node.runtimeState.find(key);
+        return it == node.runtimeState.end() ? fallback : it->second;
+    };
+    const double dbfs = reading("db", -120.0);
+    const double vu = reading("vu", -120.0);
+    const double needle = std::clamp(reading("needle", vu), static_cast<double>(kVuMin),
+                                     static_cast<double>(kVuMax));
+    const double peak = std::clamp(reading("peak", vu), static_cast<double>(kVuMin),
+                                   static_cast<double>(kVuMax));
+
+    if (node.pint("mode", 0) == 1) {
+        // Value/time diagram: the same shape the Frequency Band block uses.
+        const int capacity = static_cast<int>(node.historyA.size());
+        if (capacity < 2) {
+            ui::drawText(inner, "waiting for a signal", 10.0f, withAlpha(t.textDim, 0.8f),
+                         ui::Align::Center);
+            return;
+        }
+        static thread_local std::vector<float> series;
+        series.assign(static_cast<size_t>(capacity), 0.0f);
+        for (int i = 0; i < capacity; ++i) {
+            const float position = static_cast<float>(i) / static_cast<float>(capacity - 1);
+            series[static_cast<size_t>(i)] =
+                std::clamp(0.5f + 0.5f * Node::historyAt(node.historyA, capacity,
+                                                         node.historyCount, position),
+                           0.0f, 1.0f);
+        }
+        const float midY = inner.y + inner.height * 0.5f;
+        DrawLine(static_cast<int>(inner.x), static_cast<int>(midY),
+                 static_cast<int>(inner.x + inner.width), static_cast<int>(midY),
+                 withAlpha(t.border, 0.6f));
+        drawFilledSeries(inner, series.data(), capacity, withAlpha(t.accent, 0.7f),
+                         withAlpha(t.accent, 0.08f));
+        drawSeriesOutline(inner, series.data(), capacity, withAlpha(t.accent, 0.95f), 0.0f, 1.0f);
+        char text[64];
+        std::snprintf(text, sizeof(text), "%.3f   %.1f dBFS",
+                      Node::historyAt(node.historyA, capacity, node.historyCount, 1.0f),
+                      static_cast<float>(dbfs));
+        ui::drawTextClipped(Rectangle{inner.x + ui::s(3.0f), inner.y, inner.width - ui::s(6.0f),
+                                      ui::s(12.0f)},
+                            text, 9.5f, withAlpha(t.text, 0.9f));
+        return;
+    }
+
+    // Classic VU movement: an arc of radius 1.5x the strip height drawn from a
+    // pivot below the strip, so only the top of the dial is visible.
+    const float pivotX = inner.x + inner.width * 0.5f;
+    const float pivotY = inner.y + inner.height * 1.85f;
+    const float radius = inner.height * 1.6f;
+    const float startAngle = 212.0f;
+    const float endAngle = 328.0f;
+    auto angleFor = [&](float value) {
+        const float fraction = std::clamp((value - kVuMin) / (kVuMax - kVuMin), 0.0f, 1.0f);
+        return (startAngle + (endAngle - startAngle) * fraction) * DEG2RAD;
+    };
+    auto pointOn = [&](float value, float scale) {
+        const float angle = angleFor(value);
+        return Vector2{pivotX + std::cos(angle) * radius * scale,
+                       pivotY + std::sin(angle) * radius * scale};
+    };
+
+    // Arc, ticks and the accented 0 VU mark.
+    const int segments = 48;
+    Vector2 previous = pointOn(kVuMin, 1.0f);
+    for (int i = 1; i <= segments; ++i) {
+        const float value = kVuMin + (kVuMax - kVuMin) * static_cast<float>(i) / segments;
+        const Vector2 point = pointOn(value, 1.0f);
+        DrawLineEx(previous, point, 1.2f, withAlpha(t.border, 0.9f));
+        previous = point;
+    }
+    const float tickValues[] = {-20.0f, -10.0f, -5.0f, -3.0f, -1.0f, 0.0f, 1.0f, 3.0f, 6.0f, 10.0f, 18.0f};
+    for (const float tick : tickValues) {
+        const bool zero = std::fabs(tick) < 0.01f;
+        const Vector2 outer = pointOn(tick, 1.0f);
+        const Vector2 innerPoint = pointOn(tick, 0.88f);
+        DrawLineEx(outer, innerPoint, zero ? 1.8f : 1.0f,
+                   zero ? t.accent : withAlpha(t.textDim, 0.9f));
+    }
+    // Peak hold marker.
+    const Vector2 peakPoint = pointOn(static_cast<float>(peak), 1.04f);
+    DrawCircleV(peakPoint, ui::s(1.8f), withAlpha(t.warn, 0.95f));
+
+    // Needle: green below 0 VU, amber up to +6, red above.
+    const Color needleInk = needle > 6.0 ? t.danger : (needle > 0.0 ? t.warn : t.success);
+    const Vector2 needleStart = pointOn(static_cast<float>(needle), 0.28f);
+    const Vector2 needleEnd = pointOn(static_cast<float>(needle), 0.94f);
+    DrawLineEx(needleStart, needleEnd, 1.8f, needleInk);
+
+    char text[96];
+    // Kept short: "0 VU = -18 dBFS" lives in the block description and README.
+    std::snprintf(text, sizeof(text), "%+.1f dB   %+.1f VU", static_cast<float>(dbfs),
+                  static_cast<float>(vu));
+    ui::drawTextClipped(Rectangle{inner.x + ui::s(3.0f), inner.y + inner.height - ui::s(13.0f),
+                                  inner.width - ui::s(6.0f), ui::s(12.0f)},
+                        text, 9.5f, dbfs > 0.0f ? t.danger : withAlpha(t.text, 0.92f));
+}
+
+void drawGuardVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
+    (void)state;
+    (void)zoom;
+    const ui::Theme &t = ui::theme();
+    const Rectangle inner{body.x + ui::s(3.0f), body.y + ui::s(3.0f), body.width - ui::s(6.0f),
+                          body.height - ui::s(6.0f)};
+    drawVisualBackground(body);
+
+    struct Lamp {
+        const char *key;
+        const char *label;
+        Color colour;
+    };
+    const Lamp lamps[] = {
+        {"pos", "+\u221E", t.danger},
+        {"neg", "-\u221E", t.warn},
+        {"nan", "NaN", t.accentAlt},
+    };
+    const int count = 3;
+    const float slot = inner.width / static_cast<float>(count);
+    const float lampY = inner.y + inner.height * 0.36f;
+    const float radius = std::min(ui::s(9.0f), inner.height * 0.26f);
+    for (int i = 0; i < count; ++i) {
+        const auto it = node.runtimeState.find(lamps[i].key);
+        const float level = it == node.runtimeState.end() ? 0.0f : static_cast<float>(it->second);
+        const float cx = inner.x + slot * (static_cast<float>(i) + 0.5f);
+        const Color dark = palette::modulate(lamps[i].colour, 0.22f);
+        DrawCircleV(Vector2{cx, lampY}, radius, palette::mix(dark, lamps[i].colour, level));
+        DrawCircleLinesV(Vector2{cx, lampY}, radius,
+                         withAlpha(level > 0.05f ? lamps[i].colour : t.border, 0.95f));
+        if (level > 0.35f) {
+            DrawCircleV(Vector2{cx, lampY}, radius * 0.45f, withAlpha(WHITE, level * 0.85f));
+        }
+        ui::drawText(Rectangle{cx - slot * 0.5f, lampY + radius + ui::s(2.0f), slot, ui::s(13.0f)},
+                     lamps[i].label, 11.0f,
+                     withAlpha(level > 0.05f ? lamps[i].colour : t.textDim, 0.95f),
+                     ui::Align::Center, level > 0.05f);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Modulation: ring buffer contents and the signal filter response
+// ---------------------------------------------------------------------------
+
+void drawRingbufferVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
+    (void)state;
+    (void)zoom;
+    const ui::Theme &t = ui::theme();
+    const Rectangle inner{body.x + ui::s(3.0f), body.y + ui::s(3.0f), body.width - ui::s(6.0f),
+                          body.height - ui::s(6.0f)};
+    drawVisualBackground(body);
+
+    const int capacity = static_cast<int>(node.historyA.size());
+    if (capacity < 2) {
+        ui::drawText(inner, "buffer empty", 10.0f, withAlpha(t.textDim, 0.8f), ui::Align::Center);
+        return;
+    }
+    static thread_local std::vector<float> series;
+    series.assign(static_cast<size_t>(capacity), 0.0f);
+    float sum = 0.0f;
+    for (int i = 0; i < capacity; ++i) {
+        const float position = static_cast<float>(i) / static_cast<float>(capacity - 1);
+        const float value = Node::historyAt(node.historyA, capacity, node.historyCount, position);
+        series[static_cast<size_t>(i)] = std::clamp(0.5f + 0.5f * value, 0.0f, 1.0f);
+        sum += value;
+    }
+    const float average = sum / static_cast<float>(capacity);
+    const float midY = inner.y + inner.height * 0.5f;
+    DrawLine(static_cast<int>(inner.x), static_cast<int>(midY),
+             static_cast<int>(inner.x + inner.width), static_cast<int>(midY),
+             withAlpha(t.border, 0.6f));
+    drawFilledSeries(inner, series.data(), capacity, withAlpha(t.accent, 0.55f),
+                     withAlpha(t.accent, 0.06f));
+    drawSeriesOutline(inner, series.data(), capacity, withAlpha(t.accent, 0.9f), 0.0f, 1.0f);
+
+    const float averageY = midY - std::clamp(average, -1.0f, 1.0f) * inner.height * 0.5f;
+    DrawLineEx(Vector2{inner.x, averageY}, Vector2{inner.x + inner.width, averageY}, 1.0f,
+               withAlpha(t.accentAlt, 0.9f));
+
+    const auto phaseIt = node.runtimeState.find("phase");
+    const float phase = phaseIt == node.runtimeState.end() ? 0.0f : static_cast<float>(phaseIt->second);
+    const float readX = inner.x + std::clamp(phase, 0.0f, 1.0f) * inner.width;
+    DrawLine(static_cast<int>(readX), static_cast<int>(inner.y), static_cast<int>(readX),
+             static_cast<int>(inner.y + inner.height), withAlpha(t.warn, 0.85f));
+}
+
+// Filter response plot. The y axis is the pivot's resonance mapping: Q = 10^(dB/20).
+constexpr float kFilterDbMax = 18.0f;
+constexpr float kFilterDbMin = -36.0f;
+
+void filterPlotRects(Rectangle body, Rectangle *inner) {
+    *inner = Rectangle{body.x + ui::s(3.0f), body.y + ui::s(3.0f), body.width - ui::s(6.0f),
+                       body.height - ui::s(6.0f)};
+}
+
+void drawFilterVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
+    (void)zoom;
+    const ui::Theme &t = ui::theme();
+    Rectangle inner;
+    filterPlotRects(body, &inner);
+    drawVisualBackground(body);
+
+    const double fs = std::max(1.0f, state.frameContext.fps);
+    const double nyquist = std::max(1.0, fs * 0.5);
+    const double fMin = 0.01;
+    const double fMax = std::max(fMin * 2.0, nyquist);
+    const int mode = std::clamp(node.pint("mode", 0), 0, 2);
+    const double q = std::clamp(node.pfloat("resonance", 0.707f), 0.05f, 20.0f);
+    const double cutoff =
+        std::clamp(static_cast<double>(node.pfloat("cutoff", 4.0f)), fMin, fMax);
+    const BiquadCoefficients coefficients = biquadCoefficients(mode, cutoff, q, fs);
+
+    auto xFor = [&](double hz) {
+        const double position = std::log(std::max(hz, fMin) / fMin) / std::log(fMax / fMin);
+        return inner.x + static_cast<float>(std::clamp(position, 0.0, 1.0)) * inner.width;
+    };
+    auto yFor = [&](double db) {
+        const double position = (kFilterDbMax - db) / (kFilterDbMax - kFilterDbMin);
+        return inner.y + static_cast<float>(std::clamp(position, 0.0, 1.0)) * inner.height;
+    };
+
+    // Grid: decades plus the 0 dB line.
+    for (double decade = 0.01; decade <= fMax; decade *= 10.0) {
+        const float x = xFor(decade);
+        DrawLine(static_cast<int>(x), static_cast<int>(inner.y), static_cast<int>(x),
+                 static_cast<int>(inner.y + inner.height), withAlpha(t.border, 0.45f));
+    }
+    for (double db : {-24.0, -12.0, 0.0}) {
+        const float y = yFor(db);
+        DrawLine(static_cast<int>(inner.x), static_cast<int>(y),
+                 static_cast<int>(inner.x + inner.width), static_cast<int>(y),
+                 withAlpha(db == 0.0 ? t.accent : t.border, db == 0.0 ? 0.55f : 0.4f));
+    }
+
+    // Magnitude response.
+    const int points = 72;
+    Vector2 previous{};
+    for (int i = 0; i < points; ++i) {
+        const double position = static_cast<double>(i) / static_cast<double>(points - 1);
+        const double hz = fMin * std::pow(fMax / fMin, position);
+        const double db = biquadMagnitudeDb(coefficients, hz, fs);
+        const Vector2 point{xFor(hz), yFor(db)};
+        if (i > 0) DrawLineEx(previous, point, 1.6f, withAlpha(t.accent, 0.95f));
+        previous = point;
+    }
+
+    // Cutoff marker and the interactive pivot (x = cutoff, y = resonance).
+    const float cutoffX = xFor(cutoff);
+    DrawLine(static_cast<int>(cutoffX), static_cast<int>(inner.y), static_cast<int>(cutoffX),
+             static_cast<int>(inner.y + inner.height), withAlpha(t.warn, 0.45f));
+    const float pivotX = cutoffX;
+    const float pivotY = yFor(20.0 * std::log10(std::max(0.05, q)));
+    DrawCircleV(Vector2{pivotX, pivotY}, ui::s(6.5f), withAlpha(t.warn, 0.30f));
+    DrawCircleV(Vector2{pivotX, pivotY}, ui::s(4.2f), t.warn);
+    DrawCircleLinesV(Vector2{pivotX, pivotY}, ui::s(4.2f), withAlpha(BLACK, 0.6f));
+
+    char text[96];
+    std::snprintf(text, sizeof(text), "%.2f Hz   Q %.2f   fs %.0f Hz   (drag the pivot)", cutoff,
+                  q, fs);
+    ui::drawTextClipped(Rectangle{inner.x + ui::s(3.0f), inner.y, inner.width - ui::s(6.0f),
+                                  ui::s(12.0f)},
+                        text, 9.5f, withAlpha(t.text, 0.92f));
+}
+
 }  // namespace
 
 float nodeVisualHeight(const Node &node) {
@@ -315,11 +597,20 @@ float nodeVisualHeight(const Node &node) {
     if (node.kind == "dsp.band") return kVisualHeightBand;
     if (node.kind == "mod.lfo" || node.kind == "mod.automation") return kVisualHeightCurve;
     if (node.kind == "src.audio") return kVisualHeightWave;
+    if (node.kind == "dbg.meter") {
+        return node.pint("mode", 0) == 1 ? kVisualHeightGraph : kVisualHeightVumeter;
+    }
+    if (node.kind == "dbg.guard") return kVisualHeightGuard;
+    if (node.kind == "mod.ringbuffer") return kVisualHeightRing;
+    if (node.kind == "mod.filter") return kVisualHeightFilter;
     return 0.0f;
 }
 
 void drawNodeVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
     if (body.width < 8.0f || body.height < 8.0f) return;
+    // Live content never spills outside its block, whatever it draws.
+    BeginScissorMode(static_cast<int>(body.x), static_cast<int>(body.y),
+                     static_cast<int>(body.width), static_cast<int>(body.height));
     if (node.kind == "dsp.analyze") {
         drawSpectrumVisual(state, node, body, zoom);
     } else if (node.kind == "dsp.band") {
@@ -328,7 +619,35 @@ void drawNodeVisual(UiState &state, const Node &node, Rectangle body, float zoom
         drawCurveVisual(state, node, body, zoom);
     } else if (node.kind == "src.audio") {
         drawWaveVisual(state, node, body, zoom);
+    } else if (node.kind == "dbg.meter") {
+        drawMeterVisual(state, node, body, zoom);
+    } else if (node.kind == "dbg.guard") {
+        drawGuardVisual(state, node, body, zoom);
+    } else if (node.kind == "mod.ringbuffer") {
+        drawRingbufferVisual(state, node, body, zoom);
+    } else if (node.kind == "mod.filter") {
+        drawFilterVisual(state, node, body, zoom);
     }
+    EndScissorMode();
+}
+
+bool nodeVisualHasPivot(const Node &node) { return node.kind == "mod.filter"; }
+
+void nodeVisualPivotDrag(UiState &state, Node &node, Rectangle body, Vector2 mouse) {
+    if (node.kind != "mod.filter") return;
+    Rectangle inner;
+    filterPlotRects(body, &inner);
+    const double fs = std::max(1.0f, state.frameContext.fps);
+    const double fMin = 0.01;
+    const double fMax = std::max(fMin * 2.0, fs * 0.5);
+    const float x = std::clamp((mouse.x - inner.x) / std::max(1.0f, inner.width), 0.0f, 1.0f);
+    const float y = std::clamp((mouse.y - inner.y) / std::max(1.0f, inner.height), 0.0f, 1.0f);
+    const double cutoff = fMin * std::pow(fMax / fMin, x);
+    const double db = kFilterDbMax + (kFilterDbMin - kFilterDbMax) * y;
+    const float q = std::clamp(static_cast<float>(std::pow(10.0, db / 20.0)), 0.05f, 20.0f);
+    node.setFloat("cutoff", static_cast<float>(cutoff));
+    node.setFloat("resonance", q);
+    state.project.dirty = true;
 }
 
 }  // namespace pf

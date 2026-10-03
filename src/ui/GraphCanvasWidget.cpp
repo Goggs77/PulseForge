@@ -50,6 +50,13 @@ float headerFraction(const Node &node) {
     return headerHeight() / nodeTotalHeight(node);
 }
 
+// Screen rect of a block's live content, shared by the drawing and hit testing.
+Rectangle visualRect(const Node &node, const Rectangle &box) {
+    if (visualFraction(node) <= 0.0f) return Rectangle{};
+    return Rectangle{box.x, box.y + box.height * (headerFraction(node) + portAreaFraction(node)),
+                     box.width, box.height * visualFraction(node)};
+}
+
 float rowFraction(const Node &node) {
     return portRowHeight() / nodeTotalHeight(node);
 }
@@ -205,6 +212,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
     // ---- hit testing ------------------------------------------------------
     state.canvas.hoveredNode = -1;
     state.canvas.hoveredPortNode = -1;
+    state.canvas.hoveredVisualNode = -1;
     bool overPort = false;
     if (inside) {
         for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
@@ -235,6 +243,15 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                 }
             }
             if (overPort) break;
+            // Blocks with an interactive pivot (Signal Filter) claim the mouse
+            // over their live content before the node drag does.
+            if (nodeVisualHasPivot(node)) {
+                const Rectangle visual = visualRect(node, box);
+                if (visual.width > 0.0f && ui::hovered(visual)) {
+                    state.canvas.hoveredVisualNode = node.id;
+                    break;
+                }
+            }
             if (ui::hovered(box)) {
                 state.canvas.hoveredNode = node.id;
                 break;
@@ -342,10 +359,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                                box.width - 12.0f * view.zoom, footerHeight};
         // Live content (spectrum, level bar, value/time curve, waveform).
         if (visualFraction(node) > 0.0f) {
-            const Rectangle visual{box.x,
-                                   box.y + box.height * (headerFraction(node) + portAreaFraction(node)),
-                                   box.width, box.height * visualFraction(node)};
-            drawNodeVisual(state, node, visual, view.zoom);
+            drawNodeVisual(state, node, visualRect(node, box), view.zoom);
         }
         // Mid-height badge with the operator or range; blocks with live content
         // already show what they are doing.
@@ -376,6 +390,18 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                 state.canvas.draggingLink = true;
                 state.canvas.linkFromNode = state.canvas.hoveredPortNode;
                 state.canvas.linkFromPort = state.canvas.hoveredPortIndex;
+            } else if (state.canvas.hoveredVisualNode > 0) {
+                // Pivot drag inside the block: move the parameter, not the block.
+                Node *node = graph.find(state.canvas.hoveredVisualNode);
+                if (node) {
+                    selectNode(state, node->id);
+                    state.canvas.visualDragNode = node->id;
+                    const Rectangle world = nodeBounds(graph, *node);
+                    const Rectangle box{worldToScreen(Vector2{world.x, world.y}).x,
+                                        worldToScreen(Vector2{world.x, world.y}).y,
+                                        world.width * view.zoom, world.height * view.zoom};
+                    nodeVisualPivotDrag(state, *node, visualRect(*node, box), mouse);
+                }
             } else if (state.canvas.hoveredNode > 0) {
                 selectNode(state, state.canvas.hoveredNode);
                 Node *node = graph.find(state.canvas.hoveredNode);
@@ -404,6 +430,19 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                 state.canvas.draggingLink = false;
             }
             state.canvas.draggingNode = false;
+            state.canvas.visualDragNode = -1;
+        }
+        if (state.canvas.visualDragNode > 0) {
+            Node *node = graph.find(state.canvas.visualDragNode);
+            if (node && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                const Rectangle world = nodeBounds(graph, *node);
+                const Rectangle box{worldToScreen(Vector2{world.x, world.y}).x,
+                                    worldToScreen(Vector2{world.x, world.y}).y,
+                                    world.width * view.zoom, world.height * view.zoom};
+                nodeVisualPivotDrag(state, *node, visualRect(*node, box), mouse);
+            } else {
+                state.canvas.visualDragNode = -1;
+            }
         }
         if (state.canvas.draggingNode) {
             Node *node = graph.find(state.canvas.dragNodeId);

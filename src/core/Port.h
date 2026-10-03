@@ -203,6 +203,9 @@ struct Param {
     float minValue = 0.0f;
     float maxValue = 1.0f;
     float step = 0.0f;       // 0 = continuous
+    // printf format for the value readout; empty picks a default from the kind
+    // ("%.3g", or "%.0f Hz" for logarithmic parameters).
+    std::string valueFormat;
     // Frequency-style parameters: the slider tracks logarithmically and the
     // value readout is a rounded integer, which matches how the analysis
     // itself maps Hz.
@@ -267,5 +270,20 @@ Color colorFromHsv(float h, float s, float v, float a = 1.0f);
 // Inverse of colorFromHsv; h, s and v are returned in 0..1.
 void colorToHsv(Color color, float *h, float *s, float *v);
 Color paramColorAt(const Param &param);
+
+// ---------------------------------------------------------------------------
+// Biquad (RBJ cookbook, transposed direct form II)
+// ---------------------------------------------------------------------------
+
+// mode: 0 = low pass, 1 = high pass, 2 = band pass.
+struct BiquadCoefficients {
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0;
+    double a1 = 0.0, a2 = 0.0;
+    bool valid = false;
+};
+
+BiquadCoefficients biquadCoefficients(int mode, double cutoffHz, double q, double sampleRate);
+// Magnitude response in dB at `freqHz`, used by the Signal Filter plot.
+double biquadMagnitudeDb(const BiquadCoefficients &coefficients, double freqHz, double sampleRate);
 
 }  // namespace pf

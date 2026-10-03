@@ -295,6 +295,63 @@ Color colorFromHsv(float h, float s, float v, float a) {
 
 Color paramColorAt(const Param &param) { return param.color; }
 
+BiquadCoefficients biquadCoefficients(int mode, double cutoffHz, double q, double sampleRate) {
+    BiquadCoefficients coefficients;
+    if (sampleRate <= 0.0 || cutoffHz <= 0.0 || q <= 0.0) return coefficients;
+    const double nyquist = sampleRate * 0.5;
+    const double frequency = std::clamp(cutoffHz, 0.0001, nyquist * 0.98);
+    const double w0 = 2.0 * 3.14159265358979323846 * frequency / sampleRate;
+    const double cosw = std::cos(w0);
+    const double sinw = std::sin(w0);
+    const double alpha = sinw / (2.0 * q);
+
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0;
+    switch (mode) {
+        case 1:  // high pass
+            b0 = (1.0 + cosw) * 0.5;
+            b1 = -(1.0 + cosw);
+            b2 = (1.0 + cosw) * 0.5;
+            break;
+        case 2:  // band pass (constant skirt gain, peak gain = Q)
+            b0 = alpha;
+            b1 = 0.0;
+            b2 = -alpha;
+            break;
+        default:  // low pass
+            b0 = (1.0 - cosw) * 0.5;
+            b1 = 1.0 - cosw;
+            b2 = (1.0 - cosw) * 0.5;
+            break;
+    }
+    const double a0 = 1.0 + alpha;
+    const double a1 = -2.0 * cosw;
+    const double a2 = 1.0 - alpha;
+
+    coefficients.b0 = b0 / a0;
+    coefficients.b1 = b1 / a0;
+    coefficients.b2 = b2 / a0;
+    coefficients.a1 = a1 / a0;
+    coefficients.a2 = a2 / a0;
+    coefficients.valid = true;
+    return coefficients;
+}
+
+double biquadMagnitudeDb(const BiquadCoefficients &coefficients, double freqHz, double sampleRate) {
+    if (!coefficients.valid || sampleRate <= 0.0) return 0.0;
+    const double w = 2.0 * 3.14159265358979323846 * std::max(0.0, freqHz) / sampleRate;
+    const double cos1 = std::cos(w), sin1 = std::sin(w);
+    const double cos2 = std::cos(2.0 * w), sin2 = std::sin(2.0 * w);
+    const double numeratorReal = coefficients.b0 + coefficients.b1 * cos1 + coefficients.b2 * cos2;
+    const double numeratorImag = -(coefficients.b1 * sin1 + coefficients.b2 * sin2);
+    const double denominatorReal = 1.0 + coefficients.a1 * cos1 + coefficients.a2 * cos2;
+    const double denominatorImag = -(coefficients.a1 * sin1 + coefficients.a2 * sin2);
+    const double numerator = std::sqrt(numeratorReal * numeratorReal + numeratorImag * numeratorImag);
+    const double denominator =
+        std::sqrt(denominatorReal * denominatorReal + denominatorImag * denominatorImag);
+    if (denominator < 1e-12) return 0.0;
+    return 20.0 * std::log10(std::max(1e-9, numerator / denominator));
+}
+
 void colorToHsv(Color color, float *h, float *s, float *v) {
     const float r = color.r / 255.0f;
     const float g = color.g / 255.0f;

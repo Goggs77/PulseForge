@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -511,6 +512,147 @@ int main(int argc, char **argv) {
                                       webmOpus.encoder + " mp4 opus=" + opusToMp4.encoder);
                     } else {
                         std::printf("  audio    : PCM->FLAC in Matroska, container rules ok\n");
+                    }
+                }
+
+                // Debug and modulation blocks: passthrough metering, non-finite
+                // guarding, the ring buffer and the modulation biquad.
+                if (result == 0) {
+                    bool ok = true;
+                    std::string what;
+                    EvalContext blockCtx;
+                    blockCtx.fps = 60.0f;
+                    blockCtx.duration = 4.0;
+                    blockCtx.width = 320;
+                    blockCtx.height = 180;
+
+                    // VU meter: the value must reach the output untouched, and
+                    // 0.125 (-18 dBFS) has to read as 0 VU.
+                    Graph meterGraph;
+                    Node *meterSource = meterGraph.addNode("math.constant", 0, 0);
+                    Node *meter = meterGraph.addNode("dbg.meter", 200, 0);
+                    if (!meterSource || !meter) {
+                        ok = false;
+                        what = "meter blocks are not registered";
+                    } else {
+                        // Amplitude of -18 dBFS: this has to read as 0 VU.
+                        const float minus18 = std::pow(10.0f, -18.0f / 20.0f);
+                        meterSource->setFloat("value", minus18);
+                        meterGraph.connect(meterSource->id, 0, meter->id, 0);
+                        meterGraph.evaluate(blockCtx);
+                        if (std::fabs(meter->outputs[0].scalar - minus18) > 1e-6f) {
+                            ok = false;
+                            what = "the VU meter changed its input";
+                        } else if (std::fabs(meter->runtimeState["vu"]) > 0.01) {
+                            ok = false;
+                            what = "-18 dBFS should read as 0 VU";
+                        }
+                    }
+
+                    // Guard: NaN and both infinities are silenced and flagged.
+                    Graph guardGraph;
+                    Node *guardSource = guardGraph.addNode("math.constant", 0, 0);
+                    Node *guard = guardGraph.addNode("dbg.guard", 200, 0);
+                    if (!guardSource || !guard) {
+                        ok = false;
+                        what = "the Guard block is not registered";
+                    } else {
+                        guardGraph.connect(guardSource->id, 0, guard->id, 0);
+                        const float probes[] = {std::numeric_limits<float>::quiet_NaN(),
+                                                std::numeric_limits<float>::infinity(),
+                                                -std::numeric_limits<float>::infinity(), 0.25f};
+                        const char *lamps[] = {"nan", "pos", "neg", nullptr};
+                        for (int i = 0; i < 4 && ok; ++i) {
+                            guardSource->setFloat("value", probes[i]);
+                            guardGraph.evaluate(blockCtx);
+                            if (lamps[i] && guard->runtimeState[lamps[i]] < 0.9) {
+                                ok = false;
+                                what = std::string("the ") + lamps[i] + " lamp did not light";
+                            }
+                            const float expected = i == 3 ? 0.25f : 0.0f;
+                            if (std::fabs(guard->outputs[0].scalar - expected) > 1e-6f) {
+                                ok = false;
+                                what = "the Guard did not silence a non-finite value";
+                            }
+                        }
+                    }
+
+                    // Ring buffer: live value, running average and the looping tap.
+                    Graph ringGraph;
+                    Node *ringSource = ringGraph.addNode("math.constant", 0, 0);
+                    Node *ring = ringGraph.addNode("mod.ringbuffer", 200, 0);
+                    float ringAverage = 0.0f;
+                    if (!ringSource || !ring) {
+                        ok = false;
+                        what = "the Ringbuffer block is not registered";
+                    } else {
+                        ring->setInt("size", 16);
+                        ring->setFloat("speed", 1.0f);
+                        ringSource->setFloat("value", 0.5f);
+                        ringGraph.connect(ringSource->id, 0, ring->id, 0);
+                        for (int i = 0; i < 40; ++i) ringGraph.evaluate(blockCtx);
+                        const float live = ring->outputs[0].scalar;
+                        const float average = ring->outputs[1].scalar;
+                        const float buffered = ring->outputs[2].scalar;
+                        ringAverage = average;
+                        if (std::fabs(live - 0.5f) > 1e-6f ||
+                            std::fabs(average - 0.5f) > 1e-4f) {
+                            ok = false;
+                            what = "ring buffer input/average";
+                        } else if (buffered < -0.001f || buffered > 0.501f) {
+                            ok = false;
+                            what = "ring buffer tap left the buffer";
+                        }
+                    }
+
+                    // Signal Filter: DC passes the low pass, is removed by the
+                    // high pass and by the band pass.
+                    auto filterStep = [&](int mode, float *result) {
+                        Graph filterGraph;
+                        Node *filterSource = filterGraph.addNode("math.constant", 0, 0);
+                        Node *filterNode = filterGraph.addNode("mod.filter", 200, 0);
+                        if (!filterSource || !filterNode) return false;
+                        filterSource->setFloat("value", 1.0f);
+                        filterNode->setInt("mode", mode);
+                        filterNode->setFloat("cutoff", 10.0f);
+                        filterNode->setFloat("resonance", 0.707f);
+                        filterGraph.connect(filterSource->id, 0, filterNode->id, 0);
+                        for (int i = 0; i < 240; ++i) filterGraph.evaluate(blockCtx);
+                        *result = filterNode->outputs[0].scalar;
+                        return true;
+                    };
+                    float lowPass = 0.0f, highPass = 0.0f, bandPass = 0.0f;
+                    if (!filterStep(0, &lowPass) || !filterStep(1, &highPass) ||
+                        !filterStep(2, &bandPass)) {
+                        ok = false;
+                        what = "the Signal Filter block is not registered";
+                    } else if (lowPass < 0.95f || std::fabs(highPass) > 0.05f ||
+                               std::fabs(bandPass) > 0.05f) {
+                        ok = false;
+                        what = "biquad response is wrong (lp=" + std::to_string(lowPass) +
+                               " hp=" + std::to_string(highPass) +
+                               " bp=" + std::to_string(bandPass) + ")";
+                    }
+
+                    // The published response has to match the coefficients: the
+                    // low pass is flat well below cutoff and -3 dB at cutoff.
+                    const BiquadCoefficients low = biquadCoefficients(0, 10.0, 0.707, 60.0);
+                    const double passband = biquadMagnitudeDb(low, 0.5, 60.0);
+                    const double atCutoff = biquadMagnitudeDb(low, 10.0, 60.0);
+                    const double stopband = biquadMagnitudeDb(low, 29.0, 60.0);
+                    if (std::fabs(passband) > 0.5 || std::fabs(atCutoff + 3.0) > 0.7 ||
+                        stopband > -12.0) {
+                        ok = false;
+                        what = "biquad magnitude response";
+                    }
+
+                    if (ok) {
+                        std::printf("  blocks   : meter %.3f, guard lamps, ringbuffer average "
+                                    "%.3f, biquad lp=%.3f hp=%.3f bp=%.3f\n",
+                                    meterSource ? meterSource->pfloat("value") : 0.0f, ringAverage,
+                                    lowPass, highPass, bandPass);
+                    } else {
+                        result = fail("debug/modulation blocks: " + what);
                     }
                 }
             }

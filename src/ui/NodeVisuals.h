@@ -18,4 +18,9 @@ float nodeVisualHeight(const Node &node);
 // the analysis and audio the previews read from.
 void drawNodeVisual(UiState &state, const Node &node, Rectangle body, float zoom);
 
+// Some blocks put an interactive pivot in their live content (the Signal Filter's
+// cutoff/resonance handle). The canvas asks these instead of dragging the block.
+bool nodeVisualHasPivot(const Node &node);
+void nodeVisualPivotDrag(UiState &state, Node &node, Rectangle body, Vector2 mouse);
+
 }  // namespace pf

@@ -45,6 +45,10 @@ struct CanvasState {
     int linkFromNode = -1;
     int linkFromPort = -1;
 
+    // A block's live content can own the mouse (the Signal Filter's pivot).
+    int hoveredVisualNode = -1;
+    int visualDragNode = -1;
+
     std::string lastConnectError;
 };
 

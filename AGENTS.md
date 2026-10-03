@@ -110,7 +110,17 @@ docs         rendering notes and the README overlay image
   `Node::dynamicInputs` (the Shader block derives them from the uniforms its file
   uses). Never index `def->inputs` directly - use the accessors.
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
-  the Frequency Band Hz sliders, formatted `"%.0f Hz"`).
+  the Frequency Band and Signal Filter Hz sliders) and an optional
+  `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty
+  `valueFormat` falls back to `%.3g`, or `%.0f Hz` for logarithmic parameters.
+- A block's live content can take mouse input of its own: mark it in
+  `nodeVisualHasPivot()` and implement `nodeVisualPivotDrag()` (the Signal
+  Filter's cutoff/resonance pivot is the reference). The canvas hit-tests the
+  visual rect before the node drag, and `drawNodeVisual` is scissored to the
+  block body so nothing can spill out.
+- New categories need nothing beyond `def.category`: the palette, its captions
+  and the graph accent colour are generated from the registry ("Debug" is the
+  most recent addition).
 - UI text goes through the atlas helpers: `ui::drawText`, `drawTextClipped`,
   `drawTextWrapped`/`textWrappedHeight`. Do not use CrystalGUI's
   `CguiDrawTextPro`; it renders thin strokes and wraps with a guessed line count.

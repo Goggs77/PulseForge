@@ -162,7 +162,9 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
             // Logarithmic parameters are frequencies: the track follows the way
             // the ear (and the analysis) divides the spectrum, and the readout is
             // a whole number of Hz instead of scientific notation.
-            const char *valueFormat = param.logarithmic ? "%.0f Hz" : "%.3g";
+            const std::string defaultFormat = param.logarithmic ? "%.0f Hz" : "%.3g";
+            const char *valueFormat =
+                param.valueFormat.empty() ? defaultFormat.c_str() : param.valueFormat.c_str();
             if (ui::slider(Rectangle{cursor.x, cursor.y + 14.0f, cursor.width, kRow()}, nullptr,
                            &param.value, param.minValue, param.maxValue, param.step, valueFormat,
                            ui::widgetId(node.id, param.key.c_str()), param.logarithmic)) {
