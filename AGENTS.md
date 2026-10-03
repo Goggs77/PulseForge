@@ -52,9 +52,9 @@ metadata, text editing (caret, selection, clipboard), shader ports derived from 
 audio matching rules, legacy Audio Output migration, ADC/DAC conversion, and the
 exclusive Audio Output routing (processed, dry and silent exports, plus the
 monitor's source/silent/processed decisions). It also checks the ADC -> DAC
-Unity round trip (bit-exact), the carrier-shaped Math path, and the input-driven
-Spectrum Analyzer (silent / precomputed / live). When NVENC is usable it also
-renders a real GPU export.
+Unity round trip (bit-exact), the per-sample audio-rate tanh chain, and the
+input-driven Spectrum Analyzer (silent / precomputed / live). When NVENC is
+usable it also renders a real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
 `selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
@@ -190,14 +190,23 @@ docs         rendering notes and the README overlay image
   rewiring the Audio Output takes effect immediately; parameter edits apply on
   the next Play. Pre-rendered DAC buffers must not be overwritten by the live
   window path (`evalDac` keeps buffers larger than one video frame).
-- ADC/DAC are the bridge between the Audio and Scalar domains. ADC carries the
-  waveform as a hidden `Value::carrier` and emits a per-frame control value
-  (Unity by default, RMS/Peak as a follower); scalar blocks propagate the
-  carrier in `Graph::evaluate`, and DAC applies the control to the carried
-  waveform sample-accurately (so a Unity round trip is bit-exact) or
-  synthesises from the value when no carrier is present. Rendered buffers record
-  where their first sample sits with `AudioBuffer::startFrame`, which is what
-  lets a downstream ADC map `audioTime` onto a partially rendered buffer.
+- ADC/DAC define **audio-rate regions**. `Graph::evaluate` detects every
+  ADC -> Scalar -> DAC path with `buildAudioRatePlan` and evaluates its
+  pure-Scalar nodes (Math, Modulation, Timing, Debug) once per audio sample:
+  ADC reads the waveform sample, the intermediate blocks transform it, and DAC
+  writes it back at the same rate. Pure-Scalar processors feeding the region run
+  at audio rate too; window producers (Spectrum Analyzer, Dynamics) keep their
+  frame-rate evaluation and hold their value inside the region. Nodes downstream
+  of the region run after the sample loop and see the last sample, which is the
+  downsample back to video rate. `EvalContext::audioRate`/`audioSampleRate` and
+  `rateOf()`/`dtOf()` are how rate-aware blocks pick their timing; do not read
+  `ctx.fps` directly in a block that can sit inside a region.
+- DAC output buffers are prepared per video frame by `prepareDacBuffer`, which
+  keeps the same `audioRenderKey` reuse/append rules as the exporter and never
+  mutates a pre-rendered monitor buffer during live playback. Rendered buffers
+  record where their first sample sits with `AudioBuffer::startFrame`.
+  `Value::carrier` remains only as the fallback for a DAC outside a detected
+  region (a frame-rate Scalar applied to a waveform).
 - The Spectrum Analyzer is input-driven: it emits no Analysis when its Audio
   port is unconnected, uses `ctx.analysis` only when that port is exactly the
   decoded clip, and otherwise measures a live window with `analyzeWindow`.

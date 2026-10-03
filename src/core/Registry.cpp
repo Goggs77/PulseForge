@@ -26,7 +26,14 @@ constexpr int kBandHistory = 48;
 // Samples kept for the VU / Digital Meter's value-time diagram (4 s at 60 fps).
 constexpr int kMeterHistory = 240;
 
-float dtOf(const EvalContext &ctx) { return ctx.fps > 1.0f ? 1.0f / ctx.fps : 1.0f / 60.0f; }
+// Evaluation rate of the current pass: the audio sample rate inside an
+// ADC -> DAC region, otherwise the project frame rate.
+float rateOf(const EvalContext &ctx) {
+    if (ctx.audioRate) return static_cast<float>(std::max(1, ctx.audioSampleRate));
+    return ctx.fps > 1.0f ? ctx.fps : 60.0f;
+}
+
+float dtOf(const EvalContext &ctx) { return 1.0f / rateOf(ctx); }
 
 float logFrequencyPosition(float hz, int sampleRate) {
     const float nyquist = std::max(1000.0f, static_cast<float>(sampleRate) * 0.5f);
@@ -1012,16 +1019,17 @@ void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
         sum += Node::historyAt(node.historyA, size, node.historyCount, position);
     }
 
-    // Read pointer: `speed` loops per second, advanced one video frame at a time
-    // so the movement is independent of the project frame rate.
-    const float fps = std::max(1.0f, ctx.fps);
+    // Read pointer: `speed` loops per second, advanced one evaluation at a time
+    // so the movement is independent of the evaluation rate (video frame rate
+    // normally, audio sample rate inside an ADC -> DAC region).
+    const float fs = rateOf(ctx);
     float speed = node.pfloat("speed", 0.5f);
     if (in.size() > 1 && in[1].type == PortType::Scalar) {
         speed *= std::pow(2.0f, std::clamp(in[1].scalar, -8.0f, 8.0f));
     }
     speed = std::clamp(speed, 0.001f, 64.0f);
     node.publishEffective("speed", speed);
-    double phase = node.runtimeState["phase"] + speed / fps;
+    double phase = node.runtimeState["phase"] + speed / fs;
     phase -= std::floor(phase);
     node.runtimeState["phase"] = phase;
     const float buffered = Node::historyAt(node.historyA, size, node.historyCount,
@@ -1032,12 +1040,13 @@ void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     out[2] = Value::makeScalar(buffered);
 }
 
-// Signal Filter: RBJ biquad in transposed direct form II. The modulation runs at
-// the video frame rate, so one sample is processed per frame with fs = fps.
+// Signal Filter: RBJ biquad in transposed direct form II. Outside an audio-rate
+// region the modulation runs at the video frame rate with fs = fps; inside one
+// it processes every audio sample with fs = sample rate.
 void evalSignalFilter(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                       std::vector<Value> &out) {
     const double input = scalarFrom(in, 0);
-    const double fs = std::max(1.0f, ctx.fps);
+    const double fs = rateOf(ctx);
     const int mode = std::clamp(node.pint("mode", 0), 0, 2);
     // Modulation inputs shift cutoff and resonance in octaves (x2 per unit), the
     // musical way to sweep a filter.
@@ -1715,10 +1724,10 @@ void Registry::registerBuiltins() {
         def.category = "DSP";
         def.label = "ADC";
         def.description =
-            "Audio to Scalar. Emits a per-frame control value and carries the waveform, so "
-            "Math and Modulation blocks can shape the audio and a DAC applies the result "
-            "sample-accurately. Unity is a lossless round trip; RMS/Peak follow loudness "
-            "and transients instead.";
+            "Audio to Scalar. On a path to a DAC the Scalar is the waveform at the audio "
+            "sample rate, so every Math/Modulation block between them processes every sample. "
+            "Without a DAC downstream, Unity passes the waveform through and RMS/Peak follow "
+            "loudness at video rate.";
         def.inputs = {PortDesc{"Audio", PortType::Audio}};
         def.outputs = {PortDesc{"Value", PortType::Scalar, "control"}};
         def.params = {
@@ -1733,10 +1742,10 @@ void Registry::registerBuiltins() {
         def.category = "DSP";
         def.label = "DAC";
         def.description =
-            "Scalar to Audio. Each video frame's control value is applied to the carried "
-            "waveform at the clip's rate (ADC carries it automatically), so a modulation "
-            "chain shapes the audio sample-accurately. Without a carrier the value becomes "
-            "the sample itself. Patch the output into an Audio Output to hear it.";
+            "Scalar to Audio. Ends an ADC -> DAC region: the per-sample Scalar stream becomes "
+            "audio at the incoming rate, so the blocks before it processed the waveform "
+            "itself. Without an ADC upstream the per-frame value becomes the sample. Patch "
+            "the output into an Audio Output to hear it.";
         def.inputs = {PortDesc{"Value", PortType::Scalar}};
         def.outputs = {PortDesc{"Audio", PortType::Audio, "rendered clip"}};
         def.params = {
@@ -2107,15 +2116,15 @@ void Registry::registerBuiltins() {
         def.category = "Modulation";
         def.label = "Signal Filter";
         def.description =
-            "Zero-latency biquad (RBJ, transposed direct form II) for modulation signals: low "
-            "pass, high pass or band pass. Modulation runs one sample per video frame, so the "
-            "filter's sample rate is the project frame rate. Cutoff and resonance can be "
-            "modulated in octaves.";
+            "Zero-latency biquad (RBJ, transposed direct form II): low pass, high pass or "
+            "band pass. Outside an ADC -> DAC region it filters modulation at the video frame "
+            "rate; inside one it filters every audio sample at the audio rate. Cutoff and "
+            "resonance can be modulated in octaves.";
         def.inputs = {PortDesc{"In", PortType::Scalar},
                       PortDesc{"Cutoff", PortType::Scalar, "Hz x 2^input"},
                       PortDesc{"Resonance", PortType::Scalar, "Q x 2^input"}};
         def.outputs = {PortDesc{"Out", PortType::Scalar}};
-        Param cutoff = makeParam("cutoff", "Cutoff (Hz)", 4.0f, 0.01f, 200.0f, 0.01f, "Filter",
+        Param cutoff = makeParam("cutoff", "Cutoff (Hz)", 4.0f, 0.01f, 20000.0f, 0.01f, "Filter",
                                  true);
         cutoff.valueFormat = "%.2f Hz";
         def.params = {

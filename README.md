@@ -259,8 +259,8 @@ executable when *Save preferences* is pressed.
 | Envelope Follower | Scalar | Scalar | Attack/release, threshold, gain, floor |
 | Curve / Remap | Scalar | Scalar | Input range to output range with power, smoothstep and clamping |
 | Dynamics | Audio, Pre-gain, Threshold, Ratio, Attack, Release, Post-gain | Audio | Zero-latency single-band compressor / downward expander with an optional 0 dBFS limiter (Hard Clip or Soft Clip and independent attack/release). The block draws dry and wet loudness in a 4:3 dBFS graph; the modulation ports follow the usual conventions (levels scale by `1 + input`, threshold adds 24 dB per unit, times shift by octaves) |
-| ADC | Audio | Value | Carries the waveform and emits a per-frame control value: Unity (default) makes ADC -> DAC a lossless round trip, RMS/Peak follow loudness for Math and Modulation |
-| DAC | Value | Audio | Applies each frame's control value to the carried waveform sample-accurately; without a carrier the value becomes the sample itself. Patch it into an Audio Output to hear it |
+| ADC | Audio | Value | Starts an audio-rate region: the Scalar is the waveform at the audio sample rate, so Math, Modulation, Timing and Debug blocks between it and a DAC process every sample (x2.0838 then tanh is real saturation, not a gain) |
+| DAC | Value | Audio | Ends an audio-rate region and converts the per-sample Scalar stream back to Audio at the same rate. A DAC without an ADC upstream still synthesises from the per-frame Scalar. Patch it into an Audio Output to hear it |
 
 ### Math
 
@@ -297,7 +297,7 @@ input on **Geometry**.
 | Automation | Depth, Offset | Value | Keyframed curve edited in the block; unipolar 0..1 or bipolar -1..1, with modulatable depth/offset |
 | Amount / VCA | In, Amount, Gain, Offset | Out | Scales a signal by a constant or by a second modulation input, with quantising; gain scales and offset is added |
 | Ringbuffer | In, Speed | Input, Average, Buffer | Records the scalar into a loop buffer of 2..1024 samples; `Input` is the live value, `Average` the running average of the buffer and `Buffer` the sample the looping read pointer (loops/second, octave modulation) is passing over. The block draws the buffer with the read position marked |
-| Signal Filter | In, Cutoff, Resonance | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Modulation runs one sample per video frame, so the filter's sample rate **is the project frame rate**; the cutoff and resonance inputs shift by octaves. The block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)) |
+| Signal Filter | In, Cutoff, Resonance | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Its sample rate is the current evaluation rate: the project frame rate for modulation, or the audio sample rate inside an ADC -> DAC region; the cutoff and resonance inputs shift by octaves. The block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)) |
 
 Modulated parameters are live: the inspector handles (and the Signal Filter's
 response plot, the Ringbuffer's read marker, and so on) follow the value the block
@@ -466,6 +466,15 @@ as `Value`s (tagged unions of scalar/colour/text/audio/analysis/image) and write
 its outputs into the node, which downstream blocks read. Image values are shared
 pointers to render targets owned by the renderer's pool, which is recycled at the
 end of each frame.
+
+An **ADC -> ... -> DAC** path changes that walk: the evaluator compiles the
+region between them and runs its pure-Scalar blocks (Math, Modulation, Timing,
+Debug) once per audio sample instead of once per video frame, so a multiply or a
+`tanh` shapes the waveform itself. Scalar processors feeding the region also run
+at audio rate; window producers such as the Spectrum Analyzer and Dynamics stay
+at video rate and hold their value inside the region. Nodes downstream of the
+region are evaluated after the sample loop with the last sample, which is the
+downsample back to video rate.
 
 Analysis is computed once per media load, in parallel across all cores: FFT
 frames (default 2048/512) are reduced to 64 log-spaced bands plus per-frame rms,

@@ -22,6 +22,10 @@ struct EvalContext {
     int height = 1080;
     bool offline = false;   // true while exporting
     double audioTime = 0.0; // position inside the audio clip
+    // True while an ADC -> Scalar -> DAC region is evaluated once per audio
+    // sample instead of once per video frame.
+    bool audioRate = false;
+    int audioSampleRate = 48000;
 
     // Frame-level analysis, filled in once per frame by the renderer.
     float bass = 0.0f;
@@ -98,6 +102,9 @@ public:
     // Scratch values kept between frames by stateful blocks (envelopes, LFOs,
     // particles). Never serialised.
     std::unordered_map<std::string, double> runtimeState;
+    // Input values reused by the evaluator so audio-rate regions do not
+    // allocate per sample. Never serialised.
+    std::vector<Value> inputScratch;
     // Live analysis of a Spectrum Analyzer's own Audio input when it is not the
     // project's decoded clip (processed audio). Never serialised.
     AnalysisPtr runtimeAnalysis;
@@ -111,6 +118,9 @@ public:
     long long audioRenderStart = -1;
     long long audioRenderFrames = 0;
     std::string audioRenderKey;
+    // Write cursor used by the audio-rate scheduler; -1 when the window is
+    // already cached and must not be touched. Never serialised.
+    long long audioRenderWrite = -1;
 
     // Rolling sample buffers kept for the in-block visualisations. Not
     // serialised; the editor reads them directly while drawing the graph.

@@ -1053,6 +1053,146 @@ int main(int argc, char **argv) {
                         }
                     }
 
+                    // A nonlinear audio-rate chain: x * 2.0838 through tanh has
+                    // to match the same formula sample by sample.
+                    if (result == 0) {
+                        Graph chain;
+                        Node *src = chain.addNode("src.audio", 0, 0);
+                        Node *adc = chain.addNode("dsp.adc", 200, 0);
+                        Node *arith = chain.addNode("math.arithmetic", 400, 0);
+                        Node *hyper = chain.addNode("math.hyperbolic", 600, 0);
+                        Node *dac = chain.addNode("dsp.dac", 800, 0);
+                        bool chainOk = src && adc && arith && hyper && dac;
+                        std::string chainWhat;
+                        if (!chainOk) {
+                            chainWhat = "blocks missing";
+                        } else {
+                            arith->setInt("op", 2);  // multiply
+                            arith->setFloat("bValue", 2.083770752f);
+                            std::string why;
+                            chainOk = chain.connect(src->id, 0, adc->id, 0, &why) &&
+                                      chain.connect(adc->id, 0, arith->id, 0, &why) &&
+                                      chain.connect(arith->id, 0, hyper->id, 0, &why) &&
+                                      chain.connect(hyper->id, 2, dac->id, 0, &why);
+                            if (!chainOk) chainWhat = why;
+                        }
+                        if (chainOk) {
+                            auto tone = std::make_shared<AudioBuffer>();
+                            tone->channels = 2;
+                            tone->sampleRate = 48000;
+                            tone->frameCount = 96000;
+                            tone->samples.resize(static_cast<size_t>(tone->frameCount) * 2);
+                            for (long long i = 0; i < tone->frameCount; ++i) {
+                                const float sample =
+                                    0.4f * std::sin(6.2831853f * 440.0f * i / 48000.0f);
+                                tone->samples[static_cast<size_t>(i) * 2] = sample;
+                                tone->samples[static_cast<size_t>(i) * 2 + 1] = sample;
+                            }
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 2.0;
+                            ctx.offline = true;
+                            ctx.audio = tone;
+                            for (int step = 0; step < 60; ++step) {
+                                ctx.frame = 60 + step;
+                                ctx.audioTime = 1.0 + static_cast<double>(step) / 60.0;
+                                chain.evaluate(ctx);
+                            }
+                            const AudioBuffer *out = dac->audioRenderOutput.get();
+                            if (!out || out->frameCount != 48000) {
+                                chainOk = false;
+                                chainWhat = "wrong rendered window";
+                            } else {
+                                const size_t base = 48000u * 2u;
+                                double maxDiff = 0.0;
+                                for (size_t i = 0; i < out->samples.size(); ++i) {
+                                    const double expected =
+                                        std::tanh(2.083770752 * tone->samples[base + i]);
+                                    maxDiff = std::max(
+                                        maxDiff,
+                                        std::fabs(static_cast<double>(out->samples[i]) - expected));
+                                }
+                                if (maxDiff > 1e-5) {
+                                    chainOk = false;
+                                    chainWhat = "tanh chain max diff " + std::to_string(maxDiff);
+                                } else {
+                                    std::printf("  bridges  : audio-rate tanh chain max diff %.1e\n",
+                                                maxDiff);
+                                }
+                            }
+                        }
+                        if (!chainOk) result = fail("audio-rate chain: " + chainWhat);
+                    }
+
+                    // A Dynamics block grows its buffer every frame; the audio
+                    // region must keep appending one continuous track instead of
+                    // restarting when that buffer's length changes.
+                    if (result == 0) {
+                        auto tone = std::make_shared<AudioBuffer>();
+                        tone->channels = 2;
+                        tone->sampleRate = 48000;
+                        tone->frameCount = 48000;
+                        tone->samples.resize(static_cast<size_t>(tone->frameCount) * 2);
+                        for (long long i = 0; i < tone->frameCount; ++i) {
+                            const float sample =
+                                0.4f * std::sin(6.2831853f * 440.0f * i / 48000.0f);
+                            tone->samples[static_cast<size_t>(i) * 2] = sample;
+                            tone->samples[static_cast<size_t>(i) * 2 + 1] = sample;
+                        }
+                        Graph grown;
+                        Node *src = grown.addNode("src.audio", 0, 0);
+                        Node *dynamics = grown.addNode("dsp.dynamics", 200, 0);
+                        Node *adc = grown.addNode("dsp.adc", 400, 0);
+                        Node *dac = grown.addNode("dsp.dac", 600, 0);
+                        bool grownOk = src && dynamics && adc && dac;
+                        std::string grownWhat;
+                        if (!grownOk) {
+                            grownWhat = "blocks missing";
+                        } else {
+                            dynamics->setFloat("threshold", 0.0f);
+                            dynamics->setFloat("ratio", 1.0f);
+                            dynamics->setBool("limiter", false);
+                            std::string why;
+                            grownOk = grown.connect(src->id, 0, dynamics->id, 0, &why) &&
+                                      grown.connect(dynamics->id, 0, adc->id, 0, &why) &&
+                                      grown.connect(adc->id, 0, dac->id, 0, &why);
+                            if (!grownOk) grownWhat = why;
+                        }
+                        if (grownOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.offline = true;
+                            ctx.audio = tone;
+                            for (int frame = 0; frame < 60; ++frame) {
+                                ctx.frame = frame;
+                                ctx.audioTime = static_cast<double>(frame) / 60.0;
+                                grown.evaluate(ctx);
+                            }
+                            const AudioBuffer *out = dac->audioRenderOutput.get();
+                            if (!out || out->frameCount != 48000) {
+                                grownOk = false;
+                                grownWhat = "the growing source restarted the DAC buffer";
+                            } else {
+                                double maxDiff = 0.0;
+                                for (size_t i = 0; i < out->samples.size(); ++i) {
+                                    maxDiff = std::max(
+                                        maxDiff, std::fabs(static_cast<double>(out->samples[i]) -
+                                                           tone->samples[i]));
+                                }
+                                if (maxDiff > 1e-5) {
+                                    grownOk = false;
+                                    grownWhat = "growing source diff " + std::to_string(maxDiff);
+                                } else {
+                                    std::printf("  bridges  : growing Dynamics source kept the track "
+                                                "(diff %.1e)\n",
+                                                maxDiff);
+                                }
+                            }
+                        }
+                        if (!grownOk) result = fail("audio-rate growing source: " + grownWhat);
+                    }
+
                     // The Spectrum Analyzer depends only on the Audio wired into
                     // its port: silent when unconnected, the whole-file analysis
                     // for the source clip, and a live window for processed audio.
