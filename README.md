@@ -310,13 +310,14 @@ input on **Geometry**.
 | Automation | Depth, Offset | Value | Keyframed curve edited in the block; unipolar 0..1 or bipolar -1..1, with modulatable depth/offset. Slice mode places the curve on a Start..Finish window drawn on the timeline (two draggable handles, colour-coded per automation, lanes scroll when they do not all fit): before Start the output holds the curve's first value, after Finish its last one, and a Start dragged past the Finish plays the curve backwards. Slice takes precedence over Loop |
 | Amount / VCA | In, Amount, Gain, Offset | Out | Scales a signal by a constant or by a second modulation input, with quantising; gain scales and offset is added |
 | Ringbuffer | In, Speed | Input, Average, Buffer | Records the scalar into a loop buffer of 2..1024 samples with an O(1) running sum, so it is usable at audio rate; `Input` is the live value, `Average` the running average and `Buffer` the sample the looping read pointer (loops/second, octave modulation) is passing over. The block draws the buffer with the read position marked |
-| Signal Filter | In, Cutoff, Resonance | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Its sample rate is the current evaluation rate: the project frame rate for modulation, or the audio sample rate inside an ADC -> DAC region; the cutoff and resonance inputs shift by octaves. The block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)) |
+| Signal Filter | In, Cutoff, Resonance | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Its sample rate is the current evaluation rate: the project frame rate for modulation, or the audio sample rate inside an ADC -> DAC region; the cutoff and resonance inputs shift by octaves. The block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)); the plot's frequency axis and the pivot's mapping use the rate the filter actually ran with, so they span the audio Nyquist inside an ADC -> DAC region and the frame rate's one outside it |
 
 Modulated parameters are live: the inspector handles (and the Signal Filter's
 response plot, the Ringbuffer's read marker, and so on) follow the value the block
 actually used, so an LFO visibly moves the control it is patched into. Dragging a
 slider shows its base value while the drag lasts, then returns to the modulated
-readout.
+readout. The Signal Filter's plot follows the rate as well as the value: its
+frequency axis and pivot use the rate the filter last ran with, not the frame rate.
 
 ### Debug
 

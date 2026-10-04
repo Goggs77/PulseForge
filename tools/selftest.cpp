@@ -3237,6 +3237,71 @@ int main(int argc, char **argv) {
                         }
                     }
 
+                    // A Signal Filter between the ADC and the DAC runs at the
+                    // audio rate, so its in-block response plot (and its pivot)
+                    // must use that rate's Nyquist instead of the frame rate.
+                    // The block publishes the rate it ran with for the canvas.
+                    if (result == 0) {
+                        Graph filterGraph;
+                        const int srcId = filterGraph.addNode("src.audio", 0, 0)->id;
+                        const int adcId = filterGraph.addNode("dsp.adc", 200, 0)->id;
+                        const int filterId = filterGraph.addNode("mod.filter", 350, 0)->id;
+                        const int dacId = filterGraph.addNode("dsp.dac", 500, 0)->id;
+                        const int outId = filterGraph.addNode("out.audio", 700, 0)->id;
+                        std::string why;
+                        bool filterOk = filterGraph.connect(srcId, 0, adcId, 0, &why) &&
+                                        filterGraph.connect(adcId, 0, filterId, 0, &why) &&
+                                        filterGraph.connect(filterId, 0, dacId, 0, &why) &&
+                                        filterGraph.connect(adcId, 1, dacId, 1, &why) &&
+                                        filterGraph.connect(dacId, 0, outId, 0, &why);
+                        std::string filterWhat;
+                        if (!filterOk) filterWhat = "could not wire the filter region: " + why;
+                        if (filterOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.audio = clip.buffer();
+                            ctx.audioSampleRate = 48000;
+                            ctx.frame = 0;
+                            ctx.time = 0.0;
+                            ctx.audioTime = 0.0;
+                            filterGraph.evaluate(ctx);
+                            Node *node = filterGraph.find(filterId);
+                            const double rate =
+                                node ? node->runtimeState["filter.rate"] : 0.0;
+                            if (std::fabs(rate - 48000.0) > 0.5) {
+                                filterOk = false;
+                                filterWhat = "the filter published the frame rate (" +
+                                             std::to_string(rate) + ")";
+                            }
+                        }
+                        // Outside a region it still follows the frame rate.
+                        if (filterOk) {
+                            Graph plain;
+                            const int sourceId = plain.addNode("math.constant", 0, 0)->id;
+                            const int plainFilter = plain.addNode("mod.filter", 200, 0)->id;
+                            if (plain.connect(sourceId, 0, plainFilter, 0, &why)) {
+                                EvalContext ctx;
+                                ctx.fps = 60.0f;
+                                ctx.duration = 1.0;
+                                plain.evaluate(ctx);
+                                Node *node = plain.find(plainFilter);
+                                const double rate =
+                                    node ? node->runtimeState["filter.rate"] : 0.0;
+                                if (std::fabs(rate - 60.0) > 0.5) {
+                                    filterOk = false;
+                                    filterWhat = "the filter lost the frame rate outside a region";
+                                }
+                            }
+                        }
+                        if (!filterOk) {
+                            result = fail("filter visual rate: " + filterWhat);
+                        } else {
+                            std::printf("  filter   : the response plot follows the audio rate in "
+                                        "an ADC -> DAC region\n");
+                        }
+                    }
+
                     // A processed Analysis input must measure the same window in
                     // preview and in export. The analyzer keeps its own history of
                     // what reaches its port, so a one-video-frame window is not
@@ -3385,9 +3450,14 @@ int main(int argc, char **argv) {
                             modWhat = "the LFO frequency input did not shift the rate";
                         }
 
-                        // Beat Pulse: a +1 tempo input doubles the BPM, halving
-                        // the beat length so the phase lands on the next pulse.
-                        auto pulseAt = [&](float tempoInput, float *value) {
+                        // Beat Pulse: a +1 tempo input doubles the BPM, so the beat
+                        // must land at half the period. Measure the period the block
+                        // actually fires at - scan time for the next beat (the pulse
+                        // decays towards zero between beats and jumps back up to 1.0
+                        // on one) - instead of pinning one absolute beat length: the
+                        // block owns the constant that maps BPM x division to seconds
+                        // and it may be retuned.
+                        auto pulsePeriod = [&](float tempoInput, double *period) {
                             Graph graph;
                             Node *source = graph.addNode("math.constant", 0, 0);
                             Node *pulse = graph.addNode("time.pulse", 200, 0);
@@ -3399,19 +3469,35 @@ int main(int argc, char **argv) {
                             graph.connect(source->id, 0, pulse->id, 0);
                             EvalContext ctx;
                             ctx.fps = 60.0f;
-                            ctx.time = 0.0625;              // half a beat at 120 BPM
-                            graph.evaluate(ctx);
-                            *value = pulse->outputs[0].scalar;
-                            return true;
+                            const double step = 1.0 / 4000.0;   // 0.25 ms
+                            double previousValue = -1.0;
+                            double previousTime = 0.0;
+                            for (int i = 1; i <= 8000; ++i) {   // up to 2 s
+                                ctx.time = step * i;
+                                graph.evaluate(ctx);
+                                const double value = pulse->outputs[0].scalar;
+                                if (previousValue >= 0.0 && value - previousValue > 0.1) {
+                                    // A beat landed inside (previousTime, time].
+                                    *period = 0.5 * (previousTime + ctx.time);
+                                    return true;
+                                }
+                                previousValue = value;
+                                previousTime = ctx.time;
+                            }
+                            return false;
                         };
-                        float plainPulse = 0.0f, modulatedPulse = 0.0f;
-                        if (modOk && (!pulseAt(0.0f, &plainPulse) ||
-                                      !pulseAt(1.0f, &modulatedPulse))) {
+                        double plainPulse = 0.0, modulatedPulse = 0.0;
+                        const bool pulseFound = modOk && pulsePeriod(0.0f, &plainPulse) &&
+                                                pulsePeriod(1.0f, &modulatedPulse);
+                        if (modOk && !pulseFound) {
                             modOk = false;
-                            modWhat = "the Beat Pulse block is missing";
-                        } else if (modOk && (plainPulse > 0.6f || modulatedPulse < 0.9f)) {
+                            modWhat = "the Beat Pulse block is missing or never fires";
+                        } else if (modOk && std::fabs(plainPulse - 2.0 * modulatedPulse) >
+                                                   0.05 * plainPulse) {
                             modOk = false;
-                            modWhat = "the Beat Pulse tempo input did not retime the pulse";
+                            modWhat = "the Beat Pulse tempo input did not retime the pulse (" +
+                                      std::to_string(plainPulse) + " s vs " +
+                                      std::to_string(modulatedPulse) + " s)";
                         }
 
                         // Signal Filter: a +2 cutoff input opens the filter, so a

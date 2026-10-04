@@ -81,8 +81,13 @@ change rebuilds its ports/parameters and re-matches the links by name, that a
 migrated Geometry element actually draws, that the waveform display fills the
 bar and its rolling history reaches the export span, that a Dynamics feeding an
 ADC -> DAC region stays continuous across a high-refresh preview, and that a
-modulated Dynamics pre-gain ramps instead of stepping. When NVENC is usable it
-also renders a real GPU export.
+modulated Dynamics pre-gain ramps instead of stepping. The modulation-input
+check covers the LFO frequency, Beat Pulse tempo, Signal Filter cutoff,
+Ringbuffer speed and Automation offset ports - the Beat Pulse one measures the
+period the block fires at rather than pinning an absolute beat length, so
+retuning BPM x division does not break it - and the filter check asserts the
+response plot follows the audio rate inside an ADC -> DAC region and the frame
+rate outside one. When NVENC is usable it also renders a real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
 `selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
@@ -330,6 +335,12 @@ docs         rendering notes and the README overlay image
   downsample back to video rate. `EvalContext::audioRate`/`audioSampleRate` and
   `rateOf()`/`dtOf()` are how rate-aware blocks pick their timing; do not read
   `ctx.fps` directly in a block that can sit inside a region.
+- A rate-aware block's *visuals* follow the same rule: `evalSignalFilter`
+  publishes the rate it ran with in `Node::runtimeState["filter.rate"]`, and
+  `NodeVisuals::filterRate` (the response plot and the pivot drag) reads it,
+  falling back to `ctx.fps` before the first evaluation. An in-block frequency
+  axis drawn from `ctx.fps` would show a frame-rate Nyquist over an audio-rate
+  signal. `runtimeState` is evaluation scratch - never serialise the key.
 - ADC/DAC are multi-channel: the `channels` parameter (1..8, default 2) builds
   dynamic Scalar ports named left/right/ch3... via
   `Registry::applyChannelPorts` (`Node::dynamicOutputs` for ADC,

@@ -570,6 +570,16 @@ void filterPlotRects(Rectangle body, Rectangle *inner) {
                        body.height - inset * 2.0f};
 }
 
+// The rate the Signal Filter last ran with. Inside an ADC -> DAC region that is
+// the audio sample rate, so the plot's Nyquist (and the pivot's cutoff mapping)
+// follows the audio instead of the project frame rate; before the first
+// evaluation it falls back to the frame rate.
+double filterRate(const UiState &state, const Node &node) {
+    const auto it = node.runtimeState.find("filter.rate");
+    if (it != node.runtimeState.end() && it->second > 0.0) return it->second;
+    return std::max(1.0f, state.frameContext.fps);
+}
+
 void drawFilterVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
     (void)zoom;
     const ui::Theme &t = ui::theme();
@@ -577,7 +587,7 @@ void drawFilterVisual(UiState &state, const Node &node, Rectangle body, float zo
     filterPlotRects(body, &inner);
     drawVisualBackground(body);
 
-    const double fs = std::max(1.0f, state.frameContext.fps);
+    const double fs = filterRate(state, node);
     const double nyquist = std::max(1.0, fs * 0.5);
     const double fMin = 0.01;
     const double fMax = std::max(fMin * 2.0, nyquist);
@@ -881,7 +891,7 @@ void nodeVisualPivotDrag(UiState &state, Node &node, Rectangle body, Vector2 mou
     if (node.kind != "mod.filter") return;
     Rectangle inner;
     filterPlotRects(body, &inner);
-    const double fs = std::max(1.0f, state.frameContext.fps);
+    const double fs = filterRate(state, node);
     const double fMin = 0.01;
     const double fMax = std::max(fMin * 2.0, fs * 0.5);
     const float x = std::clamp((mouse.x - inner.x) / std::max(1.0f, inner.width), 0.0f, 1.0f);

@@ -1419,6 +1419,10 @@ void evalSignalFilter(Node &node, EvalContext &ctx, const std::vector<Value> &in
                       std::vector<Value> &out) {
     const double input = scalarFrom(in, 0);
     const double fs = rateOf(ctx);
+    // The in-block response plot has to use the rate the filter actually ran
+    // with: the project frame rate for a modulation signal, the audio rate
+    // inside an ADC -> DAC region. Never serialised.
+    node.runtimeState["filter.rate"] = fs;
     const int mode = std::clamp(node.pint("mode", 0), 0, 2);
     // Modulation inputs shift cutoff and resonance in octaves (x2 per unit), the
     // musical way to sweep a filter.
