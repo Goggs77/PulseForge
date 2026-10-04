@@ -674,6 +674,9 @@ bool Exporter::run(Renderer &renderer, Project &project, const ExportRequest &re
         ExportProgress progress;
         progress.frame = frameCount;
         progress.frameCount = frameCount;
+        // The closing call has no loop iteration to take a time from; report the
+        // end so a caller driving a progress indicator lands on 100%.
+        progress.videoTime = end;
         progress.elapsed = GetTime() - wallStart;
         progress.fps = progress.elapsed > 0.0 ? frameCount / progress.elapsed : 0.0;
         progress.renderMs = totalRenderMs / std::max(1, frameCount);

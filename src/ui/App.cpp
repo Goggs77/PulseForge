@@ -1049,6 +1049,10 @@ void performExport(UiState &state) {
     request.overwrite = true;
 
     double lastDraw = 0.0;
+    // The export drives the editor's own progress indicators (the timeline
+    // playhead and the preview scrub bar) and puts the playhead back where the
+    // user left it when the run is over.
+    const double playheadBefore = state.playhead;
     bool cancelled = false;
     std::string error;
     const std::vector<unsigned char> *embedded =
@@ -1066,6 +1070,11 @@ void performExport(UiState &state) {
                           progress.frame, progress.frameCount, progress.fps,
                           std::max(0.0, progress.remaining), progress.renderMs);
             state.exportStatus = status;
+            // Updated before the redraw throttle so the bars show the frame the
+            // export is actually on, not the frame of the last redraw.
+            state.playhead = std::clamp(
+                progress.videoTime, 0.0,
+                std::max(0.0, state.project.effectiveDuration(state.clip.duration())));
 
             const double now = GetTime();
             // A Self Reference has to update once per exported frame to stay
@@ -1118,6 +1127,7 @@ void performExport(UiState &state) {
     state.exporting = false;
     state.exportProgress = 0.0f;
     state.exportStatus.clear();
+    state.playhead = playheadBefore;
     if (cancelled) {
         setStatus(state, "Export cancelled", true);
     } else if (!ok) {

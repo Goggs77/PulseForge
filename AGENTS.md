@@ -313,6 +313,12 @@ docs         rendering notes and the README overlay image
   leaves whole-track buffers whose windows the preview's reuse check would accept
   as fresh, and the monitor would then never be handed a new sample again (the
   app went silent after an export).
+- The editor follows an export in its own indicators: `performExport` sets
+  `state.playhead` from `ExportProgress::videoTime` (before the redraw throttle,
+  so the bars show the frame actually rendering) and restores the previous
+  playhead afterwards. Keep the closing `ExportProgress` call reporting
+  `videoTime = end`, or the bar would jump back to zero on the last callback and
+  a Self Reference capture records that glitch.
 - ADC/DAC define **audio-rate regions**. `Graph::evaluate` detects every
   ADC -> Scalar -> DAC path with `buildAudioRatePlan` and evaluates its
   pure-Scalar nodes (Math, Modulation, Timing, Debug) once per audio sample:

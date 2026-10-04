@@ -460,6 +460,10 @@ buffer object so the GPU copy of frame *n* overlaps with the CPU upload of frame
 *n-1*, and written into ffmpeg's stdin as `rawvideo rgba`. Nothing is written to
 disk in between.
 
+While an export runs the timeline playhead and the preview scrub bar follow it
+frame by frame (the playhead returns to where you left it when the run ends), so
+the editor itself shows how far the render is.
+
 Container presets:
 
 | Container | Video | Audio | Notes |

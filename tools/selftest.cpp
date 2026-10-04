@@ -1438,10 +1438,22 @@ int main(int argc, char **argv) {
                         request.overwrite = true;
                         request.audioSampleRate = 48000;
                         std::string exportError;
+                        double lastProgressTime = -1.0;
+                        bool progressAdvanced = true;
                         ok = Exporter::run(renderer, mediaProject, request, AudioPtr{}, nullptr,
-                                           nullptr, nullptr, &exportError);
+                                           [&](const ExportProgress &progress) {
+                                               if (progress.videoTime < lastProgressTime) {
+                                                   progressAdvanced = false;
+                                               }
+                                               lastProgressTime = progress.videoTime;
+                                           },
+                                           nullptr, &exportError);
                         if (!ok) {
                             what = "media export: " + exportError;
+                        } else if (!progressAdvanced ||
+                                   lastProgressTime < mediaProject.video.duration - 1e-3) {
+                            ok = false;
+                            what = "the export progress did not advance to the end";
                         } else if (!ffmpeg::probe("selftest_media.mp4").ok) {
                             ok = false;
                             what = "the exported media video is unreadable";
