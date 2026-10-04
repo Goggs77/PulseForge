@@ -555,8 +555,10 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                // Geometry's old spectrum/waveform shapes migrate to Spectrum,
-                // and the remaining primitive indices are remapped.
+                // Geometry's old spectrum/waveform shapes migrate to the
+                // Spectrum presets that draw the same element (with their
+                // parameters), and the remaining primitive indices are
+                // remapped.
                 if (result == 0) {
                     const std::string legacyGeometryPath = "selftest_legacy_geometry.pforge";
                     std::ofstream legacyGeometry(legacyGeometryPath.c_str(), std::ios::binary);
@@ -571,9 +573,16 @@ int main(int argc, char **argv) {
     { "id": 1, "kind": "dsp.analyze", "title": "Spectrum Analyzer", "x": 0, "y": 0,
       "enabled": true, "params": {} },
     { "id": 2, "kind": "geom.primitives", "title": "Geometry", "x": 200, "y": 0,
-      "enabled": true, "params": { "shape": 3, "colorA": "#FF0000FF" } },
+      "enabled": true, "params": { "shape": 3, "count": 48, "radius": 0.75, "thickness": 9.5,
+                                   "spin": 0.25, "colorA": "#FF0000FF" } },
     { "id": 3, "kind": "geom.primitives", "title": "Geometry", "x": 400, "y": 0,
       "enabled": true, "params": { "shape": 7 } },
+    { "id": 5, "kind": "geom.primitives", "title": "Geometry", "x": 400, "y": 200,
+      "enabled": true, "params": { "shape": 6, "radius": 0.5, "thickness": 3.5 } },
+    { "id": 6, "kind": "geom.primitives", "title": "Geometry", "x": 400, "y": 400,
+      "enabled": true, "params": { "shape": 4 } },
+    { "id": 7, "kind": "geom.primitives", "title": "Geometry", "x": 400, "y": 600,
+      "enabled": true, "params": { "shape": 5 } },
     { "id": 4, "kind": "out.video", "title": "Video Output", "x": 600, "y": 0,
       "enabled": true, "params": {} }
   ],
@@ -588,25 +597,209 @@ int main(int argc, char **argv) {
                                      &renderer.shaders())) {
                         result = fail("legacy geometry project failed to load: " + legacyError);
                     } else {
-                        const Node *spectrum = legacy.graph.find(2);
+                        const std::vector<std::string> presets = Registry::spectrumPresetNames();
+                        const auto presetIndex = [&](const char *name) {
+                            for (size_t i = 0; i < presets.size(); ++i) {
+                                if (presets[i] == name) return static_cast<int>(i);
+                            }
+                            return -1;
+                        };
+                        const Node *radial = legacy.graph.find(2);
                         const Node *primitive = legacy.graph.find(3);
-                        const std::vector<std::string> &effects = ShaderLibrary::effectNames();
-                        int radialIndex = 0;
-                        for (size_t i = 0; i < effects.size(); ++i) {
-                            if (effects[i] == "radial_spectrum") radialIndex = static_cast<int>(i);
-                        }
-                        const bool spectrumOk =
-                            spectrum && spectrum->kind == "render.spectrum" &&
-                            spectrum->pint("preset", -1) == radialIndex &&
-                            legacy.graph.findInputLink(2, 0) != nullptr;
+                        const Node *line = legacy.graph.find(5);
+                        const Node *bars = legacy.graph.find(6);
+                        const Node *ring = legacy.graph.find(7);
+                        const bool spectrumOk = radial && radial->kind == "render.spectrum" &&
+                                                radial->pint("preset", -1) ==
+                                                    presetIndex("radial_bars") &&
+                                                radial->pint("count", -1) == 48 &&
+                                                std::fabs(radial->pfloat("radius", 0.0f) -
+                                                          0.75f) < 1e-4f &&
+                                                std::fabs(radial->pfloat("thickness", 0.0f) -
+                                                          9.5f) < 1e-4f &&
+                                                std::fabs(radial->pfloat("spin", 0.0f) -
+                                                          0.25f) < 1e-4f &&
+                                                radial->pcolor("colorA").r == 255 &&
+                                                legacy.graph.findInputLink(2, 0) != nullptr;
                         const bool primitiveOk =
                             primitive && primitive->kind == "geom.primitives" &&
                             primitive->pint("shape", -1) == 3;
-                        if (!spectrumOk || !primitiveOk) {
-                            result = fail("legacy geometry was not migrated to Spectrum/primitives");
+                        const bool lineOk = line && line->kind == "render.spectrum" &&
+                                            line->pint("preset", -1) ==
+                                                presetIndex("waveform_line") &&
+                                            std::fabs(line->pfloat("radius", 0.0f) - 0.5f) <
+                                                1e-4f;
+                        const bool shapesOk =
+                            bars && bars->kind == "render.spectrum" &&
+                            bars->pint("preset", -1) == presetIndex("bar_spectrum") && ring &&
+                            ring->kind == "render.spectrum" &&
+                            ring->pint("preset", -1) == presetIndex("waveform_ring");
+                        if (!spectrumOk || !primitiveOk || !lineOk || !shapesOk) {
+                            result =
+                                fail("legacy geometry was not migrated to Spectrum/primitives");
                         } else {
-                            std::printf("  legacy   : Geometry spectrum shape -> Spectrum, "
-                                        "primitive indices remapped\n");
+                            std::printf("  legacy   : Geometry elements -> Spectrum presets "
+                                        "(parameters kept), primitives remapped\n");
+                        }
+                    }
+                }
+
+                // Every Spectrum preset exposes its own ports and Inspector
+                // parameters; switching preset rebuilds both and carries input
+                // links over by name (dropping the ones that no longer exist).
+                if (result == 0) {
+                    Graph graph;
+                    Node *analyzer = graph.addNode("dsp.analyze", 0.0f, 0.0f);
+                    Node *spectrum = graph.addNode("render.spectrum", 200.0f, 0.0f);
+                    Node *mod = graph.addNode("math.constant", 200.0f, 140.0f);
+                    const std::vector<std::string> presets = Registry::spectrumPresetNames();
+                    const auto presetIndex = [&](const char *name) {
+                        for (size_t i = 0; i < presets.size(); ++i) {
+                            if (presets[i] == name) return static_cast<int>(i);
+                        }
+                        return -1;
+                    };
+                    const auto hasInput = [](const Node &node, const char *name) {
+                        for (const PortDesc &port : node.inputPorts()) {
+                            if (port.name == name) return true;
+                        }
+                        return false;
+                    };
+                    std::string what;
+                    bool ok = analyzer && spectrum && mod && presetIndex("plasma") >= 0 &&
+                              presetIndex("radial_bars") >= 0;
+                    if (!ok) {
+                        what = "Spectrum preset list is missing an effect";
+                    } else {
+                        std::string why;
+                        ok = graph.connect(analyzer->id, 0, spectrum->id, 0, &why);  // Analysis
+                        if (ok) ok = graph.connect(mod->id, 0, spectrum->id, 2, &why);  // Feedback
+                        if (!ok) what = why;
+                    }
+                    if (ok) {
+                        // The default (passthrough) schema: shader ports and a
+                        // Feedback parameter, no Geometry ports.
+                        ok = hasInput(*spectrum, "Feedback") && !hasInput(*spectrum, "Position") &&
+                             spectrum->find("feedback") != nullptr;
+                        if (!ok) what = "the default preset does not expose its shader schema";
+                    }
+                    if (ok) {
+                        spectrum->setInt("preset", presetIndex("plasma"));
+                        EvalContext probe;
+                        probe.fps = 60.0f;
+                        graph.evaluate(probe);
+                        ok = hasInput(*spectrum, "Feedback") && hasInput(*spectrum, "speed") &&
+                             hasInput(*spectrum, "complexity") &&
+                             spectrum->find("speed") != nullptr &&
+                             spectrum->find("complexity") != nullptr &&
+                             graph.findInputLink(spectrum->id, 0) != nullptr &&
+                             graph.findInputLink(spectrum->id, 2) != nullptr;
+                        if (!ok) what = "a shader preset does not expose its own ports/params";
+                    }
+                    if (ok) {
+                        spectrum->setFloat("speed", 2.5f);
+                        spectrum->setInt("preset", presetIndex("gradient"));
+                        EvalContext probe;
+                        probe.fps = 60.0f;
+                        graph.evaluate(probe);
+                        ok = hasInput(*spectrum, "speed") && !hasInput(*spectrum, "complexity") &&
+                             std::fabs(spectrum->pfloat("speed", 0.0f) - 2.5f) < 1e-4f;
+                        if (!ok) what = "switching preset lost a shared parameter";
+                    }
+                    if (ok) {
+                        // A Geometry preset has no Feedback port, so that link
+                        // is dropped while the Analysis link stays.
+                        spectrum->setInt("preset", presetIndex("radial_bars"));
+                        EvalContext probe;
+                        probe.fps = 60.0f;
+                        graph.evaluate(probe);
+                        ok = hasInput(*spectrum, "Position") && !hasInput(*spectrum, "Feedback") &&
+                             spectrum->find("count") != nullptr &&
+                             spectrum->find("radius") != nullptr &&
+                             spectrum->find("feedback") == nullptr &&
+                             graph.findInputLink(spectrum->id, 0) != nullptr &&
+                             graph.findInputLink(spectrum->id, 2) == nullptr;
+                        if (!ok) what = "a Geometry preset did not rebuild its ports/params";
+                    }
+                    if (!ok) {
+                        result = fail("Spectrum preset schema: " + what);
+                    } else {
+                        std::printf("  spectrum : preset schemas rebuild ports and parameters\n");
+                    }
+                }
+
+                // The migrated Geometry elements actually draw into their Image
+                // instead of only allocating a black target.
+                if (result == 0) {
+                    Graph graph;
+                    Node *src = graph.addNode("src.audio", 0.0f, 0.0f);
+                    Node *analyzer = graph.addNode("dsp.analyze", 200.0f, 0.0f);
+                    Node *spectrum = graph.addNode("render.spectrum", 400.0f, 0.0f);
+                    Node *output = graph.addNode("out.video", 700.0f, 0.0f);
+                    std::string why;
+                    bool ok = src && analyzer && spectrum && output &&
+                              graph.connect(src->id, 0, analyzer->id, 0, &why) &&
+                              graph.connect(analyzer->id, 0, spectrum->id, 0, &why) &&
+                              graph.connect(spectrum->id, 0, output->id, 0, &why);
+                    if (!ok) {
+                        result = fail("Geometry preset render: " + why);
+                    } else {
+                        const std::vector<std::string> presets =
+                            Registry::spectrumPresetNames();
+                        for (size_t i = 0; i < presets.size(); ++i) {
+                            if (presets[i] == "radial_bars") {
+                                spectrum->setInt("preset", static_cast<int>(i));
+                            }
+                        }
+                        // Resolve the migrated preset's schema before its
+                        // parameters are edited (the graph does this itself on
+                        // the next evaluation).
+                        EvalContext shape;
+                        shape.fps = 30.0f;
+                        shape.width = 320;
+                        shape.height = 180;
+                        graph.evaluate(shape);
+                        spectrum->setFloat("radius", 0.6f);
+                        spectrum->setFloat("thickness", 8.0f);
+                        EvalContext ctx;
+                        ctx.width = 320;
+                        ctx.height = 180;
+                        ctx.fps = 30.0f;
+                        ctx.duration = 1.0;
+                        ctx.time = 0.5;
+                        ctx.frame = 15;
+                        ctx.audioTime = 0.5;
+                        ctx.audio = clip.buffer();
+                        ctx.analysis = analysis;
+                        std::string renderError;
+                        if (!renderer.renderFrame(graph, ctx, &renderError)) {
+                            result = fail("Geometry preset render: " + renderError);
+                        } else {
+                            const Node *node = graph.find(spectrum->id);
+                            ImageBufferPtr image =
+                                node && !node->outputs.empty() ? node->outputs[0].image : nullptr;
+                            long long brightness = 0;
+                            if (image && image->valid()) {
+                                Image pixels = LoadImageFromTexture(image->texture.texture);
+                                if (pixels.data) {
+                                    const unsigned char *data =
+                                        static_cast<const unsigned char *>(pixels.data);
+                                    const size_t count = static_cast<size_t>(pixels.width) *
+                                                         static_cast<size_t>(pixels.height);
+                                    for (size_t i = 0; i < count; ++i) {
+                                        brightness += data[i * 4] + data[i * 4 + 1] +
+                                                      data[i * 4 + 2];
+                                    }
+                                }
+                                UnloadImage(pixels);
+                            }
+                            if (brightness <= 0) {
+                                result = fail("Geometry preset rendered a black Image");
+                            } else {
+                                std::printf("  spectrum : Geometry element draws "
+                                            "(brightness %lld)\n",
+                                            brightness);
+                            }
                         }
                     }
                 }
@@ -943,6 +1136,10 @@ int main(int argc, char **argv) {
                             ctx.audioTime = 0.0;
                             for (int frame = 0; frame < 12; ++frame) {
                                 ctx.frame = frame;
+                                // Preview invariant: time follows the playhead
+                                // and audioTime follows the clip, so the block
+                                // snaps its window to the video frame grid.
+                                ctx.time = static_cast<double>(frame) / 60.0;
                                 ctx.audioTime = static_cast<double>(frame) / 60.0;
                                 dynamicsGraph.evaluate(ctx);
                             }
@@ -1302,6 +1499,160 @@ int main(int argc, char **argv) {
                             }
                         }
                         if (!grownOk) result = fail("audio-rate growing source: " + grownWhat);
+                    }
+
+                    // Display ticks inside one video frame must reuse the same
+                    // Dynamics window; restarting it caused periodic holes.
+                    if (result == 0) {
+                        auto tone = std::make_shared<AudioBuffer>();
+                        tone->channels = 2;
+                        tone->sampleRate = 48000;
+                        tone->frameCount = 96000;
+                        tone->samples.resize(static_cast<size_t>(tone->frameCount) * 2);
+                        for (long long i = 0; i < tone->frameCount; ++i) {
+                            const float sample =
+                                0.4f * std::sin(6.2831853f * 440.0f * i / 48000.0f);
+                            tone->samples[static_cast<size_t>(i) * 2] = sample;
+                            tone->samples[static_cast<size_t>(i) * 2 + 1] = sample;
+                        }
+                        Graph liveGraph;
+                        Node *src = liveGraph.addNode("src.audio", 0, 0);
+                        Node *dynamics = liveGraph.addNode("dsp.dynamics", 200, 0);
+                        bool liveOk = src && dynamics;
+                        std::string liveWhat;
+                        if (liveOk) {
+                            dynamics->setFloat("threshold", 0.0f);
+                            dynamics->setFloat("ratio", 1.0f);
+                            dynamics->setBool("limiter", false);
+                            std::string why;
+                            liveOk = liveGraph.connect(src->id, 0, dynamics->id, 0, &why);
+                            if (!liveOk) liveWhat = why;
+                        } else {
+                            liveWhat = "blocks missing";
+                        }
+                        if (liveOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 2.0;
+                            ctx.offline = false;
+                            ctx.audio = tone;
+                            ctx.frame = 10;
+                            ctx.time = 10.0 / 60.0;
+                            ctx.audioTime = ctx.time;
+                            liveGraph.evaluate(ctx);
+                            const long long firstStart = dynamics->audioRenderStart;
+                            const long long firstFrames = dynamics->audioRenderFrames;
+                            for (int tick = 1; tick <= 2; ++tick) {
+                                ctx.time = 10.0 / 60.0 + tick / 240.0;
+                                ctx.audioTime = ctx.time;
+                                liveGraph.evaluate(ctx);
+                            }
+                            const bool stable = dynamics->audioRenderStart == firstStart &&
+                                                dynamics->audioRenderFrames == firstFrames;
+                            ctx.frame = 11;
+                            ctx.time = 11.0 / 60.0;
+                            ctx.audioTime = ctx.time;
+                            liveGraph.evaluate(ctx);
+                            const bool appended =
+                                dynamics->audioRenderStart == firstStart &&
+                                dynamics->audioRenderFrames == firstFrames + 800;
+                            double maxDiff = 0.0;
+                            if (appended && dynamics->audioRenderOutput) {
+                                const AudioBuffer &buffer = *dynamics->audioRenderOutput;
+                                for (size_t i = 0; i < buffer.samples.size(); ++i) {
+                                    maxDiff = std::max(
+                                        maxDiff,
+                                        std::fabs(static_cast<double>(buffer.samples[i]) -
+                                                  tone->samples[static_cast<size_t>(firstStart) *
+                                                                   2 +
+                                                                i]));
+                                }
+                            }
+                            if (!stable || !appended || maxDiff > 1e-5) {
+                                liveOk = false;
+                                liveWhat = "sub-frame ticks restarted the Dynamics buffer";
+                            } else {
+                                std::printf("  dynamics : sub-frame ticks reuse the window (start "
+                                            "%lld, %lld frames)\n",
+                                            firstStart, dynamics->audioRenderFrames);
+                            }
+                        }
+                        if (!liveOk) result = fail("Dynamics live window: " + liveWhat);
+                    }
+
+                    // A Dynamics in front of an ADC -> DAC region must not
+                    // punch holes into the preview stream: the display runs
+                    // faster than the video, so several ticks land on the same
+                    // frame and the region has to read the window the Dynamics
+                    // produced for that frame.
+                    if (result == 0) {
+                        auto constant = std::make_shared<AudioBuffer>();
+                        constant->channels = 1;
+                        constant->sampleRate = 48000;
+                        constant->frameCount = 96000;
+                        constant->samples.assign(static_cast<size_t>(constant->frameCount), 0.5f);
+                        Graph chain;
+                        Node *src = chain.addNode("src.audio", 0, 0);
+                        Node *dynamics = chain.addNode("dsp.dynamics", 200, 0);
+                        Node *adc = chain.addNode("dsp.adc", 400, 0);
+                        Node *dac = chain.addNode("dsp.dac", 600, 0);
+                        bool chainOk = src && dynamics && adc && dac;
+                        std::string chainWhat;
+                        if (chainOk) {
+                            dynamics->setFloat("threshold", 0.0f);
+                            dynamics->setFloat("ratio", 1.0f);
+                            dynamics->setBool("limiter", false);
+                            std::string why;
+                            chainOk = chain.connect(src->id, 0, dynamics->id, 0, &why) &&
+                                      chain.connect(dynamics->id, 0, adc->id, 0, &why) &&
+                                      chain.connect(adc->id, 0, dac->id, 0, &why) &&
+                                      chain.connect(adc->id, 1, dac->id, 1, &why);
+                            if (!chainOk) chainWhat = why;
+                        } else {
+                            chainWhat = "blocks missing";
+                        }
+                        if (chainOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 2.0;
+                            ctx.offline = false;
+                            ctx.audio = constant;
+                            for (int frame = 0; frame < 8 && chainOk; ++frame) {
+                                const double frameTime = static_cast<double>(frame) / 60.0;
+                                // Three display ticks per video frame, the way a
+                                // 144+ Hz monitor drives the preview.
+                                for (int tick = 0; tick < 3 && chainOk; ++tick) {
+                                    ctx.frame = frame;
+                                    ctx.time = frameTime + tick / 180.0;
+                                    ctx.audioTime = ctx.time;
+                                    chain.evaluate(ctx);
+                                }
+                                const AudioBuffer *window =
+                                    dac->audioRenderOutput ? dac->audioRenderOutput.get() : nullptr;
+                                if (!window || window->frameCount <= 0) {
+                                    chainOk = false;
+                                    chainWhat = "the DAC produced no window";
+                                    break;
+                                }
+                                double worst = 0.0;
+                                for (const float sample : window->samples) {
+                                    worst = std::max(
+                                        worst,
+                                        std::fabs(static_cast<double>(sample) - 0.5));
+                                }
+                                if (worst > 1e-3) {
+                                    chainOk = false;
+                                    chainWhat = "zero-filled preview window (worst " +
+                                                std::to_string(worst) + ")";
+                                }
+                            }
+                        }
+                        if (!chainOk) {
+                            result = fail("Dynamics preview stream: " + chainWhat);
+                        } else {
+                            std::printf(
+                                "  dynamics : preview stays continuous through ADC -> DAC\n");
+                        }
                     }
 
                     // An ADC with no Audio input is silence, never the imported

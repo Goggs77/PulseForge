@@ -54,8 +54,11 @@ exclusive Audio Output routing (processed, dry and silent exports, plus the
 monitor's source/silent/processed decisions). It also checks the ADC -> DAC
 Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
 left/right separation, live frame-window reuse, and the input-driven Spectrum
-Analyzer (silent / precomputed / live). When NVENC is usable it also renders a
-real GPU export.
+Analyzer (silent / precomputed / live). It also checks that a Spectrum preset
+change rebuilds its ports/parameters and re-matches the links by name, that a
+migrated Geometry element actually draws, and that a Dynamics feeding an
+ADC -> DAC region stays continuous across a high-refresh preview. When NVENC is
+usable it also renders a real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
 `selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
@@ -69,6 +72,10 @@ Other tools:
 - `pf_stage.exe <audio> <stage> <out.png> [time] [width] [height]` - renders one
   pipeline stage (`--help` is not implemented; the stage numbers are documented
   at the top of `tools/stage_dump.cpp`).
+- `pf_stage.exe <project.pforge> <out.png> [time] [width] [height]` - renders one
+  full-size frame of a real project (defaults to its video size) and dumps every
+  intermediate Image as `node_<id>_<kind>.png`, which is the quickest way to
+  compare a migrated project against an older export.
 - `pf_probe.exe` - OpenGL/readback probe for render-target experiments.
 - `pf_migrate.exe <project.pforge> [...]` - loads projects through the current
   migrations and rewrites them in place, keeping `<name>.pforge.bak`.
@@ -222,11 +229,26 @@ docs         rendering notes and the README overlay image
 - Geometry (`geom.primitives`) owns primitives only and must not read
   `ctx.audio`/`ctx.analysis`. Spectrum and waveform shapes are
   `render.spectrum` effects; `Project::fromJson` converts old Geometry shapes
-  3..6 to Spectrum (`radial_spectrum`/`bars`/`waveform_scope`), remaps the old
-  Scale input to the Spectrum Scale port and wires the project analyzer to the
-  Analysis input. `remapGeometryShape` shifts the remaining primitive enum
-  values (old 7..10 -> new 3..6). Keep `pf_migrate` in step, and never
-  reintroduce Analysis/Audio inputs or global-analysis use in Geometry.
+  3..6 (Radial Bars, Bar Spectrum, Waveform Ring, Waveform Line) to the
+  Spectrum element presets `radial_bars`/`bar_spectrum`/`waveform_ring`/
+  `waveform_line`, which run the original `geometry::drawSpectrumElement` code
+  and keep the old count/radius/thickness/spin/colour parameters. The migration
+  remaps the old Scale input to the Spectrum Scale port and wires the project
+  analyzer to the Analysis input. `remapGeometryShape` shifts the remaining
+  primitive enum values (old 7..10 -> new 3..6). Keep `pf_migrate` in step, and
+  never reintroduce Analysis/Audio inputs or global-analysis use in Geometry.
+- Spectrum's preset decides the block's schema: `Registry::spectrumSchemaFor`
+  builds the ports and Inspector parameters (shader presets add their own
+  `uUser[i]` modulation ports, the Geometry elements add Rotation/X/Y/Position
+  and shape parameters), and `Registry::applySpectrumPreset` rebuilds a node
+  when the preset changes, preserving values of keys the new preset also has.
+  `Graph::addNodeWithId` and `Project::fromJson` apply it on creation/load, and
+  `Graph::evaluate` re-syncs it through `runtimeState["spectrum.preset"]`.
+  Because links are index-based, the sync re-matches the node's input links by
+  port name and drops the ones whose port is gone. Append new presets at the
+  end of `Registry::spectrumPresetNames()` (shader effect indices must not
+  shift), and make every per-preset shader parameter actually read its
+  `uUser[slot]` (`pfParam(slot, fallback)` for positive-only values).
 - DAC output buffers are prepared per video frame by `prepareDacBuffer`, which
   keeps the same `audioRenderKey` reuse/append rules as the exporter and never
   mutates a buffer currently streamed by the monitor. Rendered buffers record
@@ -252,8 +274,14 @@ docs         rendering notes and the README overlay image
   `renderPreviewFrame`, and `catchUpLiveAudio` renders any project frames a slow
   display skipped, in order. The region quantises its window to `ctx.frame` so a
   high-refresh display reuses the same window instead of advancing stateful
-  blocks several times per project frame. Export still renders the same
-  per-frame pass offline and muxes the resulting track.
+  blocks several times per project frame. A frame-rate window producer that
+  feeds the region (Dynamics) quantises the same way, otherwise every display
+  tick restarts its buffer at a slightly later `startFrame` and the ADC reads
+  past the end of it - which is audible as periodic zero-fills even though the
+  export is clean. `pushLiveAudioWindow` streams the window of whichever node
+  drives the Audio Output (DAC or Dynamics), matching the exporter's sink walk.
+  Export still renders the same per-frame pass offline and muxes the resulting
+  track.
 - `Project::ensureAudioOutput` upgrades files saved before `out.audio` existed,
   wiring it to the end of the chain the old exporter followed; `pf_migrate`
   applies the same migration to files on disk. Keep both paths working whenever

@@ -42,7 +42,9 @@ The app is still in early stages, so expect minor bugs.
 - **Visualized Programmable pipeline.** A flow graph of blocks with typed ports.
   Connections are type-checked and cycles are rejected.
 - **GPU rendering.** Blocks render through OpenGL 3.3 render targets. Shader
-  blocks run your own `.glsl` files, while Spectrum uses one of the built-in effects.
+  blocks run your own `.glsl` files, while Spectrum uses one of the built-in
+  effects or one of the migrated Geometry elements (radial bars, bar spectrum,
+  waveform ring, waveform line).
 - **Real automation.** Every automation block owns a keyframed curve that you
   edit inside the block itself, with a unipolar (0..1) / bipolar (-1..1) switch,
   and drive any scalar input, including other modulation blocks.
@@ -323,11 +325,11 @@ readout.
 
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
-| Spectrum | Analysis, Scale, Feedback, Colour A/B | Image | Draws the analysis with a built-in spectrum effect; the Scale/Feedback/Colour inputs modulate the matching parameters. Scale is quantised and feedback stays at the base resolution, so a modulating Scale does not reallocate the render/feedback targets every frame |
+| Spectrum | per preset (see below) | Image | Draws the analysis with a built-in shader effect or a migrated Geometry element. Every preset has its own ports and Inspector parameters; changing the preset rebuilds both and re-matches the input links by port name. Scale is quantised and feedback stays at the base resolution, so a modulating Scale does not reallocate the render/feedback targets every frame |
 | Shader | uPrev, ...derived | Image | Applies a `.glsl` file to the incoming image; the ports follow the uniforms the file uses (`uPrev`, `uInput2`, `uUser[0..7]`, `uColorA/B`, `uVector2/3/4`, `uMatrix`). Compile errors are reported on the block instead of silently falling back |
 | Blend | A, B | Image | Cross fade, add, screen, multiply, difference, overlay, min, max |
 | Post FX | Image, 8 scalars | Image | Bloom, chromatic aberration, vignette, grain, scanlines, feedback, saturation, hue |
-| Geometry | Layer, Scale, Rotation, X, Y | Image | Primitives only: circle, ring, polygon grid, sparks, orbit, text. Spectrum and waveform visuals live in the Spectrum block; old projects with those Geometry shapes migrate to Spectrum effects on load |
+| Geometry | Layer, Scale, Rotation, X, Y | Image | Primitives only: circle, ring, polygon grid, sparks, orbit, text. Spectrum and waveform visuals live in the Spectrum block; old projects with those Geometry shapes migrate to the matching Spectrum elements on load, parameters included |
 
 ### Output
 
@@ -381,10 +383,24 @@ Built-in effects live on the **Spectrum** block (Analysis in, Image out):
 `chromatic`, `feedback_trail` and `vignette`. `blend` and `postfx` are internal
 effects used by their own blocks.
 
+Spectrum also carries the four Geometry elements, drawn with the original
+Geometry code: `radial_bars`, `bar_spectrum`, `waveform_ring` and
+`waveform_line`. They expose Scale / Rotation / X / Y / Position / Colour plus
+the element's own shape parameters (count, radius, thickness, spin, ...).
+
+Each Spectrum preset decides the block's ports and Inspector parameters, so the
+shader effects show `Scale`/`Feedback`/`Colour A/B` plus their own modulation
+inputs (a shader's `Speed`, `Complexity`, ...), while the Geometry elements show
+`Scale`/`Rotation`/`X`/`Y`/`Position`/`Colour A/B`. Changing the preset rebuilds
+both and carries the links over by port name; a link into a port the new preset
+does not have is dropped.
+
 Projects saved before the split keep loading: a `shader.pass` node with a file
 becomes a Shader block (its ports rebuilt from the file, links re-matched by
 name), one without a file becomes Spectrum and is wired to the project's
-Spectrum Analyzer.
+Spectrum Analyzer. An old `geom.primitives` node with shape 3..6 (Radial Bars,
+Bar Spectrum, Waveform Ring, Waveform Line) becomes a Spectrum block with the
+matching element preset, keeping its count/radius/thickness/spin/colour values.
 
 Shader files are hot-reloadable: edit and press `F5` (or use *Reload shaders* in
 the inspector).
@@ -488,7 +504,12 @@ The bridge is multi-channel: ADC emits one Scalar stream per channel
 channel per sample, and DAC writes the channels back interleaved. Preview runs
 the region for the current video frame as it is displayed and streams the
 samples directly; export runs the same per-frame pass offline, so both stay on
-the video clock.
+the video clock. A window producer that feeds the region (Dynamics) snaps its
+render window to the same video frame, so the repeated display ticks of one
+frame reuse a single contiguous buffer; restarting it on every tick used to
+punch periodic zero-fills into the preview. The monitor streams whichever node
+drives the Audio Output (a DAC or a block such as Dynamics), matching what the
+export muxes.
 
 Analysis is computed once per media load, in parallel across all cores: FFT
 frames (default 2048/512) are reduced to 64 log-spaced bands plus per-frame rms,
@@ -540,6 +561,7 @@ cd build/bin
 ./pf_selftest.exe      # decode -> analyse -> render -> export -> probe + project round trip
 ./pf_probe.exe         # documents the render-target orientation rules
 ./pf_stage.exe selftest_input.wav 3 stage.png 1.5   # one frame of a named pipeline stage
+./pf_stage.exe my.pforge frame.png 65.45            # one full-size frame of a real project
 ./pf_migrate.exe my.pforge                          # rewrite a project in the current format
 ./PulseForge.exe --shot ui.png selftest_input.wav   # headless UI capture
 ```

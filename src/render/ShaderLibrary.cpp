@@ -84,6 +84,11 @@ vec2 pfRotate(vec2 p, float a) {
     float c = cos(a), s = sin(a);
     return vec2(c*p.x - s*p.y, s*p.x + c*p.y);
 }
+// Spectrum presets drive their own parameters through the uUser slots. When
+// the same built-in is used through a Shader block the slot is 0, so a
+// positive-only parameter falls back to the value the effect had before it
+// became adjustable.
+float pfParam(float value, float fallback) { return value > 0.0001 ? value : fallback; }
 float pfHash(vec2 p) {
     p = fract(p*vec2(123.34, 456.21));
     p += dot(p, p + 45.32);
@@ -129,9 +134,10 @@ void main() { finalColor = vec4(uColorA.rgb, 1.0); }
     {"gradient", R"(
 void main() {
     vec2 uv = pfUv();
-    float t = uTime*0.15 + uv.y*0.6;
+    float speed = pfParam(uUser[0], 1.0);
+    float t = uTime*0.15*speed + uv.y*0.6;
     vec3 col = mix(uColorA.rgb, uColorB.rgb, 0.5 + 0.5*sin(t*3.14159));
-    col += 0.12*pfFbm(uv*3.0 + uTime*0.2);
+    col += 0.12*pfFbm(uv*3.0 + uTime*0.2*speed);
     col *= 0.75 + 0.5*uLevel;
     finalColor = vec4(col, 1.0);
 }
@@ -141,8 +147,10 @@ void main() {
     vec2 uv = (pfUv() - 0.5)*vec2(uResolution.x/uResolution.y, 1.0);
     float r = length(uv);
     float a = atan(uv.y, uv.x);
-    float n = pfFbm(uv*2.5 + vec2(uTime*0.10, uTime*0.07));
-    float v = sin(6.0*r - uTime*1.2) + sin(a*4.0 + uTime*0.7) + n*1.6;
+    float speed = pfParam(uUser[0], 1.0);
+    float complexity = pfParam(uUser[1], 1.0);
+    float n = pfFbm(uv*2.5*complexity + vec2(uTime*0.10, uTime*0.07)*speed);
+    float v = sin(6.0*r - uTime*1.2*speed) + sin(a*4.0 + uTime*0.7*speed) + n*1.6;
     v += uBass*2.2 + uMid*0.9;
     vec3 col = pfHsv2Rgb(vec3(fract(0.55 + v*0.06 + uTreble*0.25), 0.75, 0.55 + 0.35*tanh(v*0.5)));
     col = mix(col, uColorB.rgb, 0.25);
@@ -154,7 +162,8 @@ void main() {
     vec2 uv = pfUv();
     vec2 p = (uv - 0.5)*vec2(uResolution.x/uResolution.y, 1.0);
     float r = length(p);
-    float a = atan(p.y, p.x);
+    // Rotation is in turns, so the bands can be spun around the centre.
+    float a = atan(p.y, p.x) + uUser[0]*6.2831853;
     float band = fract((a/6.2831853) + 0.5);
     float mag = pfSpectrum(pow(band, 0.75));
     float inner = 0.16 + 0.25*mag + 0.05*uLevel;
@@ -170,11 +179,12 @@ void main() {
     {"bars", R"(
 void main() {
     vec2 uv = pfUv();
-    float bars = 72.0;
+    float bars = floor(clamp(pfParam(uUser[0], 72.0), 4.0, 256.0));
+    float height = pfParam(uUser[1], 0.85);
     float i = floor(uv.x*bars);
     float f = fract(uv.x*bars);
     float mag = pfSpectrum(i/bars);
-    float h = 0.05 + 0.85*mag;
+    float h = 0.05 + height*mag;
     float x = smoothstep(0.06, 0.16, f)*smoothstep(0.94, 0.84, f);
     float bar = step(1.0 - h, uv.y)*x;
     vec3 col = mix(uColorA.rgb, uColorB.rgb, mag);
@@ -186,10 +196,12 @@ void main() {
     {"waveform_scope", R"(
 void main() {
     vec2 uv = pfUv();
+    float amplitude = pfParam(uUser[0], 1.0);
+    float thickness = pfParam(uUser[1], 1.0);
     float w = pfWave(uv.x);
-    float y = 0.5 + w*0.28;
+    float y = 0.5 + w*0.28*amplitude;
     float d = abs(uv.y - y);
-    float glow = exp(-d*90.0) + 0.35*exp(-d*22.0);
+    float glow = exp(-d*90.0/thickness) + 0.35*exp(-d*22.0/thickness);
     vec3 col = mix(uColorA.rgb, uColorB.rgb, 0.5 + 0.5*w);
     col *= glow*(0.8 + 1.4*uLevel);
     col += 0.06*pfPrev(uv).rgb;
@@ -199,11 +211,12 @@ void main() {
     {"spectrogram", R"(
 void main() {
     vec2 uv = pfUv();
+    float brightness = pfParam(uUser[0], 1.0);
     float bin = pow(uv.y, 1.6);
     float mag = pfSpectrum(bin);
     mag = pow(mag, 0.7);
     vec3 col = mix(uColorA.rgb, uColorB.rgb, clamp(mag*1.3, 0.0, 1.0));
-    col *= mag*2.2;
+    col *= mag*2.2*brightness;
     col += 0.04*pfPrev(uv).rgb;
     finalColor = vec4(col, 1.0);
 }
@@ -214,10 +227,12 @@ void main() {
     vec2 p = uv - 0.5;
     float r = max(length(p), 0.001);
     float a = atan(p.y, p.x);
+    float speed = pfParam(uUser[0], 1.0);
+    float twist = pfParam(uUser[1], 1.0);
     float depth = 0.35/r;
-    a += 0.6*sin(depth*0.4 + uTime*0.6) + uBass*0.6;
+    a += 0.6*sin(depth*0.4 + uTime*0.6*speed)*twist + uBass*0.6;
     float u = a/3.14159265;
-    float v = fract(depth*0.25 - uTime*0.35);
+    float v = fract(depth*0.25 - uTime*0.35*speed);
     vec3 pat = vec3(pfNoise(vec2(u*3.0, v*6.0)));
     vec3 col = mix(uColorA.rgb, uColorB.rgb, pat.r);
     col *= smoothstep(0.0, 0.35, r);
@@ -231,8 +246,10 @@ void main() {
     vec2 uv = pfUv() - 0.5;
     float a = atan(uv.y, uv.x);
     float r = length(uv);
-    float seg = 6.2831853/6.0;
-    a = abs(mod(a + uTime*0.1, seg) - seg*0.5);
+    float segments = floor(clamp(pfParam(uUser[0], 6.0), 2.0, 32.0));
+    float speed = pfParam(uUser[1], 1.0);
+    float seg = 6.2831853/segments;
+    a = abs(mod(a + uTime*0.1*speed, seg) - seg*0.5);
     vec2 q = vec2(cos(a), sin(a))*r + 0.5;
     vec3 col = pfPrev(q).rgb;
     col *= 0.7 + 0.6*uLevel;
@@ -248,12 +265,13 @@ void main() {
         float fi = float(i);
         float seed = pfHash(vec2(fi, 1.0));
         vec2 dir = normalize(vec2(pfHash(vec2(fi, 2.0)) - 0.5, pfHash(vec2(fi, 3.0)) - 0.5) + 0.001);
-        float speed = 0.15 + 0.7*pfHash(vec2(fi, 4.0)) + uBass*0.6;
+        float speed = (0.15 + 0.7*pfHash(vec2(fi, 4.0)) + uBass*0.6)*pfParam(uUser[0], 1.0);
         float z = fract(seed + uTime*speed*0.12);
         vec2 pos = dir*(0.15 + z*1.2);
         float d = length(uv - pos);
         float s = 0.004 + 0.02*(1.0 - z)*uTreble;
-        col += exp(-d/max(s, 0.001))*mix(uColorA.rgb, uColorB.rgb, seed);
+        col += exp(-d/max(s, 0.001))*mix(uColorA.rgb, uColorB.rgb, seed)*
+               pfParam(uUser[1], 1.0);
     }
     col += 0.05*pfPrev(pfUv()).rgb;
     finalColor = vec4(col, 1.0);
@@ -263,6 +281,8 @@ void main() {
 void main() {
     vec2 uv = pfUv();
     vec3 base = pfPrev(uv).rgb;
+    float amount = max(uUser[0], 0.0);
+    float threshold = pfParam(uUser[1], 0.35);
     vec3 sum = vec3(0.0);
     float total = 0.0;
     for (int i = 0; i < 12; ++i) {
@@ -273,15 +293,16 @@ void main() {
         total += w;
     }
     vec3 blur = sum/total;
-    vec3 bright = max(blur - vec3(0.35), vec3(0.0));
-    finalColor = vec4(base + bright*1.6, 1.0);
+    vec3 bright = max(blur - vec3(threshold), vec3(0.0));
+    finalColor = vec4(base + bright*amount, 1.0);
 }
 )"},
     {"chromatic", R"(
 void main() {
     vec2 uv = pfUv();
     vec2 d = (uv - 0.5);
-    float k = 0.004 + 0.06*uLevel;
+    float amount = max(uUser[0], 0.0);
+    float k = (0.004 + 0.06*uLevel)*amount;
     vec3 col;
     col.r = pfPrev(uv + d*k*1.2).r;
     col.g = pfPrev(uv).g;
@@ -295,7 +316,9 @@ void main() {
     vec2 uv = pfUv();
     vec3 cur = pfPrev(uv).rgb;
     vec3 prev = pfFeedback(uv).rgb;
-    float amount = clamp(0.72 + 0.25*uLevel, 0.0, 0.98);
+    // Without a driven Amount (the effect loaded through a Shader block) the
+    // trail follows the loudness, which is how this preset behaved before.
+    float amount = clamp(uUser[0] > 0.0001 ? uUser[0] : (0.72 + 0.25*uLevel), 0.0, 0.98);
     vec3 col = mix(cur, prev, amount);
     col *= 0.995;
     finalColor = vec4(col, 1.0);
@@ -306,7 +329,9 @@ void main() {
     vec2 uv = pfUv();
     vec3 col = pfPrev(uv).rgb;
     float d = length(uv - 0.5);
-    col *= smoothstep(0.95, 0.25, d);
+    float amount = clamp(max(uUser[0], 0.0), 0.0, 1.0);
+    float softness = pfParam(uUser[1], 1.0);
+    col *= mix(1.0, smoothstep(0.95*softness, 0.25*softness, d), amount);
     col += 0.15*uOnset;
     finalColor = vec4(col, 1.0);
 }

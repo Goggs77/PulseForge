@@ -40,6 +40,7 @@ Node *Graph::addNodeWithId(int id, const std::string &kind) {
     node.title = def->label;
     node.ensureParams(*def);
     Registry::applyChannelPorts(node);
+    Registry::applySpectrumPreset(node);
     node.outputs.resize(node.outputPorts().size());
     nodes.push_back(std::move(node));
     nextId = std::max(nextId, id + 1);
@@ -241,6 +242,49 @@ struct AudioRatePlan {
     std::vector<int> before;  // frame-rate nodes evaluated first
     std::vector<int> after;   // frame-rate nodes evaluated last
 };
+
+// Spectrum exposes different ports and parameters per preset. When the preset
+// changes (in the Inspector, or through a project that was saved by an older
+// build) the block has to be rebuilt before the graph runs. Links are
+// index-based, so the input links are carried over by port name; a link into a
+// port the new preset does not have is dropped.
+void syncSpectrumPresets(Graph &graph) {
+    for (Node &node : graph.nodes) {
+        if (node.kind != "render.spectrum") continue;
+        const double preset = static_cast<double>(node.pint("preset", 0));
+        const auto cached = node.runtimeState.find("spectrum.preset");
+        if (cached != node.runtimeState.end() && cached->second == preset) continue;
+        node.runtimeState["spectrum.preset"] = preset;
+
+        std::vector<std::string> previous;
+        previous.reserve(node.inputPorts().size());
+        for (const PortDesc &port : node.inputPorts()) previous.push_back(port.name);
+        Registry::applySpectrumPreset(node);
+        const std::vector<PortDesc> &ports = node.inputPorts();
+        std::vector<int> remap(previous.size(), -1);
+        for (size_t old = 0; old < previous.size(); ++old) {
+            for (size_t port = 0; port < ports.size(); ++port) {
+                if (ports[port].name == previous[old]) {
+                    remap[old] = static_cast<int>(port);
+                    break;
+                }
+            }
+        }
+        graph.links.erase(std::remove_if(graph.links.begin(), graph.links.end(),
+                                         [&](const Link &link) {
+                                             if (link.toNode != node.id) return false;
+                                             return link.toPort < 0 ||
+                                                    link.toPort >=
+                                                        static_cast<int>(remap.size()) ||
+                                                    remap[static_cast<size_t>(link.toPort)] < 0;
+                                         }),
+                          graph.links.end());
+        for (Link &link : graph.links) {
+            if (link.toNode == node.id) link.toPort = remap[static_cast<size_t>(link.toPort)];
+        }
+        node.inputScratch.clear();
+    }
+}
 
 // Finds every node on an ADC -> Scalar -> DAC path, plus the pure-Scalar
 // processors that feed such a path. Those nodes are evaluated once per audio
@@ -641,6 +685,7 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
 
 bool Graph::evaluate(EvalContext &ctx) {
     syncDynamicChannelPorts(*this);
+    syncSpectrumPresets(*this);
     std::vector<int> order;
     if (!topologicalOrder(order, &lastError)) return false;
 

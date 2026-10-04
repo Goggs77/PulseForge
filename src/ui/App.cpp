@@ -463,14 +463,16 @@ void resetMonitor(UiState &state) {
     state.liveAudioFrame = -1;
 }
 
-// Pushes the DAC window produced by the most recent graph evaluation into the
-// live monitor stream.
-void pushLiveDacWindow(UiState &state) {
+// Pushes the audio window produced by the most recent graph evaluation into
+// the live monitor stream. The Audio Output may be fed by a DAC or by another
+// Audio-producing block (Dynamics, ...), so the window comes from whichever
+// node drives the sink - the same node the exporter muxes.
+void pushLiveAudioWindow(UiState &state) {
     if (!state.clip.liveStreamActive()) return;
     const int sink = state.project.graph.audioSinkNodeId();
     const Link *link = sink ? state.project.graph.findInputLink(sink, 0) : nullptr;
     const Node *source = link ? state.project.graph.find(link->fromNode) : nullptr;
-    if (source && source->kind == "dsp.dac" && source->audioRenderOutput) {
+    if (source && source->audioRenderOutput) {
         state.clip.pushLiveWindow(*source->audioRenderOutput);
     }
 }
@@ -495,7 +497,7 @@ void catchUpLiveAudio(UiState &state, int targetFrame) {
         ctx.time = static_cast<double>(ctx.frame) / fps;
         ctx.audioTime = state.project.video.trimStart + ctx.time;
         state.project.graph.evaluate(ctx);
-        pushLiveDacWindow(state);
+        pushLiveAudioWindow(state);
         ++state.liveAudioFrame;
     }
 }
@@ -1285,7 +1287,7 @@ int runApp(int argc, char **argv) {
         // The region evaluated above just produced this video frame's samples;
         // stream them so the sound follows the video clock frame by frame.
         if (state.playing && state.clip.liveStreamActive()) {
-            pushLiveDacWindow(state);
+            pushLiveAudioWindow(state);
             state.liveAudioFrame =
                 std::max(state.liveAudioFrame, state.frameContext.frame + 1);
         }

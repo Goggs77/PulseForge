@@ -2,8 +2,12 @@
 // mean colour so problems can be narrowed down quickly.
 //
 //   pf_stage <audio-file> <stage> <out.png> [time-seconds] [w] [h]
+//   pf_stage <project.pforge> <out.png> [time-seconds] [w] [h]
 //
 // stages: 0 shader pass only, 1 + geometry, 2 + post fx, 3 full default project
+//
+// A ".pforge" first argument loads that project instead of the built-in stage
+// layouts, so a real pipeline can be inspected frame by frame.
 
 #include <algorithm>
 #include <cmath>
@@ -16,17 +20,24 @@
 #include "dsp/AudioClip.h"
 #include "raylib.h"
 #include "render/FrameReadback.h"
+#include "render/ShaderLibrary.h"
 #include "render/Renderer.h"
 
 using namespace pf;
 
 int main(int argc, char **argv) {
     const std::string audio = argc > 1 ? argv[1] : "selftest_input.wav";
-    const int stage = argc > 2 ? std::atoi(argv[2]) : 3;
-    const std::string output = argc > 3 ? argv[3] : "stage.png";
-    const double time = argc > 4 ? std::atof(argv[4]) : 1.5;
-    const int width = argc > 5 ? std::atoi(argv[5]) : 640;
-    const int height = argc > 6 ? std::atoi(argv[6]) : 360;
+    const bool projectMode =
+        audio.size() > 7 && audio.compare(audio.size() - 7, 7, ".pforge") == 0;
+    const int stage = projectMode ? -1 : (argc > 2 ? std::atoi(argv[2]) : 3);
+    const std::string output =
+        projectMode ? (argc > 2 ? argv[2] : "stage.png") : (argc > 3 ? argv[3] : "stage.png");
+    const double time =
+        projectMode ? (argc > 3 ? std::atof(argv[3]) : 0.5) : (argc > 4 ? std::atof(argv[4]) : 1.5);
+    int width =
+        projectMode ? (argc > 4 ? std::atoi(argv[4]) : 0) : (argc > 5 ? std::atoi(argv[5]) : 640);
+    int height =
+        projectMode ? (argc > 5 ? std::atoi(argv[5]) : 0) : (argc > 6 ? std::atoi(argv[6]) : 360);
 
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -40,7 +51,23 @@ int main(int argc, char **argv) {
         return 1;
     }
     AudioClip clip;
-    if (!clip.load(audio, 48000, &error)) {
+    Project project;
+    std::string mediaPath = audio;
+    int mediaRate = 48000;
+    if (projectMode) {
+        ShaderLibrary shaders;
+        const std::string directory = Project::directoryOf(audio);
+        shaders.setSearchPaths({directory + "/assets/shaders", directory + "/assets", directory,
+                                "assets/shaders", "assets", "."});
+        std::string loadError;
+        if (!project.load(audio, &loadError, &shaders)) {
+            std::printf("project load failed: %s\n", loadError.c_str());
+            return 1;
+        }
+        mediaPath = project.audio.path;
+        mediaRate = project.audio.sampleRate > 0 ? project.audio.sampleRate : 48000;
+    }
+    if (!clip.load(mediaPath, mediaRate, &error)) {
         std::printf("audio load failed: %s\n", error.c_str());
         return 1;
     }
@@ -73,12 +100,16 @@ int main(int argc, char **argv) {
         }
     }
 
-    Project project;
-    project.resetToDefault();
-    project.video.width = width;
-    project.video.height = height;
-    project.audio.path = audio;
-    project.audio.duration = clip.duration();
+    if (!projectMode) {
+        project.resetToDefault();
+        project.video.width = width;
+        project.video.height = height;
+        project.audio.path = audio;
+        project.audio.duration = clip.duration();
+    } else {
+        if (width <= 0) width = project.video.width;
+        if (height <= 0) height = project.video.height;
+    }
     Graph &graph = project.graph;
 
     if (stage == 10) {
@@ -176,7 +207,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (stage == 20) {
+    if (!projectMode && stage == 20) {
         // exercises the Shader block: .glsl file, derived ports and the preamble
         graph.clear();
         Node *audioNode = graph.addNode("src.audio", 40, 200);
@@ -200,7 +231,7 @@ int main(int argc, char **argv) {
         graph.connect(pass->id, 0, output->id, 0);
     }
 
-    if (stage < 3 || stage == 4 || stage == 5) {
+    if (!projectMode && (stage < 3 || stage == 4 || stage == 5)) {
         graph.clear();
         Node *audioNode = graph.addNode("src.audio", 40, 200);
         Node *analyzer = graph.addNode("dsp.analyze", 240, 200);
@@ -236,11 +267,12 @@ int main(int argc, char **argv) {
     EvalContext ctx;
     ctx.width = width;
     ctx.height = height;
-    ctx.fps = 30.0f;
+    const float fps = projectMode ? static_cast<float>(std::max(1.0, project.video.fps)) : 30.0f;
+    ctx.fps = fps;
     ctx.duration = clip.duration();
     ctx.time = time;
-    ctx.frame = static_cast<int>(time * 30.0);
-    ctx.audioTime = time;
+    ctx.frame = static_cast<int>(time * fps);
+    ctx.audioTime = projectMode ? project.video.trimStart + time : time;
     ctx.audio = clip.buffer();
     ctx.analysis = analysis;
 
@@ -264,8 +296,13 @@ int main(int argc, char **argv) {
         for (int c = 0; c < 3; ++c) sum[c] += pixels[i * 4 + c];
     }
     const double count = static_cast<double>(width * height);
-    std::printf("stage %d  time %.2f  mean rgb = (%.1f, %.1f, %.1f)\n", stage, time,
-                sum[0] / count, sum[1] / count, sum[2] / count);
+    if (projectMode) {
+        std::printf("project %s  time %.3f  mean rgb = (%.1f, %.1f, %.1f)\n", audio.c_str(), time,
+                    sum[0] / count, sum[1] / count, sum[2] / count);
+    } else {
+        std::printf("stage %d  time %.2f  mean rgb = (%.1f, %.1f, %.1f)\n", stage, time,
+                    sum[0] / count, sum[1] / count, sum[2] / count);
+    }
 
     Image out{};
     out.data = const_cast<unsigned char *>(pixels);

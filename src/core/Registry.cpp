@@ -72,6 +72,184 @@ Texture2D textureFrom(const std::vector<Value> &in, size_t port) {
 }
 
 // ---------------------------------------------------------------------------
+// Spectrum preset schemas
+// ---------------------------------------------------------------------------
+
+// Scalar params a shader preset consumes through uUser[slot].
+struct SpectrumUserParam {
+    const char *key;
+    const char *label;
+    float value;
+    float minimum;
+    float maximum;
+    float step;
+    const char *group;
+    int slot;
+};
+
+std::vector<SpectrumUserParam> spectrumUserParams(const std::string &preset) {
+    if (preset == "gradient") {
+        return {{"speed", "Speed", 1.0f, 0.05f, 4.0f, 0.01f, "Effect", 0}};
+    }
+    if (preset == "plasma") {
+        return {{"speed", "Speed", 1.0f, 0.05f, 4.0f, 0.01f, "Effect", 0},
+                {"complexity", "Complexity", 1.0f, 0.2f, 4.0f, 0.01f, "Effect", 1}};
+    }
+    if (preset == "radial_spectrum") {
+        return {{"rotation", "Rotation", 0.0f, -1.0f, 1.0f, 0.001f, "Effect", 0}};
+    }
+    if (preset == "bars") {
+        return {{"count", "Bars", 72.0f, 4.0f, 256.0f, 1.0f, "Effect", 0},
+                {"height", "Height", 0.85f, 0.05f, 1.0f, 0.01f, "Effect", 1}};
+    }
+    if (preset == "waveform_scope") {
+        return {{"amplitude", "Amplitude", 1.0f, 0.05f, 2.0f, 0.01f, "Effect", 0},
+                {"thickness", "Thickness", 1.0f, 0.2f, 4.0f, 0.01f, "Effect", 1}};
+    }
+    if (preset == "spectrogram") {
+        return {{"brightness", "Brightness", 1.0f, 0.1f, 4.0f, 0.01f, "Effect", 0}};
+    }
+    if (preset == "tunnel") {
+        return {{"speed", "Speed", 1.0f, 0.05f, 4.0f, 0.01f, "Effect", 0},
+                {"twist", "Twist", 1.0f, 0.1f, 4.0f, 0.01f, "Effect", 1}};
+    }
+    if (preset == "kaleidoscope") {
+        return {{"segments", "Segments", 6.0f, 2.0f, 16.0f, 1.0f, "Effect", 0},
+                {"speed", "Speed", 1.0f, 0.05f, 4.0f, 0.01f, "Effect", 1}};
+    }
+    if (preset == "starfield") {
+        return {{"speed", "Speed", 1.0f, 0.05f, 4.0f, 0.01f, "Effect", 0},
+                {"brightness", "Brightness", 1.0f, 0.1f, 4.0f, 0.01f, "Effect", 1}};
+    }
+    if (preset == "bloom") {
+        return {{"amount", "Amount", 1.6f, 0.0f, 4.0f, 0.01f, "Effect", 0},
+                {"threshold", "Threshold", 0.35f, 0.0f, 1.0f, 0.01f, "Effect", 1}};
+    }
+    if (preset == "chromatic") {
+        return {{"amount", "Amount", 1.0f, 0.0f, 4.0f, 0.01f, "Effect", 0}};
+    }
+    if (preset == "feedback_trail") {
+        return {{"amount", "Amount", 0.72f, 0.0f, 0.98f, 0.01f, "Effect", 0}};
+    }
+    if (preset == "vignette") {
+        return {{"amount", "Amount", 1.0f, 0.0f, 2.0f, 0.01f, "Effect", 0},
+                {"softness", "Softness", 1.0f, 0.2f, 3.0f, 0.01f, "Effect", 1}};
+    }
+    return {};
+}
+
+bool spectrumGeometryElement(const std::string &preset, geometry::SpectrumElement *element) {
+    if (preset == "radial_bars") *element = geometry::SpectrumElement::RadialBars;
+    else if (preset == "bar_spectrum") *element = geometry::SpectrumElement::BarSpectrum;
+    else if (preset == "waveform_ring") *element = geometry::SpectrumElement::WaveformRing;
+    else if (preset == "waveform_line") *element = geometry::SpectrumElement::WaveformLine;
+    else return false;
+    return true;
+}
+
+// The trail effects read uFeedback; the preset is unusable without the
+// persistent target, so it is implied there (the Inspector toggle keeps
+// whatever the user set).
+bool spectrumPresetNeedsFeedback(const std::string &preset) {
+    return preset == "tunnel" || preset == "feedback_trail";
+}
+
+struct SpectrumSchema {
+    std::vector<PortDesc> inputs;
+    std::vector<Param> params;
+};
+
+SpectrumSchema spectrumSchemaFor(const std::string &preset) {
+    SpectrumSchema schema;
+    const std::vector<std::string> names = Registry::spectrumPresetNames();
+    int index = 0;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == preset) index = static_cast<int>(i);
+    }
+    const Param presetParam = makeEnumParam("preset", "Preset", names, index, "Preset");
+
+    geometry::SpectrumElement element;
+    if (spectrumGeometryElement(preset, &element)) {
+        schema.inputs = {PortDesc{"Analysis", PortType::Analysis},
+                         PortDesc{"Scale", PortType::Scalar},
+                         PortDesc{"Rotation", PortType::Scalar},
+                         PortDesc{"X", PortType::Scalar},
+                         PortDesc{"Y", PortType::Scalar},
+                         PortDesc{"Position", PortType::Vec2, "overrides X/Y"},
+                         PortDesc{"Colour A", PortType::Color},
+                         PortDesc{"Colour B", PortType::Color}};
+        schema.params = {
+            presetParam,
+            makeIntParam("count", "Count", 96, 2, 512, "Shape"),
+            makeParam("radius", "Radius", 0.3f, 0.01f, 1.5f, 0.005f, "Shape"),
+            makeParam("thickness", "Thickness", 5.0f, 0.5f, 40.0f, 0.5f, "Shape"),
+            makeParam("x", "Position X", 0.5f, -1.0f, 2.0f, 0.005f, "Transform"),
+            makeParam("y", "Position Y", 0.5f, -1.0f, 2.0f, 0.005f, "Transform"),
+            makeParam("rotation", "Rotation (turns)", 0.0f, -2.0f, 2.0f, 0.005f, "Transform"),
+            makeParam("spin", "Spin (turns/s)", 0.0f, -4.0f, 4.0f, 0.005f, "Transform"),
+            makeParam("scaleMod", "Scale mod", 0.5f, -4.0f, 4.0f, 0.01f, "Modulation"),
+            makeParam("rotationMod", "Rotation mod", 0.0f, -4.0f, 4.0f, 0.01f, "Modulation"),
+            makeParam("xMod", "X mod", 0.25f, -4.0f, 4.0f, 0.01f, "Modulation"),
+            makeParam("yMod", "Y mod", 0.0f, -4.0f, 4.0f, 0.01f, "Modulation"),
+            makeColorParam("colorA", "Colour A", palette::fromHex(0x59B2FF), "Look"),
+            makeColorParam("colorB", "Colour B", palette::fromHex(0xFF7BD1), "Look"),
+            makeParam("alpha", "Opacity", 1.0f, 0.0f, 1.0f, 0.01f, "Look"),
+            makeBoolParam("additive", "Additive blend", true, "Look"),
+            makeParam("scale", "Resolution scale", 1.0f, 0.15f, 2.0f, 0.05f, "Output"),
+        };
+        return schema;
+    }
+
+    schema.inputs = {PortDesc{"Analysis", PortType::Analysis},
+                     PortDesc{"Scale", PortType::Scalar},
+                     PortDesc{"Feedback", PortType::Scalar},
+                     PortDesc{"Colour A", PortType::Color},
+                     PortDesc{"Colour B", PortType::Color}};
+    schema.params = {
+        presetParam,
+        makeColorParam("colorA", "Colour A", palette::fromHex(0x2E6BFF), "Look"),
+        makeColorParam("colorB", "Colour B", palette::fromHex(0xFF3FA4), "Look"),
+        makeParam("scale", "Resolution scale", 1.0f, 0.15f, 2.0f, 0.05f, "Output"),
+        makeBoolParam("useFeedback", "Feedback", false, "Output"),
+        makeParam("feedback", "Feedback amount", 0.6f, 0.0f, 0.98f, 0.01f, "Output"),
+    };
+    for (const SpectrumUserParam &extra : spectrumUserParams(preset)) {
+        Param param = makeParam(extra.key, extra.label, extra.value, extra.minimum, extra.maximum,
+                                extra.step, extra.group);
+        schema.params.push_back(param);
+        schema.inputs.push_back(PortDesc{extra.key, PortType::Scalar, "modulation"});
+    }
+    return schema;
+}
+
+void spectrumWaveWindow(const AnalysisData &analysis, double time, std::vector<float> &out) {
+    out.assign(512, 0.0f);
+    const AudioPtr &source = analysis.source;
+    if (!source || source->frameCount <= 0) return;
+    const double window = 0.04;
+    const double rate = std::max(1, source->sampleRate);
+    for (size_t i = 0; i < out.size(); ++i) {
+        const double t = time - window + 2.0 * window *
+                                               (static_cast<double>(i) /
+                                                static_cast<double>(out.size() - 1));
+        out[i] = std::clamp(source->monoAt(t * rate - source->startFrame), -1.0f, 1.0f);
+    }
+}
+
+const Value *spectrumInput(const Node &node, const std::vector<Value> &in, const char *name) {
+    const std::vector<PortDesc> &ports = node.inputPorts();
+    for (size_t i = 0; i < ports.size() && i < in.size(); ++i) {
+        if (ports[i].name == name) return &in[i];
+    }
+    return nullptr;
+}
+
+float spectrumScalar(const Node &node, const std::vector<Value> &in, const char *name) {
+    const Value *value = spectrumInput(node, in, name);
+    return value && value->type == PortType::Scalar ? value->scalar : 0.0f;
+}
+
+// ---------------------------------------------------------------------------
 // Sources
 // ---------------------------------------------------------------------------
 
@@ -362,10 +540,18 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                   node.pfloat("limiterRelease", 80.0f));
 
     const float fps = ctx.fps > 1.0f ? ctx.fps : 60.0f;
+    // In preview, quantise to the video frame (like the audio-rate region) so
+    // repeated sub-frame display ticks reuse the same window instead of
+    // restarting the buffer and leaving periodic holes in the stream.
+    double clipFrameStart = ctx.audioTime;
+    if (!ctx.offline) {
+        const double quantized = static_cast<double>(ctx.frame) / fps;
+        clipFrameStart = ctx.audioTime + (quantized - ctx.time);
+    }
     const long long startFrame =
-        std::clamp<long long>(std::llround(ctx.audioTime * sampleRate), 0, frameCount);
+        std::clamp<long long>(std::llround(clipFrameStart * sampleRate), 0, frameCount);
     const long long endFrame = std::clamp<long long>(
-        std::llround((ctx.audioTime + 1.0 / std::max(1.0f, fps)) * sampleRate), startFrame,
+        std::llround((clipFrameStart + 1.0 / std::max(1.0f, fps)) * sampleRate), startFrame,
         frameCount);
 
     bool reusable = node.audioRenderOutput && node.audioRenderKey == key &&
@@ -1196,19 +1382,85 @@ void evalGuard(Node &node, EvalContext &ctx, const std::vector<Value> &in,
 void evalSpectrum(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                   std::vector<Value> &out) {
     if (!ctx.renderer || !ctx.shaders) return;
-    const bool connected = !in.empty() && in[0].type == PortType::Analysis;
-    if (!connected) {
+    const Value *analysisValue = spectrumInput(node, in, "Analysis");
+    if (!analysisValue || analysisValue->type != PortType::Analysis) {
         node.status = "connect an Analysis input";
         return;
     }
-    if (!in[0].analysis) {
+    if (!analysisValue->analysis) {
         node.status = "no audio loaded";
         return;
     }
-    const std::vector<std::string> presets = ShaderLibrary::effectNames();
+    const std::vector<std::string> presets = Registry::spectrumPresetNames();
     const int index = std::clamp(node.pint("preset", 0), 0,
                                  std::max(0, static_cast<int>(presets.size()) - 1));
-    Shader *shader = ctx.shaders->builtin(presets[static_cast<size_t>(index)]);
+    const std::string &preset = presets[static_cast<size_t>(index)];
+    const AnalysisData *analysis = analysisValue->analysis.get();
+
+    float scale = node.pfloat("scale", 1.0f);
+    geometry::SpectrumElement element;
+    const bool geometryPreset = spectrumGeometryElement(preset, &element);
+    const Value *scaleInput = spectrumInput(node, in, "Scale");
+    if (!geometryPreset && scaleInput && scaleInput->type == PortType::Scalar) {
+        scale *= std::max(0.0f, 1.0f + scaleInput->scalar);
+    }
+    scale = std::clamp(scale, 0.15f, 4.0f);
+    // Quantise the modulated resolution so a sweeping Scale input cannot
+    // allocate a new render target (and feedback texture) every frame.
+    scale = std::round(scale * 10.0f) / 10.0f;
+    const auto align32 = [](int value) { return std::max(32, (value + 31) & ~31); };
+    const int width = align32(static_cast<int>(ctx.width * scale));
+    const int height = align32(static_cast<int>(ctx.height * scale));
+
+    if (geometryPreset) {
+        ImageBufferPtr target = ctx.renderer->acquire(width, height);
+        if (!target) {
+            node.status = "out of render targets";
+            return;
+        }
+        ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+        geometry::SpectrumSpec spec;
+        spec.width = width;
+        spec.height = height;
+        const float xMod = node.pfloat("xMod", 0.25f);
+        const float yMod = node.pfloat("yMod", 0.0f);
+        const float rotationMod = node.pfloat("rotationMod", 0.0f);
+        const float scaleMod = node.pfloat("scaleMod", 0.5f);
+        spec.cx = node.pfloat("x", 0.5f) + spectrumScalar(node, in, "X") * xMod;
+        spec.cy = node.pfloat("y", 0.5f) + spectrumScalar(node, in, "Y") * yMod;
+        const Value *position = spectrumInput(node, in, "Position");
+        if (position && position->type == PortType::Vec2) {
+            spec.cx = position->vec2.x;
+            spec.cy = position->vec2.y;
+        }
+        spec.radius = std::max(0.01f, node.pfloat("radius", 0.3f) *
+                                          (1.0f + spectrumScalar(node, in, "Scale") * scaleMod));
+        spec.thickness = node.pfloat("thickness", 5.0f);
+        spec.rotation = node.pfloat("rotation", 0.0f) * 6.2831853f +
+                        static_cast<float>(ctx.time) * node.pfloat("spin", 0.0f) +
+                        spectrumScalar(node, in, "Rotation") * rotationMod;
+        spec.count = std::max(2, node.pint("count", 96));
+        spec.colorA = node.pcolor("colorA");
+        spec.colorB = node.pcolor("colorB");
+        const Value *colorAInput = spectrumInput(node, in, "Colour A");
+        const Value *colorBInput = spectrumInput(node, in, "Colour B");
+        if (colorAInput && colorAInput->type == PortType::Color) spec.colorA = colorAInput->color;
+        if (colorBInput && colorBInput->type == PortType::Color) spec.colorB = colorBInput->color;
+        spec.alpha = std::clamp(node.pfloat("alpha", 1.0f), 0.0f, 1.0f);
+        spec.additive = node.pbool("additive", true);
+        spec.spectrum = analysis->spectrumRow(ctx.audioTime);
+        spec.spectrumCount = analysis->spectrumBins;
+        static thread_local std::vector<float> wave;
+        spectrumWaveWindow(*analysis, ctx.audioTime, wave);
+        spec.wave = wave.data();
+        spec.waveCount = static_cast<int>(wave.size());
+        geometry::drawSpectrumElement(element, spec);
+        ctx.renderer->endTarget();
+        out[0] = Value::makeImage(target);
+        return;
+    }
+
+    Shader *shader = ctx.shaders->builtin(preset);
     if (!shader) {
         node.status = ctx.shaders->lastError();
         return;
@@ -1216,30 +1468,39 @@ void evalSpectrum(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     node.status.clear();
 
     // Modulation inputs scale the parameters they are named after.
-    const bool scaleConnected = in.size() > 1 && in[1].type == PortType::Scalar;
-    const bool feedbackConnected = in.size() > 2 && in[2].type == PortType::Scalar;
-    float scale = node.pfloat("scale", 1.0f);
-    if (scaleConnected) scale *= std::max(0.0f, 1.0f + in[1].scalar);
-    scale = std::clamp(scale, 0.15f, 4.0f);
-    // Quantise the modulated resolution so a sweeping Scale input cannot
-    // allocate a new render target (and feedback texture) every frame.
-    scale = std::round(scale * 10.0f) / 10.0f;
     float feedbackAmount = node.pfloat("feedback", 0.6f);
-    if (feedbackConnected) feedbackAmount += in[2].scalar * 0.5f;
+    const Value *feedbackInput = spectrumInput(node, in, "Feedback");
+    if (feedbackInput && feedbackInput->type == PortType::Scalar) {
+        feedbackAmount += feedbackInput->scalar * 0.5f;
+    }
     feedbackAmount = std::clamp(feedbackAmount, 0.0f, 0.98f);
     Color colorA = node.pcolor("colorA");
     Color colorB = node.pcolor("colorB");
-    if (in.size() > 3 && in[3].type == PortType::Color) colorA = in[3].color;
-    if (in.size() > 4 && in[4].type == PortType::Color) colorB = in[4].color;
-
-    const auto align32 = [](int value) { return std::max(32, (value + 31) & ~31); };
-    const int width = align32(static_cast<int>(ctx.width * scale));
-    const int height = align32(static_cast<int>(ctx.height * scale));
+    const Value *colorAInput = spectrumInput(node, in, "Colour A");
+    const Value *colorBInput = spectrumInput(node, in, "Colour B");
+    if (colorAInput && colorAInput->type == PortType::Color) colorA = colorAInput->color;
+    if (colorBInput && colorBInput->type == PortType::Color) colorB = colorBInput->color;
 
     float user[8] = {0};
+    bool userSlotUsed[8] = {false};
+    for (const SpectrumUserParam &extra : spectrumUserParams(preset)) {
+        float value = node.pfloat(extra.key, extra.value);
+        const Value *modulation = spectrumInput(node, in, extra.key);
+        if (modulation && modulation->type == PortType::Scalar) {
+            value *= std::max(0.0f, 1.0f + modulation->scalar);
+        }
+        value = std::clamp(value, extra.minimum, extra.maximum);
+        node.publishEffective(extra.key, value);
+        if (extra.slot >= 0 && extra.slot < 8) {
+            user[extra.slot] = value;
+            userSlotUsed[extra.slot] = true;
+        }
+    }
+    if (!userSlotUsed[0]) user[0] = feedbackAmount;
+
     Texture2D feedback{};
     ImageBufferPtr feedbackTarget;
-    if (node.pbool("useFeedback", false)) {
+    if (node.pbool("useFeedback", false) || spectrumPresetNeedsFeedback(preset)) {
         // Feedback lives at the base (unmodulated) resolution so Scale
         // modulation never reallocates the persistent texture.
         float baseScale = std::clamp(node.pfloat("scale", 1.0f), 0.15f, 4.0f);
@@ -1249,7 +1510,10 @@ void evalSpectrum(Node &node, EvalContext &ctx, const std::vector<Value> &in,
             align32(static_cast<int>(ctx.height * baseScale)));
         if (feedbackTarget) {
             feedback = feedbackTarget->texture.texture;
-            user[0] = std::max(user[0], feedbackAmount);
+            // When the preset owns slot 0 (for example Feedback Trail's
+            // Amount), that value is the trail length, so it wins over the
+            // generic Feedback amount.
+            if (!userSlotUsed[0]) user[0] = std::max(user[0], feedbackAmount);
         }
     }
 
@@ -1261,7 +1525,7 @@ void evalSpectrum(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
     // The block displays the analysis that reaches its port, not the project's
     // imported one.
-    ctx.renderer->uploadAnalysisTextures(*in[0].analysis, ctx.audioTime);
+    ctx.renderer->uploadAnalysisTextures(*analysis, ctx.audioTime);
     ctx.renderer->drawShaderPass(shader, ctx, Texture2D{}, Texture2D{}, feedback, user, 8, colorA,
                                  colorB, ShaderVectorUniforms{});
     ctx.renderer->endTarget();
@@ -1569,6 +1833,39 @@ void Registry::applyChannelPorts(Node &node) {
     } else {
         node.setInputPorts(std::move(ports));
     }
+}
+
+std::vector<std::string> Registry::spectrumPresetNames() {
+    std::vector<std::string> names = ShaderLibrary::effectNames();
+    names.emplace_back("radial_bars");
+    names.emplace_back("bar_spectrum");
+    names.emplace_back("waveform_ring");
+    names.emplace_back("waveform_line");
+    return names;
+}
+
+void Registry::applySpectrumPreset(Node &node) {
+    if (node.kind != "render.spectrum") return;
+    const std::vector<std::string> names = spectrumPresetNames();
+    const int index =
+        std::clamp(node.pint("preset", 0), 0, static_cast<int>(names.size()) - 1);
+    const SpectrumSchema schema = spectrumSchemaFor(names[static_cast<size_t>(index)]);
+    const std::vector<Param> old = std::move(node.params);
+    node.params = schema.params;
+    for (Param &param : node.params) {
+        for (const Param &previous : old) {
+            if (previous.key != param.key) continue;
+            param.value = previous.value;
+            param.boolean = previous.boolean;
+            param.color = previous.color;
+            param.text = previous.text;
+            param.keys = previous.keys;
+            param.values = previous.values;
+            param.matrixSize = previous.matrixSize;
+            break;
+        }
+    }
+    node.setInputPorts(schema.inputs);
 }
 
 std::vector<const NodeDef *> Registry::byCategory(const std::string &category) const {
@@ -2218,24 +2515,17 @@ void Registry::registerBuiltins() {
         def.category = "Render";
         def.label = "Spectrum";
         def.description =
-            "Draws the spectrum, waveform or spectrogram of an Analysis input as an Image "
-            "with one of the built-in effects. The Scale, Feedback and Colour inputs "
-            "modulate the matching parameters, so any modulation block can drive them.";
-        def.inputs = {PortDesc{"Analysis", PortType::Analysis, "spectrum source"},
-                      PortDesc{"Scale", PortType::Scalar, "modulates Resolution scale"},
-                      PortDesc{"Feedback", PortType::Scalar, "modulates Feedback amount"},
-                      PortDesc{"Colour A", PortType::Color, "overrides Colour A"},
-                      PortDesc{"Colour B", PortType::Color, "overrides Colour B"}};
+            "Draws the spectrum, waveform or spectrogram of an Analysis input as an Image. "
+            "Every preset exposes its own input ports and Inspector parameters: the built-in "
+            "shader effects carry their own modulation ports, and the migrated Geometry "
+            "elements (Radial Bars, Bar Spectrum, Waveform Ring, Waveform Line) expose "
+            "Scale / Rotation / X / Y / Position / Colour.";
+        const std::vector<std::string> presetNames = Registry::spectrumPresetNames();
+        const SpectrumSchema defaultSchema =
+            spectrumSchemaFor(presetNames.empty() ? std::string() : presetNames.front());
+        def.inputs = defaultSchema.inputs;
+        def.params = defaultSchema.params;
         def.outputs = {PortDesc{"Image", PortType::Image}};
-        std::vector<std::string> builtinOptions = ShaderLibrary::effectNames();
-        std::vector<Param> params;
-        params.push_back(makeEnumParam("preset", "Built-in effect", builtinOptions, 0, "Effect"));
-        params.push_back(colorParam("colorA", "Colour A", 0x3A6BFF, "Look"));
-        params.push_back(colorParam("colorB", "Colour B", 0xFF4FA3, "Look"));
-        params.push_back(makeParam("scale", "Resolution scale", 1.0f, 0.15f, 2.0f, 0.05f, "Look"));
-        params.push_back(makeBoolParam("useFeedback", "Feedback", false, "Look"));
-        params.push_back(makeParam("feedback", "Feedback amount", 0.6f, 0.0f, 0.98f, 0.01f, "Look"));
-        def.params = std::move(params);
         def.evaluate = evalSpectrum;
         add(std::move(def));
     }

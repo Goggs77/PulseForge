@@ -37,13 +37,14 @@ int remapGeometryShape(int oldShape) {
     }
 }
 
-// The old Geometry spectrum/waveform shape becomes the closest Spectrum
-// built-in effect during migration.
+// The old Geometry spectrum/waveform shapes migrate to the Spectrum presets
+// that draw exactly the same element, so an old project keeps its look.
 int geometrySpectrumPreset(int oldShape) {
-    const char *wanted = "radial_spectrum";
-    if (oldShape == 4) wanted = "bars";
-    else if (oldShape >= 5) wanted = "waveform_scope";
-    const std::vector<std::string> &names = ShaderLibrary::effectNames();
+    const char *wanted = "radial_bars";       // shape 3 = Radial Bars
+    if (oldShape == 4) wanted = "bar_spectrum";
+    else if (oldShape == 5) wanted = "waveform_ring";
+    else if (oldShape >= 6) wanted = "waveform_line";
+    const std::vector<std::string> &names = Registry::spectrumPresetNames();
     for (size_t i = 0; i < names.size(); ++i) {
         if (names[i] == wanted) return static_cast<int>(i);
     }
@@ -817,6 +818,21 @@ bool Project::fromJson(const json::Value &root, const std::string &projectDir, s
         if (!title.empty() && title != node->def->label) node->title = title;
 
         const json::Value &params = item["params"];
+        if (resolvedKind == "render.spectrum") {
+            // The preset decides the block's ports and Inspector parameters, so
+            // resolve it before the saved values are loaded into the schema;
+            // otherwise a per-preset value (a shader's Speed, a Geometry
+            // element's Radius) would have nowhere to land. Legacy Geometry
+            // saves its old shape instead of a preset.
+            if (geometryToSpectrum) {
+                node->setInt("preset", geometrySpectrumPreset(legacyGeometryShape));
+            } else if (params.has("preset")) {
+                const json::Value &value = params["preset"];
+                if (value.isNumber()) node->setInt("preset", value.asInt());
+                else node->setInt("preset", std::atoi(value.asString("0").c_str()));
+            }
+            Registry::applySpectrumPreset(*node);
+        }
         for (Param &param : node->params) {
             if (!params.has(param.key)) continue;
             const json::Value &value = params[param.key];
@@ -848,11 +864,9 @@ bool Project::fromJson(const json::Value &root, const std::string &projectDir, s
                 param.value = static_cast<float>(remapGeometryShape(legacyGeometryShape));
             }
         }
-        node->ensureParams(*node->def);
-        if (geometryToSpectrum) {
-            node->setInt("preset", geometrySpectrumPreset(legacyGeometryShape));
-            node->setBool("useFeedback", false);
-        }
+        // Spectrum's parameter list follows its preset, not the definition, so
+        // it was rebuilt above instead of adopting the default schema.
+        if (resolvedKind != "render.spectrum") node->ensureParams(*node->def);
         if (resolvedKind == "dsp.adc" || resolvedKind == "dsp.dac") {
             Registry::applyChannelPorts(*node);
         }

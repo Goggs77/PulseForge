@@ -76,7 +76,8 @@
         "colorB": "#FF3FA4FF",
         "scale": 1.5,
         "useFeedback": true,
-        "feedback": 0.4399999976
+        "feedback": 0.4399999976,
+        "rotation": 0
       }
     },
     {

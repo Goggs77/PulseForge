@@ -26,6 +26,12 @@ public:
     // Ports of an ADC/DAC follow their `channels` parameter: left, right, then
     // ch3, ch4, ... as Scalar ports.
     static void applyChannelPorts(Node &node);
+    // The Spectrum preset list: shader effects plus the migrated Geometry
+    // spectrum/waveform elements.
+    static std::vector<std::string> spectrumPresetNames();
+    // Rebuilds a Spectrum block's params and input ports for its current preset,
+    // preserving the values of keys the new preset also uses.
+    static void applySpectrumPreset(Node &node);
 
 private:
     Registry();

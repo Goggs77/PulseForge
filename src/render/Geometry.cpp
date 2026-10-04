@@ -32,6 +32,24 @@ std::vector<std::string> shapeNames() {
     return names;
 }
 
+const char *spectrumElementName(SpectrumElement element) {
+    switch (element) {
+        case SpectrumElement::RadialBars: return "Radial Bars";
+        case SpectrumElement::BarSpectrum: return "Bar Spectrum";
+        case SpectrumElement::WaveformRing: return "Waveform Ring";
+        case SpectrumElement::WaveformLine: return "Waveform Line";
+        default: return "None";
+    }
+}
+
+std::vector<std::string> spectrumElementNames() {
+    std::vector<std::string> names;
+    for (int i = 0; i < static_cast<int>(SpectrumElement::Count); ++i) {
+        names.emplace_back(spectrumElementName(static_cast<SpectrumElement>(i)));
+    }
+    return names;
+}
+
 namespace {
 
 struct Particle {
@@ -52,6 +70,22 @@ float frand() {
 }
 
 Color blend(const GeomSpec &spec, float t) { return palette::mix(spec.colorA, spec.colorB, t); }
+
+float sampleSpectrum(const SpectrumSpec &spec, float position) {
+    if (!spec.spectrum || spec.spectrumCount <= 0) return 0.0f;
+    const float x = std::clamp(position, 0.0f, 0.9999f);
+    const int index = static_cast<int>(x * spec.spectrumCount);
+    return std::clamp(spec.spectrum[std::min(index, spec.spectrumCount - 1)], 0.0f, 1.0f);
+}
+
+float sampleWave(const SpectrumSpec &spec, float position) {
+    if (!spec.wave || spec.waveCount <= 0) return 0.0f;
+    const float x = std::clamp(position, 0.0f, 0.9999f);
+    const int index = static_cast<int>(x * spec.waveCount);
+    return spec.wave[std::min(index, spec.waveCount - 1)];
+}
+
+Color blend(const SpectrumSpec &spec, float t) { return palette::mix(spec.colorA, spec.colorB, t); }
 
 void drawOrbit(const GeomSpec &spec, float cx, float cy, float radius) {
     const int orbits = std::max(1, spec.count / 8);
@@ -165,6 +199,89 @@ void drawPrimitive(Shape shape, const GeomSpec &spec) {
                            size, 2.0f, palette::withAlpha(Color{0, 0, 0, 255}, spec.alpha * 0.55f));
                 DrawTextEx(GetFontDefault(), spec.text.c_str(), position, size, 2.0f,
                            palette::withAlpha(spec.colorA, spec.alpha));
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    if (blendMode) EndBlendMode();
+}
+
+void drawSpectrumElement(SpectrumElement element, const SpectrumSpec &spec) {
+    const float minDim = static_cast<float>(std::min(spec.width, spec.height));
+    const float cx = spec.cx * static_cast<float>(spec.width);
+    const float cy = spec.cy * static_cast<float>(spec.height);
+    const float radius = spec.radius * minDim;
+    const bool blendMode = spec.additive;
+
+    if (blendMode) BeginBlendMode(BLEND_ADDITIVE);
+
+    switch (element) {
+        case SpectrumElement::RadialBars: {
+            const int bars = std::max(4, spec.count);
+            const float inner = radius * 0.45f;
+            for (int i = 0; i < bars; ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(bars);
+                const float magnitude = sampleSpectrum(spec, std::pow(t, 0.8f));
+                const float angle = spec.rotation + t * 6.2831853f;
+                const float outer = inner + radius * (0.08f + magnitude * 1.15f);
+                const Vector2 from{cx + std::cos(angle) * inner, cy + std::sin(angle) * inner};
+                const Vector2 to{cx + std::cos(angle) * outer, cy + std::sin(angle) * outer};
+                DrawLineEx(from, to, std::max(1.0f, spec.thickness * (0.4f + magnitude)),
+                           palette::withAlpha(blend(spec, magnitude), spec.alpha));
+                DrawCircleV(to, spec.thickness * 0.8f * (0.4f + magnitude),
+                            palette::withAlpha(blend(spec, magnitude), spec.alpha * 0.9f));
+            }
+            break;
+        }
+        case SpectrumElement::BarSpectrum: {
+            const int bars = std::max(4, spec.count);
+            const float baseline = spec.height * 0.95f;
+            const float width = static_cast<float>(spec.width) / static_cast<float>(bars);
+            const float maxHeight = radius * 1.6f;
+            for (int i = 0; i < bars; ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(bars);
+                const float magnitude = sampleSpectrum(spec, std::pow(t, 0.85f));
+                const float h = maxHeight * (0.05f + magnitude);
+                const Rectangle rect{static_cast<float>(i) * width + width * 0.12f,
+                                     baseline - h, width * 0.76f, h};
+                DrawRectangleGradientV(static_cast<int>(rect.x), static_cast<int>(rect.y),
+                                       static_cast<int>(std::max(1.0f, rect.width)),
+                                       static_cast<int>(std::max(1.0f, rect.height)),
+                                       palette::withAlpha(blend(spec, magnitude), spec.alpha),
+                                       palette::withAlpha(spec.colorA, spec.alpha * 0.25f));
+            }
+            break;
+        }
+        case SpectrumElement::WaveformRing: {
+            const int points = 256;
+            for (int i = 0; i < points; ++i) {
+                const float t0 = static_cast<float>(i) / points;
+                const float t1 = static_cast<float>(i + 1) / points;
+                const float a0 = spec.rotation + t0 * 6.2831853f;
+                const float a1 = spec.rotation + t1 * 6.2831853f;
+                const float r0 = radius * (1.0f + sampleWave(spec, t0) * 0.35f);
+                const float r1 = radius * (1.0f + sampleWave(spec, t1) * 0.35f);
+                DrawLineEx(Vector2{cx + std::cos(a0) * r0, cy + std::sin(a0) * r0},
+                           Vector2{cx + std::cos(a1) * r1, cy + std::sin(a1) * r1},
+                           std::max(1.0f, spec.thickness),
+                           palette::withAlpha(blend(spec, t0), spec.alpha));
+            }
+            break;
+        }
+        case SpectrumElement::WaveformLine: {
+            const int points = 320;
+            const float width = static_cast<float>(spec.width);
+            for (int i = 0; i < points; ++i) {
+                const float t0 = static_cast<float>(i) / points;
+                const float t1 = static_cast<float>(i + 1) / points;
+                const float y0 = cy + sampleWave(spec, t0) * radius;
+                const float y1 = cy + sampleWave(spec, t1) * radius;
+                DrawLineEx(Vector2{t0 * width, y0}, Vector2{t1 * width, y1},
+                           std::max(1.0f, spec.thickness),
+                           palette::withAlpha(blend(spec, t0), spec.alpha));
             }
             break;
         }
