@@ -60,7 +60,8 @@ covers the group's layered order (compacted depths, row rules), the member list
 parsing/formatting and a Sticky Note/Group project round trip. It also checks
 the Picture block (a BMP with a red top and blue bottom decodes the right way
 up), the Textbox (white glyph over a kept Layer) and that a two frame gif
-advances with the timeline. It also checks the ADC -> DAC
+advances with the timeline, and the meter's ballistics (a VU that averages and
+releases slowly, a digital meter that stays raw). It also checks the ADC -> DAC
 Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
 left/right separation, live frame-window reuse, and the input-driven Spectrum
 Analyzer (silent / precomputed / live). It also checks that a Spectrum preset
@@ -222,6 +223,20 @@ docs         rendering notes and the README overlay image
   `Widgets.cpp`). A press that ends an edit must be followed by an
   `gEdit.active() && gEdit.id == id` check before the buffer is read, otherwise
   the field commits an empty string.
+- A `Param` marked `multiline` (the Sticky Note's text) is edited with
+  `ui::textArea`: the same shared editor, but Enter inserts a newline instead of
+  finishing the edit, Up/Down walk the *wrapped* lines, and the box scrolls
+  vertically with the caret. `layoutEditLines` is the single layout used by the
+  drawing, the caret and mouse placement - keep them on it, or clicking will
+  land between two different wrap models.
+- Any `ParamKind::File` parameter draws a Browse button under its path box; the
+  dialog's `node-file` purpose writes the chosen path into
+  `BrowserState::paramKey` on the selected node, using the parameter's `hint` as
+  the extension filter.
+- `Node::pushHistory` keeps the newest sample at the *back* of the buffer and
+  `Node::historyAt` walks back from there (position 1 = newest, 0 = oldest).
+  It used to index from the front, which mirrored every in-block diagram and
+  made the digital meter's readout show the oldest retained sample.
 - Audio preview: raylib streams through a double buffer.
   `SetAudioStreamBufferSizeDefault` sets the *sub-buffer* size and
   `UpdateAudioStream` must write exactly one sub-buffer (2048 frames) per call,
@@ -281,6 +296,12 @@ docs         rendering notes and the README overlay image
   visual history once per video frame; do not reintroduce per-sample O(N) sums
   or full-buffer shifts. Dynamics uses a linear-domain static curve
   (`detector^exponent * factor`) instead of a log10 + pow pair per sample.
+- The VU meter integrates the rectified signal with time-constant ballistics
+  (`dtOf(ctx)` based, so it reads the same at 24 fps, 240 fps and inside an
+  audio-rate region): ~100 ms rising and 0.3-1.2 s falling through the Release
+  knob, with 0 VU at -18 dBFS. The Digital mode must stay raw - no averaging,
+  no release - because that is what its diagram is for; it also keeps the
+  history push at video rate inside a region.
 - Dynamics applies pre-gain and post-gain outside the compressor's ballistics,
   so both must ramp across a rendered window (`DynamicsSettings::rampGains` with
   the `...DbStart` values `evalDynamics` keeps in `runtimeState`) whenever the

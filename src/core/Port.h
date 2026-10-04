@@ -234,6 +234,9 @@ struct Param {
     std::vector<float> values;           // Matrix grid (row major, 16 entries)
     int matrixSize = 4;                  // active NxN sub-grid for Matrix params
     std::string hint;                    // File extension filter, e.g. ".glsl"
+    // Text parameters edited in a multi-line box that keeps real line breaks
+    // (the Sticky Note's text).
+    bool multiline = false;
 
     int intValue() const { return static_cast<int>(std::lround(value)); }
     void setInt(int v) { value = static_cast<float>(v); }

@@ -23,6 +23,8 @@ struct BrowserState {
     std::string directory;
     std::string filter;       // ".glsl", ".wav,.mp3", ...
     std::string fileName;
+    // Parameter the "node-file" purpose writes the chosen path into.
+    std::string paramKey;
     std::vector<std::string> entryNames;
     std::vector<bool> entryIsDirectory;
     float scroll = 0.0f;

@@ -85,6 +85,12 @@ bool dropdown(Rectangle r, int *value, const std::vector<std::string> &options,
               int stableId = 0);
 bool textField(Rectangle r, std::string *value, const char *placeholder = nullptr,
                int stableId = 0);
+// Multi-line text area: the buffer keeps real line breaks, long lines wrap
+// visually, the caret follows click and arrow keys (including up/down across the
+// wrapped lines) and the box scrolls to keep the caret in view. It shares the
+// frame's single editor with textField, so only one field edits at a time.
+bool textArea(Rectangle r, std::string *value, const char *placeholder = nullptr,
+              int stableId = 0);
 bool colorField(Rectangle r, Color *value, int stableId = 0);
 bool curveEditor(Rectangle r, Param *curve, bool bipolar, double playhead01, int stableId = 0);
 void progressBar(Rectangle r, float fraction, const char *label = nullptr);

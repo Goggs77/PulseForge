@@ -126,6 +126,7 @@ struct ActiveEdit {
     pf::TextEditState state;  // caret/selection/buffer, shared with the tests
     int id = -1;              // widget that owns the edit, -1 when idle
     float scroll = 0.0f;      // horizontal scroll in pixels
+    float scrollY = 0.0f;     // vertical scroll of a multi-line area
     bool dragging = false;    // mouse drag selection in progress
 
     bool active() const { return id >= 0; }
@@ -178,6 +179,7 @@ void textEditBegin(int id, const std::string &value, int caretIndex) {
     gEdit.id = id;
     gEdit.state.begin(value, caretIndex);
     gEdit.scroll = 0.0f;
+    gEdit.scrollY = 0.0f;
     gEdit.dragging = false;
     setKeyboardCaptured(true);
 }
@@ -187,6 +189,7 @@ void textEditEnd() {
     gEdit.state.clear();
     gEdit.dragging = false;
     gEdit.scroll = 0.0f;
+    gEdit.scrollY = 0.0f;
     setKeyboardCaptured(false);
 }
 
@@ -903,6 +906,243 @@ bool textField(Rectangle r, std::string *value, const char *placeholder, int sta
             drawTextClipped(Rectangle{r.x + 8.0f, r.y, r.width - 16.0f, r.height}, value->c_str(),
                             12.0f, t.text);
         }
+    }
+    return changed;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-line text area
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Visual lines of a wrapped buffer: byte ranges [begin, end) with the newline
+// that ended them excluded. The drawing, the caret and mouse placement all use
+// this one layout, so they can never disagree.
+struct EditLine {
+    int begin = 0;
+    int end = 0;
+};
+
+std::vector<EditLine> layoutEditLines(const std::string &text, float size, float maxWidth) {
+    std::vector<EditLine> lines;
+    const int total = static_cast<int>(text.size());
+    if (total == 0) {
+        lines.push_back(EditLine{0, 0});
+        return lines;
+    }
+    int cursor = 0;
+    while (true) {
+        EditLine line{cursor, cursor};
+        int scan = cursor;
+        while (scan < total && text[static_cast<size_t>(scan)] != '\n') {
+            const bool firstWord = scan == line.begin;
+            int wordEnd = scan;
+            while (wordEnd < total && text[static_cast<size_t>(wordEnd)] != ' ' &&
+                   text[static_cast<size_t>(wordEnd)] != '\n') {
+                ++wordEnd;
+            }
+            const std::string candidate =
+                text.substr(static_cast<size_t>(line.begin),
+                            static_cast<size_t>(wordEnd - line.begin));
+            if (firstWord || textWidth(candidate.c_str(), size) <= maxWidth) {
+                line.end = wordEnd;
+                scan = wordEnd;
+                while (scan < total && text[static_cast<size_t>(scan)] == ' ') ++scan;
+                if (scan > wordEnd) line.end = scan;  // the spaces belong to this line
+            } else {
+                break;
+            }
+        }
+        if (scan >= total || text[static_cast<size_t>(scan)] == '\n') {
+            line.end = scan;
+            lines.push_back(line);
+            if (scan >= total) break;
+            cursor = scan + 1;
+            if (cursor >= total) lines.push_back(EditLine{total, total});
+            continue;
+        }
+        // The next word does not fit on this line: wrap before it.
+        lines.push_back(line);
+        cursor = line.end;
+    }
+    return lines;
+}
+
+int editLineForOffset(const std::vector<EditLine> &lines, int offset) {
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (offset <= lines[i].end) return static_cast<int>(i);
+    }
+    return static_cast<int>(lines.size()) - 1;
+}
+
+float editOffsetX(const std::string &text, int offset, float size) {
+    return textWidth(text.substr(0, static_cast<size_t>(std::max(0, offset))).c_str(), size);
+}
+
+// Nearest character boundary of one line to a pixel x.
+int editIndexAtX(const std::string &text, const EditLine &line, float x, float size) {
+    int best = line.begin;
+    float bestDistance = 1.0e9f;
+    const int end = std::min(line.end, static_cast<int>(text.size()));
+    for (int index = line.begin; index <= end; ++index) {
+        if (!pf::textIndexOnBoundary(text, index)) continue;
+        const float distance = std::fabs(editOffsetX(text, index, size) - x);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = index;
+        }
+    }
+    return best;
+}
+
+}  // namespace
+
+bool textArea(Rectangle r, std::string *value, const char *placeholder, int stableId) {
+    const Theme &t = theme();
+    const int id = stableId != 0 ? stableId : nextId();
+    const bool interactive = !inputBlocked();
+    const bool isHovered = interactive && hovered(r);
+    const bool editing = gEdit.active() && gEdit.id == id;
+    const float size = 12.5f;
+    const float lineHeight = size * t.uiScale * 1.35f;
+    const float inset = s(6.0f);
+    const float barWidth = s(7.0f);
+    const Rectangle inner{r.x + inset, r.y + inset,
+                          std::max(8.0f, r.width - inset * 2.0f - barWidth),
+                          std::max(8.0f, r.height - inset * 2.0f)};
+    if (interactive && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (isHovered) {
+            if (!editing) textEditBegin(id, *value, static_cast<int>(value->size()));
+            const std::vector<EditLine> lines = layoutEditLines(gEdit.state.text(), size, inner.width);
+            const int line = std::clamp(
+                static_cast<int>((GetMouseY() - inner.y + gEdit.scrollY) / lineHeight), 0,
+                static_cast<int>(lines.size()) - 1);
+            const bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+            gEdit.state.setCaret(
+                editIndexAtX(gEdit.state.text(), lines[static_cast<size_t>(line)],
+                             GetMousePosition().x, size),
+                shift);
+            gEdit.dragging = true;
+        } else if (editing) {
+            *value = gEdit.state.text();
+            textEditEnd();
+        }
+    }
+    bool changed = false;
+    if (editing && gEdit.active() && gEdit.id == id) {
+        // Enter inserts a line break instead of finishing the edit; Escape ends
+        // it and restores the text as usual.
+        bool commit = false;
+        const bool finished = textEditUpdate(&commit);
+        if (finished && commit) {
+            gEdit.state.insert("\n");
+        } else if (finished) {
+            changed = *value != gEdit.state.original();
+            *value = gEdit.state.original();
+            textEditEnd();
+        }
+        if (gEdit.active() && gEdit.id == id) {
+            // Up/Down walk the *visual* lines: the caret keeps its pixel column.
+            const std::vector<EditLine> lines =
+                layoutEditLines(gEdit.state.text(), size, inner.width);
+            const bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+            const int caret = gEdit.state.caret();
+            const int current = editLineForOffset(lines, caret);
+            for (int step = 0; step < 2; ++step) {
+                const int key = step == 0 ? KEY_UP : KEY_DOWN;
+                if (!keyRepeats(key)) continue;
+                const int target = std::clamp(current + (step == 0 ? -1 : 1), 0,
+                                              static_cast<int>(lines.size()) - 1);
+                const float columnX = editOffsetX(gEdit.state.text(), caret, size);
+                gEdit.state.setCaret(
+                    editIndexAtX(gEdit.state.text(), lines[static_cast<size_t>(target)], columnX,
+                                 size),
+                    shift);
+                break;
+            }
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && gEdit.dragging) {
+                const std::vector<EditLine> dragLines =
+                    layoutEditLines(gEdit.state.text(), size, inner.width);
+                const int line = std::clamp(
+                    static_cast<int>((GetMouseY() - inner.y + gEdit.scrollY) / lineHeight), 0,
+                    static_cast<int>(dragLines.size()) - 1);
+                gEdit.state.setCaret(
+                    editIndexAtX(gEdit.state.text(), dragLines[static_cast<size_t>(line)],
+                                 GetMousePosition().x, size),
+                    true);
+            } else if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                gEdit.dragging = false;
+            }
+            changed = *value != gEdit.state.text();
+            *value = gEdit.state.text();
+        }
+    }
+
+    DrawRectangleRounded(r, roundness(r, s(5.0f)), 6,
+                         editing ? palette::modulate(t.panelAlt, 1.06f) : t.panelAlt);
+    DrawRectangleRoundedLines(r, roundness(r, s(5.0f)), 6, editing ? t.accent : t.border);
+
+    const std::string &text = editing ? gEdit.state.text() : *value;
+    const std::vector<EditLine> lines = layoutEditLines(text, size, inner.width);
+    const float contentHeight = static_cast<float>(lines.size()) * lineHeight;
+    // Keep the caret visible, then let a too-long buffer scroll.
+    if (editing) {
+        const int caretLine = editLineForOffset(lines, gEdit.state.caret());
+        const float caretTop = static_cast<float>(caretLine) * lineHeight;
+        if (caretTop - gEdit.scrollY < 0.0f) gEdit.scrollY = caretTop;
+        if (caretTop + lineHeight - gEdit.scrollY > inner.height) {
+            gEdit.scrollY = caretTop + lineHeight - inner.height;
+        }
+    }
+    gEdit.scrollY = std::clamp(gEdit.scrollY, 0.0f, std::max(0.0f, contentHeight - inner.height));
+
+    BeginScissorMode(static_cast<int>(inner.x), static_cast<int>(inner.y),
+                     static_cast<int>(inner.width), static_cast<int>(inner.height));
+    if (text.empty() && placeholder && *placeholder) {
+        drawText(Rectangle{inner.x, inner.y, inner.width, lineHeight}, placeholder, size,
+                 palette::withAlpha(t.textDim, 0.85f));
+    } else {
+        const int selectionMin = editing ? gEdit.state.selectionMin() : 0;
+        const int selectionMax = editing ? gEdit.state.selectionMax() : 0;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const float lineY = inner.y + static_cast<float>(i) * lineHeight - gEdit.scrollY;
+            if (lineY + lineHeight < inner.y) continue;
+            if (lineY > inner.y + inner.height) break;
+            const EditLine &line = lines[i];
+            if (editing && selectionMax > selectionMin && selectionMax > line.begin &&
+                selectionMin < line.end) {
+                const int from = std::max(selectionMin, line.begin);
+                const int to = std::min(selectionMax, line.end);
+                const float x0 = inner.x + editOffsetX(text, from, size);
+                const float x1 = inner.x + editOffsetX(text, to, size);
+                DrawRectangle(static_cast<int>(std::floor(x0)), static_cast<int>(lineY),
+                              static_cast<int>(std::max(2.0f, x1 - x0)),
+                              static_cast<int>(lineHeight),
+                              palette::withAlpha(t.accent, 0.45f));
+            }
+            const std::string visible =
+                text.substr(static_cast<size_t>(line.begin),
+                            static_cast<size_t>(std::max(0, line.end - line.begin)));
+            drawText(Rectangle{inner.x, lineY, std::max(inner.width, 1.0f), lineHeight},
+                     visible.c_str(), size, t.text);
+        }
+        if (editing && std::fmod(static_cast<float>(gCaretBlink), 1.0f) < 0.5f) {
+            const int caretLine = editLineForOffset(lines, gEdit.state.caret());
+            const float caretX =
+                inner.x + editOffsetX(text, gEdit.state.caret(), size);
+            const float caretY =
+                inner.y + static_cast<float>(caretLine) * lineHeight - gEdit.scrollY;
+            DrawRectangle(static_cast<int>(std::floor(caretX)), static_cast<int>(caretY),
+                          std::max(1, static_cast<int>(s(1.5f))),
+                          static_cast<int>(lineHeight), t.text);
+        }
+    }
+    EndScissorMode();
+    if (contentHeight > inner.height) {
+        scrollbar(Rectangle{r.x + r.width - barWidth - s(3.0f), inner.y, barWidth,
+                            inner.height},
+                  &gEdit.scrollY, contentHeight, inner.height);
     }
     return changed;
 }

@@ -114,8 +114,11 @@ float Node::historyAt(const std::vector<float> &buffer, int capacity, int count,
     if (filled <= 0) return 0.0f;
     const float offsetFromNewest = (1.0f - std::clamp(position, 0.0f, 1.0f)) * (filled - 1);
     const int index = static_cast<int>(std::lround(offsetFromNewest));
-    const int start = capacity - filled;
-    const int clamped = std::clamp(start + index, 0, static_cast<int>(buffer.size()) - 1);
+    // pushHistory keeps the newest sample at the back, so walk back from there:
+    // position 1 is the back, position 0 the oldest sample still held.
+    const int clamped =
+        std::clamp(static_cast<int>(buffer.size()) - 1 - index, 0,
+                   static_cast<int>(buffer.size()) - 1);
     return buffer[static_cast<size_t>(clamped)];
 }
 

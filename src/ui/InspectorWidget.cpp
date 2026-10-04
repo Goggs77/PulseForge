@@ -83,15 +83,40 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
                 state.project.dirty = true;
             }
             cursor.y += kRow() + kGap();
+            {
+                // Browse sits right under the path box and uses the parameter's
+                // own extension filter.
+                const Rectangle browse{cursor.x + labelWidth, cursor.y,
+                                       std::min(cursor.width - labelWidth, ui::s(120.0f)),
+                                       ui::s(20.0f)};
+                if (ui::smallButton(browse, "Browse...")) {
+                    openBrowser(state, "node-file", "Open " + param.label, param.hint,
+                                state.projectDirectory);
+                    state.browser.paramKey = param.key;
+                }
+                cursor.y += ui::s(22.0f);
+            }
             break;
 
         case ParamKind::Text:
             ui::drawTextClipped(labelRect, param.label.c_str(), 12.0f, t.textDim);
-            if (ui::textField(fieldRect, &param.text, nullptr,
-                               ui::widgetId(node.id, param.key.c_str()))) {
-                state.project.dirty = true;
+            if (param.multiline) {
+                // A larger box with word wrap, so notes can be several lines.
+                cursor.y += 16.0f;
+                const float height = ui::s(116.0f);
+                if (ui::textArea(Rectangle{cursor.x, cursor.y, cursor.width, height}, &param.text,
+                                 "Write a note...",
+                                 ui::widgetId(node.id, param.key.c_str()))) {
+                    state.project.dirty = true;
+                }
+                cursor.y += height + kGap();
+            } else {
+                if (ui::textField(fieldRect, &param.text, nullptr,
+                                   ui::widgetId(node.id, param.key.c_str()))) {
+                    state.project.dirty = true;
+                }
+                cursor.y += kRow() + kGap();
             }
-            cursor.y += kRow() + kGap();
             break;
 
         case ParamKind::Int: {
@@ -559,15 +584,10 @@ void drawInspector(UiState &state, Rectangle bounds) {
 
     cursor.y += 4.0f;
     if (node->kind == "render.shader") {
-        // The block's ports follow the file, so they are rebuilt whenever the
-        // path changes (here, or through the shader browser).
-        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width * 0.5f - 2.0f, 26.0f},
-                       "Pick .glsl")) {
-            openBrowser(state, "shader", "Open fragment shader", ".glsl", state.projectDirectory);
-        }
-        if (ui::button(Rectangle{cursor.x + cursor.width * 0.5f + 2.0f, cursor.y,
-                                 cursor.width * 0.5f - 2.0f, 26.0f},
-                       "Reload shaders")) {
+        // The path is picked with the generic Browse button under the file
+        // parameter; the ports follow that file, so they are rebuilt whenever
+        // the path changes.
+        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, 26.0f}, "Reload shaders")) {
             const int reloaded = state.renderer.shaders().reloadChanged();
             char message[64];
             std::snprintf(message, sizeof(message), "Reloaded %d shader(s)", reloaded);

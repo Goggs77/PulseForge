@@ -1746,6 +1746,77 @@ int main(int argc, char **argv) {
                         }
                     }
 
+                    // VU ballistics: the needle averages the rectified signal and
+                    // falls slowly, while the digital meter follows the raw value
+                    // with no release at all.
+                    if (ok) {
+                        Graph ballistics;
+                        Node *vu = ballistics.addNode("dbg.meter", 0, 0);
+                        Node *vuSource = ballistics.addNode("math.constant", 200, 0);
+                        Node *digital = ballistics.addNode("dbg.meter", 400, 0);
+                        Node *digitalSource = ballistics.addNode("math.constant", 600, 0);
+                        if (!vu || !vuSource || !digital || !digitalSource) {
+                            ok = false;
+                            what = "meter blocks are not registered";
+                        } else {
+                            digital->setInt("mode", 1);
+                            std::string why;
+                            ok = ballistics.connect(vuSource->id, 0, vu->id, 0, &why) &&
+                                 ballistics.connect(digitalSource->id, 0, digital->id, 0, &why);
+                            if (!ok) what = why;
+                        }
+                        const auto lastPlotted = [](const Node &node) {
+                            const int capacity = static_cast<int>(node.historyA.size());
+                            if (capacity <= 0) return 0.0f;
+                            return Node::historyAt(node.historyA, capacity, node.historyCount, 1.0f);
+                        };
+                        if (ok) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            // 0.1 s of full scale, then silence.
+                            for (int frame = 0; frame < 6; ++frame) {
+                                vuSource->setFloat("value", 1.0f);
+                                digitalSource->setFloat("value", 1.0f);
+                                ctx.frame = frame;
+                                ctx.time = frame / 60.0;
+                                ballistics.evaluate(ctx);
+                            }
+                            const double vuRising = vu->runtimeState["average"];
+                            const float digitalFull = lastPlotted(*digital);
+                            for (int frame = 6; frame < 8; ++frame) {
+                                vuSource->setFloat("value", 0.0f);
+                                digitalSource->setFloat("value", 0.0f);
+                                ctx.frame = frame;
+                                ctx.time = frame / 60.0;
+                                ballistics.evaluate(ctx);
+                            }
+                            const double vuFalling = vu->runtimeState["average"];
+                            const float digitalSilent = lastPlotted(*digital);
+                            // Averaging: 0.1 s of signal does not reach full scale.
+                            // Slow release: two silent frames barely move it.
+                            // Digital: exactly the raw value, both times.
+                            if (vuRising < 0.3 || vuRising > 0.9) {
+                                ok = false;
+                                what = "the VU average is not averaged (" +
+                                       std::to_string(vuRising) + ")";
+                            } else if (vuFalling < 0.4) {
+                                ok = false;
+                                what = "the VU release is too fast (" +
+                                       std::to_string(vuFalling) + ")";
+                            } else if (std::fabs(digitalFull - 1.0f) > 1e-4f ||
+                                       std::fabs(digitalSilent) > 1e-4f ||
+                                       std::fabs(static_cast<float>(digital->runtimeState["average"])) >
+                                           1e-4f) {
+                                ok = false;
+                                what = "the Digital meter is not showing raw values (full " +
+                                       std::to_string(digitalFull) + ", silent " +
+                                       std::to_string(digitalSilent) + ", avg " +
+                                       std::to_string(digital->runtimeState["average"]) + ")";
+                            }
+                        }
+                    }
+
                     // Guard: NaN and both infinities are silenced and flagged.
                     Graph guardGraph;
                     Node *guardSource = guardGraph.addNode("math.constant", 0, 0);
@@ -1845,7 +1916,8 @@ int main(int argc, char **argv) {
 
                     if (ok) {
                         std::printf("  blocks   : meter %.3f, guard lamps, ringbuffer average "
-                                    "%.3f, biquad lp=%.3f hp=%.3f bp=%.3f\n",
+                                    "%.3f, biquad lp=%.3f hp=%.3f bp=%.3f, VU averages and "
+                                    "releases slowly while the digital meter stays raw\n",
                                     meterSource ? meterSource->pfloat("value") : 0.0f, ringAverage,
                                     lowPass, highPass, bandPass);
                     } else {

@@ -1427,23 +1427,51 @@ void evalSignalFilter(Node &node, EvalContext &ctx, const std::vector<Value> &in
 // gets displayed. 0 VU sits at -18 dBFS.
 void evalMeter(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                std::vector<Value> &out) {
-    (void)ctx;
+    // The block always passes the signal through untouched.
     const float value = scalarFrom(in, 0);
     out[0] = Value::makeScalar(value);
-
+    const bool digital = node.pint("mode", 0) == 1;
     const double magnitude = std::fabs(static_cast<double>(value));
     const float dbfs = magnitude > 1.0e-6 ? static_cast<float>(20.0 * std::log10(magnitude))
                                           : -120.0f;
-    const float vu = dbfs + 18.0f;  // 0 VU = -18 dBFS
-    const float release = std::clamp(node.pfloat("ballistics", 0.55f), 0.0f, 0.95f);
-    double needle = node.runtimeState["needle"];
-    needle = vu >= needle ? vu : needle * release + vu * (1.0 - release);
-    node.runtimeState["needle"] = needle;
-    node.runtimeState["vu"] = vu;
     node.runtimeState["db"] = dbfs;
-    node.runtimeState["peak"] = std::max<double>(vu, node.runtimeState["peak"] * 0.99);
-    Node::pushHistory(node.historyA, value, kMeterHistory);
-    ++node.historyCount;
+    node.runtimeState["vu"] = dbfs + 18.0f;  // 0 VU = -18 dBFS
+
+    double display = magnitude;
+    if (digital) {
+        // A digital meter shows the raw value: no averaging, no release. The
+        // diagram and the readout follow the input directly.
+        node.runtimeState["average"] = magnitude;
+        node.runtimeState["needle"] = dbfs + 18.0f;
+    } else {
+        // A VU meter averages the rectified signal with analog ballistics: a
+        // fast-ish attack and a slow release, both as time constants so the
+        // needle reads the same at any frame rate (and inside an audio-rate
+        // region, where it integrates every sample). The Release knob
+        // stretches the fall from ~0.3 s to ~1.2 s.
+        const double release = std::clamp(node.pfloat("ballistics", 0.55f), 0.0f, 0.95f);
+        double average = node.runtimeState["average"];
+        const double tau = magnitude > average ? 0.1 : (0.3 + release * 0.9);
+        const double coefficient =
+            1.0 - std::exp(-std::max(0.0, static_cast<double>(dtOf(ctx))) / tau);
+        average += coefficient * (magnitude - average);
+        node.runtimeState["average"] = average;
+        display = average;
+        const float averageDb =
+            average > 1.0e-6 ? static_cast<float>(20.0 * std::log10(average)) : -120.0f;
+        node.runtimeState["needle"] = averageDb + 18.0f;
+        node.runtimeState["peak"] = std::max<double>(
+            static_cast<double>(averageDb) + 18.0, node.runtimeState["peak"] * 0.99);
+    }
+    // The in-block display is a video-rate view: at audio rate push one sample
+    // per video frame instead of one per audio sample.
+    if (!ctx.audioRate ||
+        node.runtimeState["meter.visualFrame"] != static_cast<double>(ctx.frame)) {
+        Node::pushHistory(node.historyA, digital ? value : static_cast<float>(display),
+                          kMeterHistory);
+        ++node.historyCount;
+        node.runtimeState["meter.visualFrame"] = static_cast<double>(ctx.frame);
+    }
 }
 
 // Guard: non-finite scalars are silenced and the matching lamp is lit. The lamps
@@ -3179,7 +3207,10 @@ void Registry::registerBuiltins() {
             "Inspector and drawn in the block, so a pipeline can explain itself.";
         def.inputs = {};
         def.outputs = {};
-        def.params = {makeTextParam("text", "Text", "Note", "Note")};
+        Param note = makeTextParam("text", "Text", "Note", "Note");
+        // Edited in a multi-line box; the block grows with the wrapped text.
+        note.multiline = true;
+        def.params = {note};
         add(std::move(def));
     }
     {

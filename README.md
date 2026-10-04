@@ -194,6 +194,9 @@ executable when *Save preferences* is pressed.
 - **Sliders** can be dragged, or **double-clicked** to type an exact value.
   Whatever you enter is clamped to the slider's range and the handle jumps to
   match.
+- **File parameters have a Browse button** right under the path box (a picture, a
+  font, a shader), using that parameter's own extension filter; the Shader block
+  still has *Reload shaders* for a file you edited on disk.
 - **Frequency sliders are logarithmic**: the Low/High Hz controls in Frequency
   Band map the track the way the ear and the analysis bands divide the
   spectrum, and their readouts are whole Hz instead of scientific notation.
@@ -320,7 +323,7 @@ readout.
 
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
-| VU / Digital Meter | In | Out | Pure pass-through that shows the value either as a classic VU meter (0 VU = **-18 dBFS**, fast attack/slow release, peak-hold tick) or as a 4-second value/time diagram |
+| VU / Digital Meter | In | Out | Pure pass-through. The **VU** mode is an averaging meter with analog ballistics: the rectified signal is integrated (about 100 ms up, 300 ms down, stretched to ~1.2 s by the Release knob) with 0 VU = **-18 dBFS** and a peak-hold tick. The **Digital** mode ignores the release and shows the raw values in its 4-second value/time diagram |
 | Guard | In | Out | Silences non-finite scalars: NaN and +/-Inf become 0. Three lamps flash for +Inf, -Inf and NaN, labelled with the matching symbols |
 
 ### Render
@@ -347,7 +350,7 @@ readout.
 
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
-| Sticky Note | - | - | A note with no ports and no effect on the render; the text is edited in the Inspector and wrapped inside the block |
+| Sticky Note | - | - | A note with no ports and no effect on the render. Its text is edited in a large wrapped box in the Inspector (Enter breaks a line), and the block grows with the text - never smaller than its default size |
 | Group | - | - | Owns blocks: drop one inside to add it (the frame highlights while you drag over it), drag it out to remove it. Members are re-arranged in layers that follow the chain and move with the frame; groups cannot be nested |
 
 Sorting blocks draw as translucent greyscale cards instead of a category colour:

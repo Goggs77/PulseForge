@@ -340,6 +340,16 @@ void drawBrowser(UiState &state) {
                     state.project.dirty = true;
                     setStatus(state, "Shader set to " + fileNameOf(fullPath));
                 }
+            } else if (purpose == "node-file") {
+                // Any File parameter (a picture, a font, ...) picks its path
+                // through the same dialog.
+                if (Node *node = state.project.graph.find(state.selectedNode)) {
+                    if (!browser.paramKey.empty()) {
+                        node->setText(browser.paramKey, fullPath);
+                        state.project.dirty = true;
+                        setStatus(state, node->displayTitle() + ": " + fileNameOf(fullPath));
+                    }
+                }
             }
         }
     }
