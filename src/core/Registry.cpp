@@ -328,10 +328,10 @@ void evalPulse(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::
     const bool offsetConnected = in.size() > 2 && in[2].type == PortType::Scalar;
     float bpm = node.pfloat("bpm", 120.0f);
     if (bpmConnected) bpm *= std::pow(2.0f, std::clamp(in[0].scalar, -4.0f, 4.0f));
-    bpm = std::clamp(bpm, 20.0f, 300.0f);
+    bpm = std::clamp(bpm, 20.0f, 325799.0f);
     const int division = node.pint("division", 2);
     static const float divisors[] = {1.0f, 0.5f, 0.25f, 0.125f, 0.0625f};
-    const float beatLength = 60.0f / bpm * divisors[std::clamp(division, 0, 4)];
+    const float beatLength = 4.0f * 60.0f / bpm * divisors[std::clamp(division, 0, 4)];// usual rescale
     float decay = node.pfloat("decay", 0.5f);
     if (decayConnected) decay *= std::max(0.0f, 1.0f + in[1].scalar);
     decay = std::clamp(decay, 0.02f, 2.0f);
