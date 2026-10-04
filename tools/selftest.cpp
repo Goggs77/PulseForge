@@ -426,6 +426,92 @@ int main(int argc, char **argv) {
                 }
             }
 
+            // Lerp mixes two Scalars and Clamp restricts one. Both fall back to
+            // their Inspector values when a port is unconnected and let a
+            // connected port take over, so they work as constants, as mixers
+            // and as modulation targets at the same time.
+            if (result == 0) {
+                bool ok = true;
+                std::string what;
+                Graph scalars;
+                Node *lerp = scalars.addNode("math.lerp", 0, 0);
+                Node *clamp = scalars.addNode("math.clamp", 220, 0);
+                Node *defClamp = scalars.addNode("math.clamp", 440, 0);
+                Node *factor = scalars.addNode("math.constant", 220, 140);
+                Node *value = scalars.addNode("math.constant", 440, 140);
+                Node *lowLimit = scalars.addNode("math.constant", 440, 260);
+                Node *highLimit = scalars.addNode("math.constant", 440, 380);
+                if (!lerp || !clamp || !defClamp || !factor || !value || !lowLimit ||
+                    !highLimit) {
+                    ok = false;
+                    what = "the Lerp/Clamp blocks are not registered";
+                } else {
+                    std::string why;
+                    ok = scalars.connect(factor->id, 0, lerp->id, 2, &why) &&
+                         scalars.connect(value->id, 0, clamp->id, 0, &why) &&
+                         scalars.connect(lowLimit->id, 0, clamp->id, 1, &why) &&
+                         scalars.connect(highLimit->id, 0, clamp->id, 2, &why);
+                    if (!ok) what = why;
+                }
+                if (ok) {
+                    // A and B stay on their defaults (0 and 1); Factor comes
+                    // from the port.
+                    factor->setFloat("value", 0.25f);
+                    value->setFloat("value", 2.0f);
+                    lowLimit->setFloat("value", 0.25f);
+                    highLimit->setFloat("value", 1.0f);
+                    EvalContext ctx;
+                    ctx.duration = 1.0;
+                    ctx.fps = 60.0f;
+                    scalars.evaluate(ctx);
+                    const float mixed = lerp->outputs[0].scalar;
+                    const float limited = clamp->outputs[0].scalar;
+                    // Clamp's inputs are unconnected here, so it uses its
+                    // Inspector value (5) against the default -1..1 range.
+                    defClamp->setFloat("value", 5.0f);
+                    EvalContext defaults;
+                    defaults.duration = 1.0;
+                    defaults.fps = 60.0f;
+                    scalars.evaluate(defaults);
+                    const float defaultValue = defClamp->outputs[0].scalar;
+                    // Reversed bounds still describe a range.
+                    highLimit->setFloat("value", 0.5f);
+                    lowLimit->setFloat("value", 1.5f);
+                    EvalContext reversed;
+                    reversed.duration = 1.0;
+                    reversed.fps = 60.0f;
+                    scalars.evaluate(reversed);
+                    const float reversedValue = clamp->outputs[0].scalar;
+                    // Disconnecting the Factor port hands the value back to the
+                    // Inspector, which is the fallback both blocks use.
+                    scalars.disconnectInput(lerp->id, 2);
+                    lerp->setFloat("factor", 0.75f);
+                    EvalContext fallback;
+                    fallback.duration = 1.0;
+                    fallback.fps = 60.0f;
+                    scalars.evaluate(fallback);
+                    const float fallbackValue = lerp->outputs[0].scalar;
+                    if (std::fabs(mixed - 0.25f) > 1e-4f ||
+                        std::fabs(limited - 1.0f) > 1e-4f ||
+                        std::fabs(defaultValue - 1.0f) > 1e-4f ||
+                        std::fabs(reversedValue - 1.5f) > 1e-4f ||
+                        std::fabs(fallbackValue - 0.75f) > 1e-4f) {
+                        ok = false;
+                        what = "Lerp/Clamp values are wrong (mix " + std::to_string(mixed) +
+                               ", clamp " + std::to_string(limited) + ", default " +
+                               std::to_string(defaultValue) + ", reversed " +
+                               std::to_string(reversedValue) + ", fallback " +
+                               std::to_string(fallbackValue) + ")";
+                    }
+                }
+                if (!ok) {
+                    result = fail("Lerp/Clamp blocks: " + what);
+                } else {
+                    std::printf("  math     : Lerp mixes, Clamp restricts (ports and "
+                                "Inspector fallbacks)\n");
+                }
+            }
+
             // --- export the real thing ------------------------------------
             // --- shader blocks: derived ports and legacy migration ---------
             if (result == 0) {
@@ -462,6 +548,46 @@ int main(int argc, char **argv) {
                             !has("uColorA") || !has("uColorB")) {
                             ok = false;
                             what = "the ports do not follow the uniforms of the shader";
+                        }
+                    }
+                    // The template shaders in assets/shaders are documented
+                    // starting points; they have to compile and derive the
+                    // ports they advertise.
+                    if (ok) {
+                        struct ShaderTemplate {
+                            const char *file;
+                            const char *port;
+                        };
+                        const ShaderTemplate templates[] = {
+                            {"assets/shaders/passthrough.glsl", "uPrev"},
+                            {"assets/shaders/scale.glsl", "uUser[0]"},
+                            {"assets/shaders/rotation.glsl", "uUser[0]"},
+                        };
+                        for (const ShaderTemplate &entry : templates) {
+                            Graph graph;
+                            Node *node = graph.addNode("render.shader", 0, 0);
+                            if (!node) {
+                                ok = false;
+                                what = "the Shader block is not registered";
+                                break;
+                            }
+                            node->setText("shader", entry.file);
+                            std::string error;
+                            if (!Registry::applyShaderPorts(*node, renderer.shaders(), &error)) {
+                                ok = false;
+                                what = std::string("template ") + entry.file + ": " + error;
+                                break;
+                            }
+                            bool hasPort = false;
+                            for (const PortDesc &port : node->inputPorts()) {
+                                if (port.name == entry.port) hasPort = true;
+                            }
+                            if (!hasPort) {
+                                ok = false;
+                                what = std::string("template ") + entry.file +
+                                       " does not expose " + entry.port;
+                                break;
+                            }
                         }
                     }
                 }
@@ -507,8 +633,9 @@ int main(int argc, char **argv) {
                 }
 
                 if (ok) {
-                    std::printf("  shader   : derived ports (uPrev/uUser/uColour) and "
-                                "shader.pass migration ok\n");
+                    std::printf("  shader   : derived ports (uPrev/uUser/uColour), "
+                                "passthrough/scale/rotation templates and shader.pass "
+                                "migration ok\n");
                 } else {
                     result = fail("shader block: " + what);
                 }
@@ -666,10 +793,18 @@ int main(int argc, char **argv) {
                         return false;
                     };
                     std::string what;
-                    bool ok = analyzer && spectrum && mod && presetIndex("plasma") >= 0 &&
-                              presetIndex("radial_bars") >= 0;
+                    // Saved projects store the preset *index*, so the list is
+                    // append-only: adding a helper effect (such as Transform)
+                    // must not shift the shader presets or the four Geometry
+                    // elements.
+                    bool ok = presets.size() == 19 && presets[4] == "radial_spectrum" &&
+                              presets[15] == "radial_bars" &&
+                              presets[18] == "waveform_line";
+                    if (!ok) what = "the Spectrum preset list changed order";
+                    ok = ok && analyzer && spectrum && mod && presetIndex("plasma") >= 0 &&
+                         presetIndex("radial_bars") >= 0;
                     if (!ok) {
-                        what = "Spectrum preset list is missing an effect";
+                        if (what.empty()) what = "Spectrum preset list is missing an effect";
                     } else {
                         std::string why;
                         ok = graph.connect(analyzer->id, 0, spectrum->id, 0, &why);  // Analysis
@@ -801,6 +936,144 @@ int main(int argc, char **argv) {
                                             brightness);
                             }
                         }
+                    }
+                }
+
+                // Transform maps the Image through the Matrix: a 2x zoom grows
+                // the disc, and a 3rd-column translation moves it sideways,
+                // which pins down the row/column layout the block documents.
+                if (result == 0) {
+                    Graph transformGraph;
+                    const int circleId =
+                        transformGraph.addNode("geom.primitives", 0.0f, 0.0f)->id;
+                    const int matrixId =
+                        transformGraph.addNode("math.matrix", 0.0f, 140.0f)->id;
+                    const int transformId =
+                        transformGraph.addNode("fx.transform", 260.0f, 0.0f)->id;
+                    const int outputId =
+                        transformGraph.addNode("out.video", 540.0f, 0.0f)->id;
+                    Node *circle = transformGraph.find(circleId);
+                    Node *matrix = transformGraph.find(matrixId);
+                    Node *transform = transformGraph.find(transformId);
+                    Node *output = transformGraph.find(outputId);
+                    std::string what;
+                    bool ok = circle && matrix && transform && output;
+                    if (!ok) {
+                        what = "the Transform block is not registered";
+                    } else {
+                        circle->setInt("shape", 1);  // Circle
+                        circle->setFloat("radius", 0.3f);
+                        circle->setColor("colorA", WHITE);
+                        circle->setColor("colorB", WHITE);
+                        matrix->setInt("size", 0);  // 2x2
+                        std::string why;
+                        ok = transformGraph.connect(circle->id, 0, transform->id, 0, &why) &&
+                             transformGraph.connect(matrix->id, 0, transform->id, 1, &why) &&
+                             transformGraph.connect(transform->id, 0, output->id, 0, &why);
+                        if (!ok) what = why;
+                    }
+                    const auto renderTransform = [&]() {
+                        EvalContext ctx;
+                        ctx.width = 320;
+                        ctx.height = 180;
+                        ctx.fps = 30.0f;
+                        ctx.duration = 1.0;
+                        ctx.time = 0.5;
+                        ctx.frame = 15;
+                        ctx.audioTime = 0.5;
+                        ctx.audio = clip.buffer();
+                        ctx.analysis = analysis;
+                        std::string renderError;
+                        return renderer.renderFrame(transformGraph, ctx, &renderError) != nullptr;
+                    };
+                    const auto brightnessAt = [&](float u, float v) {
+                        const Node *node = transformGraph.find(transform->id);
+                        ImageBufferPtr image =
+                            node && !node->outputs.empty() ? node->outputs[0].image : nullptr;
+                        if (!image || !image->valid()) return -1;
+                        Image pixels = LoadImageFromTexture(image->texture.texture);
+                        const int x = std::clamp(static_cast<int>(u * pixels.width), 0,
+                                                 pixels.width - 1);
+                        const int y = std::clamp(static_cast<int>(v * pixels.height), 0,
+                                                 pixels.height - 1);
+                        const unsigned char *pixel =
+                            static_cast<const unsigned char *>(pixels.data) +
+                            (static_cast<size_t>(y) * pixels.width + x) * 4;
+                        const int value = pixel[0] + pixel[1] + pixel[2];
+                        UnloadImage(pixels);
+                        return value;
+                    };
+                    const auto setMatrix = [&](float scale, float translateX) {
+                        if (Param *grid = matrix->find("matrix")) {
+                            grid->values[0] = scale;
+                            grid->values[5] = scale;
+                            grid->values[2] = translateX;  // 3rd column: translation
+                        }
+                    };
+                    if (ok) {
+                        setMatrix(1.0f, 0.0f);  // identity
+                        ok = renderTransform();
+                        if (!ok) what = "the identity frame did not render";
+                    }
+                    int centre = -1;
+                    int leftIdentity = -1;
+                    int rightIdentity = -1;
+                    int rightZoomed = -1;
+                    int leftShifted = -1;
+                    int rightShifted = -1;
+                    int leftOffset = -1;
+                    int rightOffset = -1;
+                    if (ok) {
+                        centre = brightnessAt(0.5f, 0.5f);
+                        leftIdentity = brightnessAt(0.45f, 0.5f);
+                        rightIdentity = brightnessAt(0.72f, 0.5f);
+                        setMatrix(2.0f, 0.0f);  // 2x zoom
+                        ok = renderTransform();
+                        if (!ok) what = "the zoomed frame did not render";
+                    }
+                    if (ok) {
+                        rightZoomed = brightnessAt(0.72f, 0.5f);
+                        setMatrix(1.0f, 0.25f);  // identity + 3rd-column translation
+                        ok = renderTransform();
+                        if (!ok) what = "the shifted frame did not render";
+                    }
+                    if (ok) {
+                        leftShifted = brightnessAt(0.45f, 0.5f);
+                        rightShifted = brightnessAt(0.72f, 0.5f);
+                        // The pre-offset moves the image in the same direction
+                        // as the matrix translation.
+                        setMatrix(1.0f, 0.0f);
+                        transform->setFloat("offsetX", 0.25f);
+                        ok = renderTransform();
+                        if (!ok) what = "the pre-offset frame did not render";
+                    }
+                    if (ok) {
+                        leftOffset = brightnessAt(0.45f, 0.5f);
+                        rightOffset = brightnessAt(0.72f, 0.5f);
+                        if (centre < 200) {
+                            ok = false;
+                            what = "the identity transform lost the image";
+                        } else if (leftIdentity < 150 || rightIdentity > 60) {
+                            ok = false;
+                            what = "the identity transform did not pass the image through";
+                        } else if (rightZoomed < 150) {
+                            ok = false;
+                            what = "a 2x matrix did not zoom the image";
+                        } else if (leftShifted > 60 || rightShifted < 150) {
+                            ok = false;
+                            what = "the matrix translation did not move the image";
+                        } else if (leftOffset > 60 || rightOffset < 150) {
+                            ok = false;
+                            what = "the pre-offset did not move the image";
+                        }
+                    }
+                    if (!ok) {
+                        result = fail("Transform block: " + what);
+                    } else {
+                        std::printf("  render   : Transform passes, zooms and translates "
+                                    "(centre %d, 2x %d, shift %d/%d, offset %d/%d)\n",
+                                    centre, rightZoomed, leftShifted, rightShifted, leftOffset,
+                                    rightOffset);
                     }
                 }
 

@@ -500,6 +500,44 @@ void evalRemap(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::
     out[0] = Value::makeScalar(result);
 }
 
+// A connected Scalar port replaces the matching Inspector value; an unconnected
+// one keeps the block usable as a plain constant source.
+float scalarOrParam(const Node &node, const std::vector<Value> &in, size_t port, const char *key,
+                    float fallback) {
+    if (port < in.size() && in[port].type == PortType::Scalar) return in[port].scalar;
+    return node.pfloat(key, fallback);
+}
+
+// Mixes two Scalars: A and B are the endpoints and Factor (0 = A, 1 = B) picks
+// the point between them. All three ports can be driven by any Scalar source,
+// so the block doubles as a crossfader.
+void evalLerp(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
+    (void)ctx;
+    const float a = scalarOrParam(node, in, 0, "a", 0.0f);
+    const float b = scalarOrParam(node, in, 1, "b", 1.0f);
+    const float factor = scalarOrParam(node, in, 2, "factor", 0.5f);
+    node.publishEffective("a", a);
+    node.publishEffective("b", b);
+    node.publishEffective("factor", factor);
+    out[0] = Value::makeScalar(lerp(a, b, factor));
+}
+
+// Restricts a Scalar to a range. The bounds default to the unipolar -1..1
+// window and accept their own Scalar inputs, so a modulation can move the
+// limits; they are ordered, so Min above Max is still a valid range.
+void evalClamp(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+               std::vector<Value> &out) {
+    (void)ctx;
+    const float value = scalarOrParam(node, in, 0, "value", 0.0f);
+    const float first = scalarOrParam(node, in, 1, "min", -1.0f);
+    const float second = scalarOrParam(node, in, 2, "max", 1.0f);
+    const float low = std::min(first, second);
+    const float high = std::max(first, second);
+    node.publishEffective("min", low);
+    node.publishEffective("max", high);
+    out[0] = Value::makeScalar(std::clamp(value, low, high));
+}
+
 // Single-band dynamics. The Audio stream is processed one video frame at a
 // time; the envelope state and the partially rendered clip live on the node, so
 // a sequential pass (playback, export) builds the whole processed buffer while a
@@ -1696,6 +1734,55 @@ void evalBlend(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::
     out[0] = Value::makeImage(target);
 }
 
+// Applies a Matrix to the incoming Image as a 2D affine transform: the top-left
+// 2x2 is the linear part and rows 0/1 of the 3rd column are the translation (the
+// shader also accepts the 4th column, so a 4x4 grid translates too). Amount
+// blends the matrix towards the identity (1 = the matrix as entered), and the
+// pre-offset moves the image before the matrix acts, which is what lets a
+// rotation or scale pivot anywhere but the centre.
+void evalTransform(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                   std::vector<Value> &out) {
+    if (!ctx.renderer || !ctx.shaders) return;
+    Shader *shader = ctx.shaders->builtin("transform");
+    if (!shader) {
+        node.status = ctx.shaders->lastError();
+        return;
+    }
+    node.status.clear();
+    const float amount =
+        std::clamp(scalarOrParam(node, in, 2, "amount", 1.0f), 0.0f, 4.0f);
+    const float offsetX = scalarOrParam(node, in, 3, "offsetX", 0.0f);
+    const float offsetY = scalarOrParam(node, in, 4, "offsetY", 0.0f);
+    node.publishEffective("amount", amount);
+    node.publishEffective("offsetX", offsetX);
+    node.publishEffective("offsetY", offsetY);
+
+    // An unconnected Matrix port is the identity, so the block passes the image
+    // through until a matrix is patched in.
+    Matrix matrix{};
+    matrix.m0 = 1.0f;
+    matrix.m5 = 1.0f;
+    matrix.m10 = 1.0f;
+    matrix.m15 = 1.0f;
+    if (in.size() > 1 && in[1].type == PortType::Matrix) matrix = in[1].matrix;
+
+    float user[8] = {amount, offsetX, offsetY, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    ShaderVectorUniforms vectors;
+    vectors.matrix = matrix;
+    vectors.useMatrix = true;
+
+    ImageBufferPtr target = ctx.renderer->acquire(ctx.width, ctx.height);
+    if (!target) {
+        node.status = "out of render targets";
+        return;
+    }
+    ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+    ctx.renderer->drawShaderPass(shader, ctx, textureFrom(in, 0), Texture2D{}, Texture2D{}, user,
+                                 3, WHITE, WHITE, vectors);
+    ctx.renderer->endTarget();
+    out[0] = Value::makeImage(target);
+}
+
 void evalPostFx(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
     if (!ctx.renderer || !ctx.shaders) return;
     Shader *shader = ctx.shaders->builtin("postfx");
@@ -2214,6 +2301,48 @@ void Registry::registerBuiltins() {
     }
     {
         NodeDef def;
+        def.kind = "math.lerp";
+        def.category = "Math";
+        def.label = "Lerp";
+        def.description =
+            "Mixes two Scalars: A and B are the endpoints and Factor picks the point between "
+            "them (0 = A, 1 = B). Every port accepts a modulation source, so the block doubles "
+            "as a crossfader; an unconnected port uses the Inspector value.";
+        def.inputs = {PortDesc{"A", PortType::Scalar, "unconnected: A value"},
+                      PortDesc{"B", PortType::Scalar, "unconnected: B value"},
+                      PortDesc{"Factor", PortType::Scalar, "0 = A, 1 = B"}};
+        def.outputs = {PortDesc{"Out", PortType::Scalar}};
+        def.params = {
+            makeParam("a", "A", 0.0f, -16.0f, 16.0f, 0.01f, "Mix"),
+            makeParam("b", "B", 1.0f, -16.0f, 16.0f, 0.01f, "Mix"),
+            makeParam("factor", "Factor", 0.5f, -4.0f, 4.0f, 0.01f, "Mix"),
+        };
+        def.evaluate = evalLerp;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "math.clamp";
+        def.category = "Math";
+        def.label = "Clamp";
+        def.description =
+            "Restricts a Scalar to a range, -1..1 by default. Min and Max accept their own "
+            "Scalar inputs, so a modulation can move the limits; the two are ordered, so a Min "
+            "above Max still describes a valid range.";
+        def.inputs = {PortDesc{"In", PortType::Scalar, "unconnected: In value"},
+                      PortDesc{"Min", PortType::Scalar},
+                      PortDesc{"Max", PortType::Scalar}};
+        def.outputs = {PortDesc{"Out", PortType::Scalar}};
+        def.params = {
+            makeParam("value", "In", 0.0f, -16.0f, 16.0f, 0.01f, "Range"),
+            makeParam("min", "Min", -1.0f, -16.0f, 16.0f, 0.01f, "Range"),
+            makeParam("max", "Max", 1.0f, -16.0f, 16.0f, 0.01f, "Range"),
+        };
+        def.evaluate = evalClamp;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
         def.kind = "math.power";
         def.category = "Math";
         def.label = "Power";
@@ -2646,6 +2775,33 @@ void Registry::registerBuiltins() {
             makeParam("scanlines", "Scanlines", 0.0f, 0.0f, 1.0f, 0.01f, "Texture"),
         };
         def.evaluate = evalPostFx;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "fx.transform";
+        def.category = "Render";
+        def.label = "Transform";
+        def.description =
+            "Applies a Matrix to the incoming Image as a 2D affine transform: the top-left 2x2 "
+            "is the linear part and rows 0/1 of the 3rd column are the translation (the usual "
+            "3x3 affine layout; the 4th column also works for a 4x4 grid). Amount blends the "
+            "matrix towards the identity (1 = the matrix as entered) and the pre-offset "
+            "translates the image in frame widths/heights before the matrix acts, so a "
+            "rotation or scale can pivot anywhere. Areas that map outside the source fade to "
+            "black.";
+        def.inputs = {PortDesc{"Image", PortType::Image},
+                      PortDesc{"Matrix", PortType::Matrix, "unconnected: identity"},
+                      PortDesc{"Amount", PortType::Scalar, "unconnected: Amount value"},
+                      PortDesc{"Offset X", PortType::Scalar, "pre-offset, frame widths"},
+                      PortDesc{"Offset Y", PortType::Scalar, "pre-offset, frame heights"}};
+        def.outputs = {PortDesc{"Image", PortType::Image}};
+        def.params = {
+            makeParam("amount", "Amount", 1.0f, 0.0f, 4.0f, 0.01f, "Transform"),
+            makeParam("offsetX", "Pre-offset X", 0.0f, -2.0f, 2.0f, 0.005f, "Transform"),
+            makeParam("offsetY", "Pre-offset Y", 0.0f, -2.0f, 2.0f, 0.005f, "Transform"),
+        };
+        def.evaluate = evalTransform;
         add(std::move(def));
     }
     {

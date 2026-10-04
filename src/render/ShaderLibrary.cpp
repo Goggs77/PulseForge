@@ -336,6 +336,36 @@ void main() {
     finalColor = vec4(col, 1.0);
 }
 )"},
+    // --- used directly by the Transform block ------------------------------
+    {"transform", R"(
+void main() {
+    vec2 uv = pfUv();
+    float amount = clamp(uUser[0], 0.0, 4.0);
+    vec2 preOffset = vec2(uUser[1], uUser[2]);
+    // The Matrix block fills rows, so uMatrix[row][column] is exactly the grid
+    // the Inspector shows. Rows 0..1 hold the 2D linear part; the translation
+    // is read from the 3rd column (the usual 3x3 affine layout, and the one a
+    // 3x3 grid can actually edit) plus the 4th (a 4x4 OpenGL-style layout), so
+    // either grid shape translates.
+    mat2 linear = mat2(uMatrix[0][0], uMatrix[0][1], uMatrix[1][0], uMatrix[1][1]);
+    vec2 translation = vec2(uMatrix[0][2] + uMatrix[0][3], uMatrix[1][2] + uMatrix[1][3]);
+    // GLSL 3.30 has no mix() for matrices, so blend towards the identity by
+    // hand.
+    linear = mat2(1.0)*(1.0 - amount) + linear*amount;
+    translation *= amount;
+    if (abs(determinant(linear)) < 1.0e-6) linear = mat2(1.0);
+
+    vec2 destination = uv - 0.5;
+    // The pre-offset moves the image before the matrix acts, in the same
+    // direction as the matrix translation, so +X shifts it right.
+    vec2 source = inverse(linear)*(destination - translation) - preOffset + 0.5;
+    // Outside the source image: fade over two texels, so a rotation or scale
+    // does not smear the clamped edge pixels across the frame.
+    vec2 edge = min(source, 1.0 - source)/max(uTexel, vec2(1.0e-6));
+    float inside = smoothstep(0.0, 2.0, min(edge.x, edge.y));
+    finalColor = vec4(pfPrev(source).rgb*inside, 1.0);
+}
+)"},
     // --- composite helpers used by fx.blend / fx.postfx -------------------
     {"blend", R"(
 void main() {
@@ -442,8 +472,10 @@ std::vector<std::string> ShaderLibrary::builtinNames() {
 std::vector<std::string> ShaderLibrary::effectNames() {
     std::vector<std::string> names;
     for (const auto &entry : kBuiltins) {
-        // The last entries are the composite helpers other blocks call directly.
-        if (std::strcmp(entry.name, "blend") == 0 || std::strcmp(entry.name, "postfx") == 0) {
+        // The last entries are the composite helpers other blocks call directly
+        // (blend, postfx) plus the Transform block's affine pass.
+        if (std::strcmp(entry.name, "blend") == 0 || std::strcmp(entry.name, "postfx") == 0 ||
+            std::strcmp(entry.name, "transform") == 0) {
             continue;
         }
         names.emplace_back(entry.name);

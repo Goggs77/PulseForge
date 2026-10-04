@@ -277,6 +277,8 @@ executable when *Save preferences* is pressed.
 | --- | --- | --- | --- |
 | Constant | - | Scalar | Fixed value |
 | Arithmetic | A, B | Result | add, subtract, multiply, divide, min, max, modulo, with gain/offset and clamping |
+| Lerp | A, B, Factor | Out | Mixes two Scalars (0 = A, 1 = B). Each port falls back to its Inspector value when nothing is connected, so it works as a constant, a crossfader or a modulation target |
+| Clamp | In, Min, Max | Out | Restricts a Scalar to a range, -1..1 by default. Min/Max accept their own inputs, are ordered (a Min above Max still works) and fall back to the Inspector |
 | Power | Base, Exponent | Result | Negative bases keep their sign instead of becoming NaN |
 | Exponential | X | Result | e^x, 2^x or 10^x |
 | Logarithm | X | Result | ln, log2 or log10, with an input floor |
@@ -329,6 +331,7 @@ readout.
 | Shader | uPrev, ...derived | Image | Applies a `.glsl` file to the incoming image; the ports follow the uniforms the file uses (`uPrev`, `uInput2`, `uUser[0..7]`, `uColorA/B`, `uVector2/3/4`, `uMatrix`). Compile errors are reported on the block instead of silently falling back |
 | Blend | A, B | Image | Cross fade, add, screen, multiply, difference, overlay, min, max |
 | Post FX | Image, 8 scalars | Image | Bloom, chromatic aberration, vignette, grain, scanlines, feedback, saturation, hue |
+| Transform | Image, Matrix, Amount, Offset X/Y | Image | Applies a Matrix as a 2D affine transform: the top-left 2x2 is the linear part, rows 0/1 of the 3rd column are the translation (the 4th column of a 4x4 grid works too). Amount blends the matrix towards the identity and the pre-offset moves the image before the matrix acts, so a rotation or scale pivots anywhere; areas sampling outside the source fade to black |
 | Geometry | Layer, Scale, Rotation, X, Y | Image | Primitives only: circle, ring, polygon grid, sparks, orbit, text. Spectrum and waveform visuals live in the Spectrum block; old projects with those Geometry shapes migrate to the matching Spectrum elements on load, parameters included |
 
 ### Output
@@ -349,6 +352,12 @@ exactly those four inputs next to `uPrev`. Changing the file (or pressing
 
 If the file does **not** start with `#version`, the PulseForge preamble is
 prepended, so the body only needs a `main()` that writes `finalColor`.
+
+Three ready-to-copy templates live in `assets/shaders`: `passthrough.glsl`
+(documents the preamble), `scale.glsl` (zooms about the centre through
+`uUser[0]`) and `rotation.glsl` (spins about the centre, aspect-corrected,
+through `uUser[0]`). Pick one in a Shader block and its `uUser[0]` port shows up
+for modulation.
 
 ```glsl
 // assets/shaders/my_effect.glsl
@@ -579,4 +588,7 @@ broken stage is obvious at a glance.
 (constant -> arithmetic -> power -> exponential -> logarithm -> trigonometry ->
 hyperbolic -> inverse trigonometry -> Vector2/3/4 -> Matrix -> Determinant),
 asserts every connection is accepted, and checks the numeric results, so a
-regression in the type system or the maths shows up immediately.
+regression in the type system or the maths shows up immediately. It also checks
+Lerp/Clamp port-versus-Inspector fallbacks, that a connected port takes over,
+and that the Transform block passes an Image through, zooms it with a 2x matrix
+and moves it with the matrix translation column.

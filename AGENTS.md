@@ -51,7 +51,10 @@ metadata, text editing (caret, selection, clipboard), shader ports derived from 
 `.glsl` file and `shader.pass` migration, per-family encoder arguments and the
 audio matching rules, legacy Audio Output migration, ADC/DAC conversion, and the
 exclusive Audio Output routing (processed, dry and silent exports, plus the
-monitor's source/silent/processed decisions). It also checks the ADC -> DAC
+monitor's source/silent/processed decisions). The Math checks include Lerp/Clamp
+(port values versus Inspector fallbacks) and the Transform block's
+pass-through/zoom/translation, and the Shader check compiles the three bundled
+templates. It also checks the ADC -> DAC
 Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
 left/right separation, live frame-window reuse, and the input-driven Spectrum
 Analyzer (silent / precomputed / live). It also checks that a Spectrum preset
@@ -133,6 +136,13 @@ docs         rendering notes and the README overlay image
   links by port index, so inserting a port in the middle would re-target them.
   The convention for the value is: rates/frequencies multiply by `2^input`
   (octaves), levels multiply by `(1 + input)` and offsets add the input.
+- Ports that *are* the value rather than a modulation of it (Lerp's
+  A/B/Factor, Clamp's In/Min/Max, Transform's Amount and pre-offset) follow the
+  other convention: a connected Scalar port replaces the matching Inspector
+  value and `publishEffective` makes the slider follow it, while an unconnected
+  port falls back to the Inspector. `scalarOrParam` in `Registry.cpp` is the
+  helper; keep both directions working so a block is usable with or without
+  patch cables.
 - A block that modulates a parameter **publishes the value it actually used**
   through `Node::publishEffective(key, value)`. The inspector slider and the
   in-block previews follow it (`Node::effectiveParam`) so an LFO visibly moves
@@ -234,6 +244,17 @@ docs         rendering notes and the README overlay image
 - Resolution-modulating blocks must not reallocate targets per frame: Spectrum
   quantises the modulated scale and keeps its feedback texture at the base
   scale, and `Renderer::acquire` caps the target pool at 12 with LRU eviction.
+- `fx.transform` reads its Matrix port as a 2D affine map: `uMatrix[row][column]`
+  is exactly the row-major grid the Matrix block's Inspector shows, the top-left
+  2x2 is the linear part and the translation is rows 0/1 of the 3rd column plus
+  the 4th (so a 3x3 homogeneous grid and a 4x4 OpenGL-style grid both
+  translate). Amount blends the matrix towards the identity and the scalars are
+  a pre-offset applied before the matrix acts, which is what lets a rotation or
+  scale pivot anywhere. The inverse mapping in the `transform` builtin and the
+  README table describe the same layout - change both together.
+- `assets/shaders` ships copy-me templates (`passthrough.glsl`, `scale.glsl`,
+  `rotation.glsl`) beside the preset shaders; the selftest compiles all three
+  through the Shader block, so a preamble change that breaks them fails fast.
 - Geometry (`geom.primitives`) owns primitives only and must not read
   `ctx.audio`/`ctx.analysis`. Spectrum and waveform shapes are
   `render.spectrum` effects; `Project::fromJson` converts old Geometry shapes
