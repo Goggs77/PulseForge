@@ -3664,6 +3664,35 @@ int main(int argc, char **argv) {
                     }
                     if (!sliceOk) result = fail("Automation slice: " + sliceWhat);
                 }
+
+                // Dragging a curve key must not cross its neighbours: the
+                // editor clamps to the surrounding key times, so the release
+                // sort can never swap the keys under the pointer.
+                if (result == 0) {
+                    Param curve = makeCurveParam("curve", "Curve");
+                    curve.keys = {Keyframe{0.2, 0.0f, 0}, Keyframe{0.5, 0.0f, 0},
+                                  Keyframe{0.8, 0.0f, 0}};
+                    const CurveKeyBounds first = curveKeyBounds(curve, 0);
+                    const CurveKeyBounds middle = curveKeyBounds(curve, 1);
+                    const CurveKeyBounds last = curveKeyBounds(curve, 2);
+                    // A hand-edited project can hold unsorted keys; the bounds
+                    // must not come out inverted.
+                    curve.keys = {Keyframe{0.9, 0.0f, 0}, Keyframe{0.5, 0.0f, 0},
+                                  Keyframe{0.2, 0.0f, 0}};
+                    const CurveKeyBounds unsorted = curveKeyBounds(curve, 1);
+                    const CurveKeyBounds outOfRange = curveKeyBounds(curve, 9);
+                    const auto same = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
+                    if (!(same(first.lo, 0.0) && same(first.hi, 0.5) &&
+                          same(middle.lo, 0.2) && same(middle.hi, 0.8) &&
+                          same(last.lo, 0.5) && same(last.hi, 1.0) &&
+                          same(unsorted.lo, 0.2) && same(unsorted.hi, 0.9) &&
+                          same(outOfRange.lo, 0.0) && same(outOfRange.hi, 1.0))) {
+                        result = fail("automation keys: the drag bounds are wrong");
+                    } else {
+                        std::printf("  curve    : Automation keys stay between their "
+                                    "neighbours\n");
+                    }
+                }
             }
 
             // --- a real GPU export when the machine can do it --------------

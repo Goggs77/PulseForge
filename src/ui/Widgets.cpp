@@ -1335,7 +1335,11 @@ bool curveEditor(Rectangle r, Param *curve, bool bipolar, double playhead01, int
         gCurveDragKey < static_cast<int>(curve->keys.size())) {
         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && pointIn(r, mouse)) {
             Keyframe &key = curve->keys[static_cast<size_t>(gCurveDragKey)];
-            key.time = toTime(mouse.x);
+            // Stay between the neighbours: dragging a key past one would let
+            // the release sort swap them and hand the drag to another key.
+            const CurveKeyBounds bounds =
+                curveKeyBounds(*curve, static_cast<size_t>(gCurveDragKey));
+            key.time = std::clamp(toTime(mouse.x), bounds.lo, bounds.hi);
             key.value = toValue(mouse.y);
             changed = true;
         }

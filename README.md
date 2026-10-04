@@ -159,7 +159,8 @@ Interaction:
   by section; with nothing selected it shows project metadata (resolution, frame
   rate, duration, output format) and the audio file. Resolution uses exact
   numeric entry rather than sliders. `Automation` blocks show their curve here:
-  click to add a key, drag to move, right-click to delete.
+  click to add a key, drag to move (a key stops at the key before and after it,
+  so a drag never reorders the curve), right-click to delete.
 
 Shortcuts: `Space` play/pause, `Ctrl+S` save, `Ctrl+O` open, `Ctrl+N` new,
 `Ctrl+E` export, `Ctrl+,` (or `F2`) preferences, `Del` delete block,

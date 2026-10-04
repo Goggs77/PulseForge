@@ -269,6 +269,17 @@ float Param::evalCurve(double time) const {
     return keys.back().value;
 }
 
+CurveKeyBounds curveKeyBounds(const Param &curve, size_t index) {
+    CurveKeyBounds bounds;
+    if (index >= curve.keys.size()) return bounds;
+    if (index > 0) bounds.lo = curve.keys[index - 1].time;
+    if (index + 1 < curve.keys.size()) bounds.hi = curve.keys[index + 1].time;
+    // A hand-edited or legacy project can hold keys that are not sorted, so
+    // never hand std::clamp an inverted range.
+    if (bounds.lo > bounds.hi) std::swap(bounds.lo, bounds.hi);
+    return bounds;
+}
+
 Color colorFromHsv(float h, float s, float v, float a) {
     h = h - std::floor(h);
     s = std::clamp(s, 0.0f, 1.0f);

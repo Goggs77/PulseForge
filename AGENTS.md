@@ -87,7 +87,9 @@ Ringbuffer speed and Automation offset ports - the Beat Pulse one measures the
 period the block fires at rather than pinning an absolute beat length, so
 retuning BPM x division does not break it - and the filter check asserts the
 response plot follows the audio rate inside an ADC -> DAC region and the frame
-rate outside one. When NVENC is usable it also renders a real GPU export.
+rate outside one. The Automation curve check asserts the drag bounds a key is
+clamped to (the neighbouring key times, 0/1 at the ends, never an inverted
+range). When NVENC is usable it also renders a real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
 `selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
@@ -192,6 +194,14 @@ docs         rendering notes and the README overlay image
   get the block id appended ("Automation #17"), because several automations
   usually share the default name. Slice and Loop are mutually exclusive in
   practice: the slice mapping wins when both are on.
+- The in-block **curve editor** (`ui::curveEditor`, Widgets.cpp) keeps a dragged
+  key between its neighbours: the drag clamps the key's time to
+  `curveKeyBounds(curve, index)` (Port.cpp), which is the previous and next key
+  time, or 0/1 at the ends. Without it the release sort could reorder the keys
+  under the pointer and hand the drag to another key. Unsorted keys (a
+  hand-edited project) get the bounds swapped rather than an inverted
+  `std::clamp` range. The Slice handles on the timeline are *not* bounded like
+  this - a Start dragged past the Finish has to stay possible.
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
   the Frequency Band and Signal Filter Hz sliders) and an optional
   `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty

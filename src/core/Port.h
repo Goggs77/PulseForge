@@ -248,6 +248,15 @@ struct Param {
     float evalCurve(double time) const;
 };
 
+// The time window a curve key may be dragged inside: it stops at the key before
+// and the key after it, so dragging can never reorder the curve. The outer keys
+// fall back to the editor's 0..1 time axis.
+struct CurveKeyBounds {
+    double lo = 0.0;
+    double hi = 1.0;
+};
+CurveKeyBounds curveKeyBounds(const Param &curve, size_t index);
+
 Param makeParam(const std::string &key, const std::string &label, float value, float minValue,
                 float maxValue, float step = 0.0f, const std::string &group = std::string(),
                 bool logarithmic = false);
