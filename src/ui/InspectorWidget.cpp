@@ -102,7 +102,7 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
             ui::drawTextClipped(labelRect, param.label.c_str(), 12.0f, t.textDim);
             if (param.multiline) {
                 // A larger box with word wrap, so notes can be several lines.
-                cursor.y += 16.0f;
+                cursor.y += kRow() + kGap();
                 const float height = ui::s(116.0f);
                 if (ui::textArea(Rectangle{cursor.x, cursor.y, cursor.width, height}, &param.text,
                                  "Write a note...",

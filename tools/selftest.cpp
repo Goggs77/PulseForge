@@ -3407,9 +3407,89 @@ int main(int argc, char **argv) {
                     what = "escape restore";
                 }
 
+                // Undo: a run of typed characters is one step, a discrete edit
+                // is another, and Ctrl+Z walks back through them.
+                if (ok) {
+                    TextEditState undoState;
+                    undoState.begin("");
+                    for (const char *ch : {"a", "b", "c"}) {
+                        keys = TextEditKeys{};
+                        keys.typed = ch;
+                        run(undoState, keys);
+                    }
+                    keys = TextEditKeys{};
+                    keys.undo = true;
+                    run(undoState, keys);
+                    if (undoState.text() != "" || undoState.caret() != 0) {
+                        ok = false;
+                        what = "ctrl+z did not undo the typing run";
+                    }
+                }
+
+                // Multi-line editing: Enter breaks the line and keeps editing,
+                // pasted text keeps its newlines, and the single-line field
+                // still strips them.
+                if (ok) {
+                    TextEditState area;
+                    area.begin("Hello");
+                    area.setCaret(5, false);
+                    keys = TextEditKeys{};
+                    keys.commit = true;
+                    keys.allowNewlines = true;
+                    const TextEditApplied broken = run(area, keys);
+                    if (broken.finished || area.text() != "Hello\n" || area.caret() != 6) {
+                        ok = false;
+                        what = "enter did not break the line in a multi-line editor";
+                    }
+                }
+                if (ok) {
+                    TextEditState area;
+                    area.begin("");
+                    keys = TextEditKeys{};
+                    keys.paste = true;
+                    keys.allowNewlines = true;
+                    keys.clipboard = "one\ntwo\n";
+                    run(area, keys);
+                    if (area.text() != "one\ntwo\n") {
+                        ok = false;
+                        what = "a multi-line paste lost its line breaks";
+                    }
+                    TextEditState field;
+                    field.begin("");
+                    keys = TextEditKeys{};
+                    keys.paste = true;
+                    keys.clipboard = "one\ntwo";
+                    run(field, keys);
+                    if (field.text() != "onetwo") {
+                        ok = false;
+                        what = "a single-line field kept a pasted newline";
+                    }
+                }
+                if (ok) {
+                    // A line break is its own undo step, so Ctrl+Z after typing
+                    // on the new line restores the break first.
+                    TextEditState area;
+                    area.begin("one");
+                    area.setCaret(3, false);
+                    keys = TextEditKeys{};
+                    keys.commit = true;
+                    keys.allowNewlines = true;
+                    run(area, keys);
+                    keys = TextEditKeys{};
+                    keys.typed = "two";
+                    run(area, keys);
+                    keys = TextEditKeys{};
+                    keys.undo = true;
+                    run(area, keys);
+                    if (area.text() != "one\n") {
+                        ok = false;
+                        what = "undo did not stop at the line break";
+                    }
+                }
+
                 if (ok) {
                     std::printf("  textedit : arrows, home/end, shift selection, replace, word "
-                                "jumps, cut/paste, enter/escape ok\n");
+                                "jumps, cut/paste, enter/escape, undo, multi-line ok\n");
                 } else {
                     result = fail("text editing: " + what);
                 }

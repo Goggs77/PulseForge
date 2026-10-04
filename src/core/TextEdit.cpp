@@ -67,12 +67,16 @@ void TextEditState::begin(const std::string &value, int caretIndex) {
     const int index = caretIndex < 0 ? static_cast<int>(value.size())
                                      : std::clamp(caretIndex, 0, static_cast<int>(value.size()));
     caret_ = anchor_ = index;
+    undo_.clear();
+    typingRun_ = false;
 }
 
 void TextEditState::clear() {
     text_.clear();
     original_.clear();
     caret_ = anchor_ = 0;
+    undo_.clear();
+    typingRun_ = false;
 }
 
 int TextEditState::selectionMin() const { return std::min(caret_, anchor_); }
@@ -87,6 +91,7 @@ std::string TextEditState::selection() const {
 void TextEditState::selectAll() {
     anchor_ = 0;
     caret_ = static_cast<int>(text_.size());
+    endTypingRun();
 }
 
 void TextEditState::selectWordAt(int index) {
@@ -100,12 +105,14 @@ void TextEditState::selectWordAt(int index) {
     }
     anchor_ = from;
     caret_ = to;
+    endTypingRun();
 }
 
 void TextEditState::setCaret(int index, bool extend) {
     const int clamped = std::clamp(index, 0, static_cast<int>(text_.size()));
     caret_ = textIndexOnBoundary(text_, clamped) ? clamped : textIndexPrev(text_, clamped);
     if (!extend) anchor_ = caret_;
+    endTypingRun();
 }
 
 void TextEditState::insert(const std::string &utf8) {
@@ -158,6 +165,29 @@ void TextEditState::setTextKeepingCaret(const std::string &value) {
     anchor_ = anchor;
 }
 
+void TextEditState::remember() {
+    constexpr size_t kMaxUndo = 64;
+    if (undo_.size() >= kMaxUndo) undo_.erase(undo_.begin());
+    undo_.push_back(Snapshot{text_, caret_, anchor_});
+}
+
+bool TextEditState::undo() {
+    if (undo_.empty()) return false;
+    const Snapshot &last = undo_.back();
+    text_ = last.text;
+    caret_ = std::clamp(last.caret, 0, static_cast<int>(text_.size()));
+    anchor_ = std::clamp(last.anchor, 0, static_cast<int>(text_.size()));
+    undo_.pop_back();
+    endTypingRun();
+    return true;
+}
+
+void TextEditState::insertLineBreak() {
+    remember();
+    insert("\n");
+    endTypingRun();
+}
+
 TextEditApplied applyTextEditKeys(TextEditState &state, const TextEditKeys &keys) {
     TextEditApplied result;
     const int beforeCaret = state.caret();
@@ -173,13 +203,34 @@ TextEditApplied applyTextEditKeys(TextEditState &state, const TextEditKeys &keys
         result.commit = false;
         return result;
     }
-    if (keys.commit) {
+    if (keys.commit && !keys.allowNewlines) {
         result.finished = true;
         result.commit = true;
         return result;
     }
+    if (keys.undo) {
+        if (state.undo()) {
+            result.changed = state.text() != before;
+        }
+        return result;
+    }
+    if (keys.commit) {
+        // Enter in a multi-line editor breaks the line and keeps editing.
+        state.insertLineBreak();
+        result.changed = true;
+        return result;
+    }
 
     if (keys.selectAll) state.selectAll();
+    // One undo step per typing run or per discrete edit, taken before the
+    // buffer changes.
+    const bool cutWithSelection = keys.cut && state.hasSelection();
+    const bool mutates = !keys.typed.empty() || keys.backspace || keys.eraseForward || keys.paste ||
+                         cutWithSelection;
+    if (mutates) {
+        if (!(!keys.typed.empty() && state.typingRun())) state.remember();
+        state.setTypingRun(!keys.typed.empty());
+    }
     if (keys.copy || keys.cut) {
         if (state.hasSelection()) {
             result.copied = true;
@@ -190,7 +241,9 @@ TextEditApplied applyTextEditKeys(TextEditState &state, const TextEditKeys &keys
     if (keys.paste) {
         std::string clean;
         for (char c : keys.clipboard) {
-            if (c != '\n' && c != '\r' && c != '\t') clean.push_back(c);
+            if (c == '\r') continue;
+            if (!keys.allowNewlines && (c == '\n' || c == '\t')) continue;
+            clean.push_back(c);
         }
         state.insert(clean);
     }

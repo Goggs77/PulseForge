@@ -195,7 +195,7 @@ void textEditEnd() {
 
 // Runs the keyboard for the active edit. Returns true when the edit finished
 // this frame; *commit tells whether the value should be kept or dropped.
-bool textEditUpdate(bool *commit) {
+bool textEditUpdate(bool *commit, bool allowNewlines = false) {
     *commit = false;
     if (!gEdit.active()) return false;
     pf::TextEditKeys keys;
@@ -213,6 +213,8 @@ bool textEditUpdate(bool *commit) {
     keys.paste = keys.ctrl && IsKeyPressed(KEY_V);
     keys.commit = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
     keys.cancel = IsKeyPressed(KEY_ESCAPE);
+    keys.undo = keys.ctrl && IsKeyPressed(KEY_Z);
+    keys.allowNewlines = allowNewlines;
     if (keys.paste) {
         if (const char *clipboard = GetClipboardText()) keys.clipboard = clipboard;
         if (keys.clipboard.empty()) keys.clipboard = gEditClipboard;
@@ -976,18 +978,24 @@ int editLineForOffset(const std::vector<EditLine> &lines, int offset) {
     return static_cast<int>(lines.size()) - 1;
 }
 
-float editOffsetX(const std::string &text, int offset, float size) {
-    return textWidth(text.substr(0, static_cast<size_t>(std::max(0, offset))).c_str(), size);
+// Pixel column of a caret inside one line, measured from the line's own left
+// edge. Every line starts at the same x, so the caret of a wrapped line must not
+// inherit the width of the lines above it.
+float editColumnX(const std::string &text, const EditLine &line, int index, float size) {
+    const int from = std::clamp(line.begin, 0, static_cast<int>(text.size()));
+    const int to = std::clamp(index, from, static_cast<int>(text.size()));
+    return textWidth(text.substr(static_cast<size_t>(from), static_cast<size_t>(to - from)).c_str(),
+                     size);
 }
 
-// Nearest character boundary of one line to a pixel x.
+// Nearest character boundary of one line to a pixel x (relative to the line).
 int editIndexAtX(const std::string &text, const EditLine &line, float x, float size) {
     int best = line.begin;
     float bestDistance = 1.0e9f;
     const int end = std::min(line.end, static_cast<int>(text.size()));
     for (int index = line.begin; index <= end; ++index) {
         if (!pf::textIndexOnBoundary(text, index)) continue;
-        const float distance = std::fabs(editOffsetX(text, index, size) - x);
+        const float distance = std::fabs(editColumnX(text, line, index, size) - x);
         if (distance < bestDistance) {
             bestDistance = distance;
             best = index;
@@ -1021,7 +1029,7 @@ bool textArea(Rectangle r, std::string *value, const char *placeholder, int stab
             const bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
             gEdit.state.setCaret(
                 editIndexAtX(gEdit.state.text(), lines[static_cast<size_t>(line)],
-                             GetMousePosition().x, size),
+                             GetMousePosition().x - inner.x, size),
                 shift);
             gEdit.dragging = true;
         } else if (editing) {
@@ -1034,12 +1042,10 @@ bool textArea(Rectangle r, std::string *value, const char *placeholder, int stab
         // Enter inserts a line break instead of finishing the edit; Escape ends
         // it and restores the text as usual.
         bool commit = false;
-        const bool finished = textEditUpdate(&commit);
-        if (finished && commit) {
-            gEdit.state.insert("\n");
-        } else if (finished) {
-            changed = *value != gEdit.state.original();
-            *value = gEdit.state.original();
+        const bool finished = textEditUpdate(&commit, true);
+        if (finished) {
+            changed = *value != (commit ? gEdit.state.text() : gEdit.state.original());
+            *value = commit ? gEdit.state.text() : gEdit.state.original();
             textEditEnd();
         }
         if (gEdit.active() && gEdit.id == id) {
@@ -1054,7 +1060,9 @@ bool textArea(Rectangle r, std::string *value, const char *placeholder, int stab
                 if (!keyRepeats(key)) continue;
                 const int target = std::clamp(current + (step == 0 ? -1 : 1), 0,
                                               static_cast<int>(lines.size()) - 1);
-                const float columnX = editOffsetX(gEdit.state.text(), caret, size);
+                const float columnX =
+                    editColumnX(gEdit.state.text(), lines[static_cast<size_t>(current)], caret,
+                                size);
                 gEdit.state.setCaret(
                     editIndexAtX(gEdit.state.text(), lines[static_cast<size_t>(target)], columnX,
                                  size),
@@ -1069,7 +1077,7 @@ bool textArea(Rectangle r, std::string *value, const char *placeholder, int stab
                     static_cast<int>(dragLines.size()) - 1);
                 gEdit.state.setCaret(
                     editIndexAtX(gEdit.state.text(), dragLines[static_cast<size_t>(line)],
-                                 GetMousePosition().x, size),
+                                 GetMousePosition().x - inner.x, size),
                     true);
             } else if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
                 gEdit.dragging = false;
@@ -1114,8 +1122,8 @@ bool textArea(Rectangle r, std::string *value, const char *placeholder, int stab
                 selectionMin < line.end) {
                 const int from = std::max(selectionMin, line.begin);
                 const int to = std::min(selectionMax, line.end);
-                const float x0 = inner.x + editOffsetX(text, from, size);
-                const float x1 = inner.x + editOffsetX(text, to, size);
+                const float x0 = inner.x + editColumnX(text, line, from, size);
+                const float x1 = inner.x + editColumnX(text, line, to, size);
                 DrawRectangle(static_cast<int>(std::floor(x0)), static_cast<int>(lineY),
                               static_cast<int>(std::max(2.0f, x1 - x0)),
                               static_cast<int>(lineHeight),
@@ -1129,8 +1137,8 @@ bool textArea(Rectangle r, std::string *value, const char *placeholder, int stab
         }
         if (editing && std::fmod(static_cast<float>(gCaretBlink), 1.0f) < 0.5f) {
             const int caretLine = editLineForOffset(lines, gEdit.state.caret());
-            const float caretX =
-                inner.x + editOffsetX(text, gEdit.state.caret(), size);
+            const float caretX = inner.x + editColumnX(text, lines[static_cast<size_t>(caretLine)],
+                                                       gEdit.state.caret(), size);
             const float caretY =
                 inner.y + static_cast<float>(caretLine) * lineHeight - gEdit.scrollY;
             DrawRectangle(static_cast<int>(std::floor(caretX)), static_cast<int>(caretY),

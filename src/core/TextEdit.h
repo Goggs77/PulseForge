@@ -6,6 +6,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace pf {
 
@@ -25,6 +26,10 @@ struct TextEditKeys {
     bool paste = false;
     bool commit = false;  // Enter
     bool cancel = false;  // Escape
+    bool undo = false;    // Ctrl+Z
+    // Multi-line editors keep the line breaks a commit and a paste carry;
+    // single-line fields strip them so a pasted paragraph stays on one line.
+    bool allowNewlines = false;
     std::string typed;     // UTF-8 characters typed this frame
     std::string clipboard; // clipboard contents, used by paste
 };
@@ -70,12 +75,28 @@ public:
     void erase(bool forward);
     void eraseWord(bool forward);
     void setTextKeepingCaret(const std::string &value);
+    // Undo: one snapshot per typing run or discrete edit, capped so a long
+    // session cannot grow without bound.
+    void remember();
+    bool undo();
+    // Enter inside a multi-line editor: one undo step, caret on the next line.
+    void insertLineBreak();
+    bool typingRun() const { return typingRun_; }
+    void setTypingRun(bool running) { typingRun_ = running; }
+    void endTypingRun() { typingRun_ = false; }
 
 private:
+    struct Snapshot {
+        std::string text;
+        int caret = 0;
+        int anchor = 0;
+    };
     std::string text_;
     std::string original_;
     int caret_ = 0;
     int anchor_ = 0;
+    std::vector<Snapshot> undo_;
+    bool typingRun_ = false;  // consecutive typed characters share one undo step
 };
 
 TextEditApplied applyTextEditKeys(TextEditState &state, const TextEditKeys &keys);

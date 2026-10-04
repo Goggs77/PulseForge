@@ -194,6 +194,10 @@ executable when *Save preferences* is pressed.
 - **Sliders** can be dragged, or **double-clicked** to type an exact value.
   Whatever you enter is clamped to the slider's range and the handle jumps to
   match.
+- **Text boxes** edit like a normal field (caret, selection, word jumps,
+  clipboard) and **Ctrl+Z** undoes a typing run or a discrete edit. The Sticky
+  Note's box is multi-line: Enter breaks a line, Up/Down move across the wrapped
+  lines, and pasted text keeps its line breaks.
 - **File parameters have a Browse button** right under the path box (a picture, a
   font, a shader), using that parameter's own extension filter; the Shader block
   still has *Reload shaders* for a file you edited on disk.

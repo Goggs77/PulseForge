@@ -229,6 +229,15 @@ docs         rendering notes and the README overlay image
   vertically with the caret. `layoutEditLines` is the single layout used by the
   drawing, the caret and mouse placement - keep them on it, or clicking will
   land between two different wrap models.
+- Caret, selection and click x positions inside a wrapped line are measured from
+  that line's own start (`editColumnX`), never from the buffer start: a caret on
+  the second line otherwise inherits the width of the lines above it and is
+  drawn off the box (that was "the caret moves down but not left after Enter").
+- `TextEditKeys::allowNewlines` decides whether Enter finishes the edit or breaks
+  the line, and whether a paste keeps its newlines; single-line fields still
+  strip them. `TextEditState::remember`/`undo` give Ctrl+Z one step per typing
+  run (consecutive typed characters share it) or per discrete edit, with the
+  line break as its own step; the undo stack is capped at 64 entries.
 - Any `ParamKind::File` parameter draws a Browse button under its path box; the
   dialog's `node-file` purpose writes the chosen path into
   `BrowserState::paramKey` on the selected node, using the parameter's `hint` as
