@@ -86,6 +86,14 @@ struct UiState {
     int selectedNode = -1;
     float inspectorScroll = 0.0f;
 
+    // Slice automation handle currently dragged on the timeline: the node id
+    // and which end (0 = Start, 1 = Finish). 0 = nothing being dragged.
+    int sliceDragNode = 0;
+    int sliceDragEnd = 0;
+    // Mouse offset from the handle at the moment of the grab, so clicking a
+    // handle does not nudge it.
+    float sliceDragGrab = 0.0f;
+
     // layout
     Rectangle topBarRect{};
     Rectangle paletteRect{};

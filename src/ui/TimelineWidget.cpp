@@ -13,6 +13,11 @@ namespace {
 
 float kRulerHeight() { return ui::s(22.0f); }
 float kWaveHeight() { return ui::s(70.0f); }
+float kLaneHeight() { return ui::s(20.0f); }
+float kHandleWidth() { return ui::s(9.0f); }
+// Left margin: the time ruler starts here, and the slice lanes use it for their
+// names.
+float kGutter() { return ui::s(96.0f); }
 
 std::string formatTime(double seconds) {
     const int minutes = static_cast<int>(seconds) / 60;
@@ -37,8 +42,8 @@ void drawTimeline(UiState &state, Rectangle bounds) {
     ui::drawText(Rectangle{bounds.x + ui::s(10.0f), bounds.y, bounds.width - ui::s(20.0f), ui::s(26.0f)}, header, 14.0f,
                  t.text, ui::Align::Left);
 
-    const Rectangle area{bounds.x + 70.0f, bounds.y + 28.0f, bounds.width - 82.0f,
-                         bounds.height - 34.0f};
+    const Rectangle area{bounds.x + kGutter(), bounds.y + 28.0f,
+                         bounds.width - kGutter() - ui::s(12.0f), bounds.height - 34.0f};
     if (area.width < ui::s(40.0f) || area.height < ui::s(40.0f)) return;
     const Rectangle ruler{area.x, area.y, area.width, kRulerHeight()};
     const Rectangle wave{area.x, area.y + kRulerHeight(), area.width,
@@ -102,19 +107,121 @@ void drawTimeline(UiState &state, Rectangle bounds) {
                      12.0f, palette::withAlpha(t.textDim, 0.85f), ui::Align::Center);
     }
 
-    // Automation lives in its own block now: the curve is edited in the
-    // inspector, so the free space below the waveform just advertises it.
-    if (lanes.height > 20.0f) {
+    // ---- slice automation lanes ------------------------------------------
+    // Every Automation in Slice mode gets a lane under the waveform with two
+    // draggable handles that are the block's Start and Finish times; the Slice
+    // colour keeps several slices apart. The curve itself stays in the block and
+    // inspector, the timeline only places the window.
+    float laneY = lanes.y;
+    const auto laneHandle = [&](const Rectangle &lane, float x, int end, const Node &node,
+                                Color colour) {
+        const Rectangle handle{x - kHandleWidth() * 0.5f, lane.y + ui::s(1.0f), kHandleWidth(),
+                               lane.height - ui::s(2.0f)};
+        const Rectangle grab{handle.x - ui::s(4.0f), lane.y, handle.width + ui::s(8.0f),
+                             lane.height};
+        const bool active = state.sliceDragNode == node.id && state.sliceDragEnd == end;
+        const bool hot = active || (!ui::inputBlocked() && ui::hovered(grab));
+        DrawRectangleRounded(handle, 0.6f, 3, palette::withAlpha(colour, hot ? 1.0f : 0.8f));
+        if (!hot) return;
+        char label[32];
+        std::snprintf(label, sizeof(label), "%.2f s",
+                      static_cast<double>(node.pfloat(end == 0 ? "start" : "finish", 0.0f)));
+        const Rectangle labelRect{x - ui::s(30.0f), lane.y + ui::s(1.0f), ui::s(60.0f),
+                                  lane.height - ui::s(2.0f)};
+        DrawRectangleRounded(labelRect, 0.4f, 3, palette::withAlpha(BLACK, 0.6f));
+        ui::drawText(labelRect, label, 10.0f, colour, ui::Align::Center);
+    };
+    for (Node &node : project.graph.nodes) {
+        if (node.kind != "mod.automation" || !node.pbool("slice", false)) continue;
+        if (laneY + kLaneHeight() > lanes.y + lanes.height) break;  // out of room
+        const Rectangle lane{lanes.x, laneY, lanes.width, kLaneHeight()};
+        const Color colour = node.pcolor("sliceColor");
+        DrawRectangleRounded(lane, 0.35f, 3,
+                             palette::withAlpha(palette::modulate(t.panelAlt, 0.72f), 0.8f));
+        const double start =
+            std::clamp(static_cast<double>(node.pfloat("start", 0.0f)), 0.0, duration);
+        const double finish =
+            std::clamp(static_cast<double>(node.pfloat("finish", 0.0f)), 0.0, duration);
+        // Handles outside the visible timeline (a slice dragged past the end,
+        // or a project with no media yet) park on the nearest edge so they stay
+        // reachable.
+        const float startX = std::clamp(timeToX(start), area.x, area.x + area.width);
+        const float finishX = std::clamp(timeToX(finish), area.x, area.x + area.width);
+        const float leftX = std::min(startX, finishX);
+        const float rightX = std::max(startX, finishX);
+        // The name lives in the gutter left of time 0, so a slice that starts at
+        // the beginning never hides it.
+        ui::drawTextClipped(Rectangle{bounds.x + ui::s(4.0f), lane.y,
+                                      kGutter() - ui::s(10.0f), lane.height},
+                            node.displayTitle().c_str(), 10.5f,
+                            palette::withAlpha(colour, 0.95f), ui::Align::Right);
+        DrawRectangleRounded(Rectangle{leftX, lane.y + ui::s(2.0f),
+                                       std::max(ui::s(2.0f), rightX - leftX),
+                                       lane.height - ui::s(4.0f)},
+                             0.6f, 3, palette::withAlpha(colour, 0.3f));
+        // Direction of travel: the curve plays from Start to Finish, so a slice
+        // whose Start sits after its Finish reads as an arrow pointing back.
+        if (std::fabs(finishX - startX) > ui::s(16.0f)) {
+            const float arrowY = lane.y + lane.height * 0.5f;
+            const float direction = finishX >= startX ? 1.0f : -1.0f;
+            const float tipX = finishX - direction * ui::s(8.0f);
+            DrawLineEx(Vector2{startX, arrowY}, Vector2{tipX, arrowY}, ui::s(1.0f),
+                       palette::withAlpha(colour, 0.55f));
+            DrawTriangle(Vector2{tipX + direction * ui::s(5.0f), arrowY},
+                         Vector2{tipX - direction * ui::s(3.0f), arrowY - ui::s(3.5f)},
+                         Vector2{tipX - direction * ui::s(3.0f), arrowY + ui::s(3.5f)},
+                         palette::withAlpha(colour, 0.8f));
+        }
+        laneHandle(lane, startX, 0, node, colour);
+        laneHandle(lane, finishX, 1, node, colour);
+        if (!ui::inputBlocked() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            const Rectangle grabs[2] = {
+                Rectangle{startX - kHandleWidth() * 0.5f - ui::s(4.0f), lane.y,
+                          kHandleWidth() + ui::s(8.0f), lane.height},
+                Rectangle{finishX - kHandleWidth() * 0.5f - ui::s(4.0f), lane.y,
+                          kHandleWidth() + ui::s(8.0f), lane.height}};
+            for (int end = 0; end < 2; ++end) {
+                if (!ui::hovered(grabs[end])) continue;
+                state.sliceDragNode = node.id;
+                state.sliceDragEnd = end;
+                state.sliceDragGrab =
+                    static_cast<float>(GetMouseX()) - (end == 0 ? startX : finishX);
+                selectNode(state, node.id);
+                break;
+            }
+        }
+        laneY += kLaneHeight() + ui::s(4.0f);
+    }
+    if (lanes.height > 20.0f && laneY == lanes.y) {
         for (const Node &node : project.graph.nodes) {
             if (node.kind != "mod.automation") continue;
-            char hint[200];
+            char hint[220];
             std::snprintf(hint, sizeof(hint),
-                          "%s: select the block to edit its curve in the inspector",
+                          "%s: select the block to edit its curve, or turn on Slice mode to "
+                          "place it on the timeline",
                           node.displayTitle().c_str());
             ui::drawText(Rectangle{lanes.x, lanes.y, lanes.width, 18.0f}, hint, 11.0f,
                          palette::withAlpha(t.textDim, 0.9f));
             break;
         }
+    }
+    // Dragging a handle writes the block's Start/Finish; the handles snap to
+    // video frames so a slice boundary lands on a rendered frame.
+    if (state.sliceDragNode != 0 && !ui::inputBlocked() &&
+        IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        if (Node *node = project.graph.find(state.sliceDragNode)) {
+            const double fps = std::max(1.0, project.video.fps);
+            double value = xToTime(static_cast<float>(GetMouseX()) - state.sliceDragGrab);
+            value = std::round(value * fps) / fps;
+            node->setFloat(state.sliceDragEnd == 0 ? "start" : "finish",
+                           static_cast<float>(value));
+            project.dirty = true;
+        } else {
+            state.sliceDragNode = 0;
+        }
+    }
+    if (ui::inputBlocked() || IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        state.sliceDragNode = 0;
     }
     // ---- loop / trim markers ---------------------------------------------
     const double trimStart = project.video.useAudioDuration ? project.video.trimStart : 0.0;

@@ -1272,7 +1272,16 @@ void evalAutomation(Node &node, EvalContext &ctx, const std::vector<Value> &in, 
     const bool depthConnected = !in.empty() && in[0].type == PortType::Scalar;
     const bool offsetConnected = in.size() > 1 && in[1].type == PortType::Scalar;
     double normalized = ctx.duration > 0.0 ? ctx.time / ctx.duration : 0.0;
-    if (node.pbool("loop", false)) {
+    if (node.pbool("slice", false)) {
+        // Slice mode: the curve only exists between Start and Finish. Before
+        // Start the output holds the curve's first value, after Finish its last
+        // one (the clamp below does both). A Start later than Finish keeps the
+        // same mapping with a negative span, so the curve plays backwards.
+        const double start = node.pfloat("start", 0.0f);
+        const double finish = node.pfloat("finish", 10.0f);
+        const double span = finish - start;
+        normalized = std::fabs(span) > 1.0e-4 ? (ctx.time - start) / span : 0.0;
+    } else if (node.pbool("loop", false)) {
         const double span = std::max(1e-4, static_cast<double>(node.pfloat("loopLength", 1.0f)));
         normalized = (normalized / span) - std::floor(normalized / span);
     }
@@ -2599,11 +2608,18 @@ void Registry::registerBuiltins() {
         def.label = "Automation";
         def.description =
             "Keyframed curve over the project timeline, edited here in the block. Unipolar maps "
-            "the curve to 0..1, bipolar to -1..1. Depth and offset can be modulated.";
+            "the curve to 0..1, bipolar to -1..1. Depth and offset can be modulated. Slice mode "
+            "puts the curve on a Start..Finish window drawn on the timeline: before Start it "
+            "holds the first value, after Finish the last one, and a Start after Finish plays "
+            "the curve backwards. The slice handles are draggable under the waveform.";
         def.inputs = {PortDesc{"Depth", PortType::Scalar, "scales the depth"},
                       PortDesc{"Offset", PortType::Scalar, "added to the output"}};
         def.outputs = {PortDesc{"Value", PortType::Scalar}};
         Param curve = makeCurveParam("curve", "Curve");
+        Param start = makeParam("start", "Start (s)", 0.0f, 0.0f, 3600.0f, 0.01f, "Slice");
+        start.valueFormat = "%.2f s";
+        Param finish = makeParam("finish", "Finish (s)", 10.0f, 0.0f, 3600.0f, 0.01f, "Slice");
+        finish.valueFormat = "%.2f s";
         def.params = {
             curve,
             makeBoolParam("bipolar", "Bipolar (-1..1)", false, "Range"),
@@ -2613,6 +2629,10 @@ void Registry::registerBuiltins() {
             makeParam("loopLength", "Loop length (x timeline)", 1.0f, 0.05f, 1.0f, 0.01f, "Output"),
             makeBoolParam("smooth", "Smooth", false, "Output"),
             makeParam("smoothing", "Smoothing", 0.2f, 0.001f, 1.0f, 0.001f, "Output"),
+            makeBoolParam("slice", "Slice mode", false, "Slice"),
+            start,
+            finish,
+            colorParam("sliceColor", "Slice colour", 0xFF9D4D, "Slice"),
         };
         def.evaluate = evalAutomation;
         add(std::move(def));

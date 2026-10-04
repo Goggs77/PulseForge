@@ -2744,6 +2744,65 @@ int main(int argc, char **argv) {
                         }
                     }
                 }
+
+                // Automation Slice mode: the curve only covers the Start..
+                // Finish window, holds its first/last value outside it and
+                // mirrors when Start is moved past Finish.
+                if (result == 0) {
+                    bool sliceOk = true;
+                    std::string sliceWhat;
+                    Graph sliceGraph;
+                    Node *automation = sliceGraph.addNode("mod.automation", 0, 0);
+                    if (!automation) {
+                        sliceOk = false;
+                        sliceWhat = "the Automation block is missing";
+                    } else {
+                        if (Param *curve = automation->find("curve")) {
+                            curve->keys = {Keyframe{0.0, 0.25f, 0},
+                                           Keyframe{1.0, 0.75f, 0}};
+                        }
+                        automation->setBool("slice", true);
+                        automation->setBool("loop", false);
+                        automation->setBool("smooth", false);
+                        automation->setFloat("depth", 1.0f);
+                        automation->setFloat("offset", 0.0f);
+                        automation->setFloat("start", 1.0f);
+                        automation->setFloat("finish", 3.0f);
+                        const auto valueAt = [&](double time) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.time = time;
+                            ctx.duration = 8.0;
+                            sliceGraph.evaluate(ctx);
+                            return automation->outputs[0].scalar;
+                        };
+                        const float before = valueAt(0.5);  // before Start: first value
+                        const float middle = valueAt(2.0);  // halfway through the slice
+                        const float after = valueAt(5.0);   // after Finish: last value
+                        automation->setFloat("start", 3.0f);
+                        automation->setFloat("finish", 1.0f);
+                        const float reversedEarly = valueAt(1.0);  // the Finish end
+                        const float reversedLate = valueAt(3.0f);  // the Start end
+                        if (std::fabs(before - 0.25f) > 0.01f ||
+                            std::fabs(middle - 0.5f) > 0.01f ||
+                            std::fabs(after - 0.75f) > 0.01f ||
+                            std::fabs(reversedEarly - 0.75f) > 0.01f ||
+                            std::fabs(reversedLate - 0.25f) > 0.01f) {
+                            sliceOk = false;
+                            sliceWhat = "slice values are wrong (" + std::to_string(before) +
+                                        " " + std::to_string(middle) + " " +
+                                        std::to_string(after) + " / " +
+                                        std::to_string(reversedEarly) + " " +
+                                        std::to_string(reversedLate) + ")";
+                        }
+                        if (sliceOk) {
+                            std::printf("  modports : Automation slice holds, maps and mirrors "
+                                        "(%.2f %.2f %.2f / %.2f %.2f)\n",
+                                        before, middle, after, reversedEarly, reversedLate);
+                        }
+                    }
+                    if (!sliceOk) result = fail("Automation slice: " + sliceWhat);
+                }
             }
 
             // --- a real GPU export when the machine can do it --------------

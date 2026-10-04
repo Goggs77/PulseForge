@@ -54,7 +54,8 @@ exclusive Audio Output routing (processed, dry and silent exports, plus the
 monitor's source/silent/processed decisions). The Math checks include Lerp/Clamp
 (port values versus Inspector fallbacks) and the Transform block's
 pass-through/zoom/translation, and the Shader check compiles the three bundled
-templates. It also checks the ADC -> DAC
+templates. Automation's Slice mode is checked numerically (holds the first/last
+value outside the window and mirrors when reversed). It also checks the ADC -> DAC
 Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
 left/right separation, live frame-window reuse, and the input-driven Spectrum
 Analyzer (silent / precomputed / live). It also checks that a Spectrum preset
@@ -148,6 +149,20 @@ docs         rendering notes and the README overlay image
   in-block previews follow it (`Node::effectiveParam`) so an LFO visibly moves
   the control instead of leaving it on the base value; the inspector falls back
   to the base value while that slider is being dragged (`ui::sliderDragging`).
+- Automation's **Slice mode** maps the curve onto the Start..Finish window in
+  `ctx.time` (the same base as the timeline ruler): `(time - start)/(finish -
+  start)` clamped to 0..1, so outside the window the output holds the curve's
+  first or last value and a Start past the Finish mirrors the curve (a negative
+  span). `evalAutomation` still publishes `runtimeState["pos"]` as the slice
+  position, which is what the in-block curve pivot and the inspector's curve
+  editor follow. The timeline draws one lane per slice automation
+  (`TimelineWidget.cpp`) with a Start->Finish direction arrow and two draggable
+  handles; dragging writes the `start`/`finish` params, snapped to video frames,
+  and `UiState::sliceDragNode`/`sliceDragEnd` carry the drag between frames. The
+  `sliceColor` param colours the lane and its handles so several slices stay
+  apart, and a slice is drawn from `min(start, finish)` so a reversed one still
+  fills the lane it covers. Slice and Loop are mutually exclusive in practice:
+  the slice mapping wins when both are on.
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
   the Frequency Band and Signal Filter Hz sliders) and an optional
   `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty

@@ -115,8 +115,15 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
             cursor.y += 18.0f;
             const bool bipolar = node.pbool("bipolar", false);
             const double duration = state.project.effectiveDuration(state.clip.duration());
-            const double playhead01 =
+            double playhead01 =
                 duration > 0.0 ? std::clamp(state.playhead / duration, 0.0, 1.0) : 0.0;
+            // In Slice mode the curve only covers the Start..Finish window, so
+            // the pivot follows the slice position the block published instead
+            // of the raw timeline position.
+            if (node.pbool("slice", false)) {
+                const auto it = node.runtimeState.find("pos");
+                if (it != node.runtimeState.end()) playhead01 = std::clamp(it->second, 0.0, 1.0);
+            }
             const Rectangle editor{cursor.x, cursor.y, cursor.width, kCurveHeight()};
             if (ui::curveEditor(editor, &param, bipolar, playhead01,
                                 ui::widgetId(node.id, param.key.c_str()))) {
