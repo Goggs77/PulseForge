@@ -22,6 +22,14 @@ struct DynamicsSettings {
     bool softClip = true;            // false: hard clip
     float limiterAttackMs = 1.0f;
     float limiterReleaseMs = 80.0f;
+    // Pre/post gain are applied per sample without the compressor's ballistics,
+    // so a frame-rate modulation step would be a click. When `rampGains` is
+    // set, the gains move linearly from their `...DbStart` values (the gains
+    // the previous window ended on) to `preGainDb`/`postGainDb` across the
+    // block, which makes a modulated gain a continuous amplitude change.
+    bool rampGains = false;
+    float preGainDbStart = 0.0f;
+    float postGainDbStart = 0.0f;
 };
 
 // Envelope followers and limiter gain carried across chunks.

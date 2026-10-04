@@ -222,17 +222,57 @@ SpectrumSchema spectrumSchemaFor(const std::string &preset) {
     return schema;
 }
 
-void spectrumWaveWindow(const AnalysisData &analysis, double time, std::vector<float> &out) {
+// The Spectrum waveform display: +/-40 ms around the playhead, mapped across the
+// whole bar. A whole-file source is sampled directly; a live window (the
+// analyzer of a processed chain only carries one video frame at a time) is
+// accumulated in the block's rolling history so the preview shows the same span
+// as the export instead of a short window stretched, or worse, clamped flat at
+// the ends.
+void fillSpectrumWave(Node &node, const AnalysisData &analysis, double time,
+                      std::vector<float> &out) {
     out.assign(512, 0.0f);
     const AudioPtr &source = analysis.source;
     if (!source || source->frameCount <= 0) return;
     const double window = 0.04;
     const double rate = std::max(1, source->sampleRate);
+    const double sourceStart = static_cast<double>(source->startFrame) / rate;
+    const double sourceEnd =
+        static_cast<double>(source->startFrame + source->frameCount) / rate;
+    const bool direct = sourceEnd - sourceStart >= 2.0 * window;
+    if (!direct) {
+        Node::pushWaveHistory(node, source->sampleRate, source->samples.data(), source->channels,
+                              source->frameCount, source->startFrame);
+    }
+    double from = time - window;
+    double to = time + window;
+    if (!direct) {
+        const double historyStart =
+            static_cast<double>(node.waveEndFrame - node.waveCount) / rate;
+        const double historyEnd = static_cast<double>(node.waveEndFrame) / rate;
+        if (node.waveCount > 0 && historyEnd > from && historyStart < to) {
+            from = std::max(from, historyStart);
+            to = std::min(to, historyEnd);
+        } else {
+            // A seek: the ring no longer overlaps the playhead, so show the
+            // window that just arrived (fully stretched).
+            from = sourceStart;
+            to = sourceEnd;
+        }
+    } else {
+        from = std::max(from, sourceStart);
+        to = std::min(to, sourceEnd);
+        if (to - from < 1.0e-6) {
+            from = sourceStart;
+            to = sourceEnd;
+        }
+    }
+    if (to - from < 1.0e-6) return;
     for (size_t i = 0; i < out.size(); ++i) {
-        const double t = time - window + 2.0 * window *
-                                               (static_cast<double>(i) /
-                                                static_cast<double>(out.size() - 1));
-        out[i] = std::clamp(source->monoAt(t * rate - source->startFrame), -1.0f, 1.0f);
+        const double t = from + (to - from) * (static_cast<double>(i) /
+                                               static_cast<double>(out.size() - 1));
+        const float value = direct ? source->monoAt(t * rate - source->startFrame)
+                                   : node.waveHistoryAt(t * rate);
+        out[i] = std::clamp(value, -1.0f, 1.0f);
     }
 }
 
@@ -585,6 +625,13 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                 const auto it = node.runtimeState.find(name);
                 return it == node.runtimeState.end() ? fallback : static_cast<float>(it->second);
             };
+            // This window continues the previous one: ramp the pre/post gain
+            // from the values that window ended on, so a modulation step (the
+            // LFO or automation moves once per video frame) is heard as a
+            // continuous amplitude change instead of a click.
+            settings.rampGains = append;
+            settings.preGainDbStart = stored("dyn.preGainDb", settings.preGainDb);
+            settings.postGainDbStart = stored("dyn.postGainDb", settings.postGainDb);
             state.detector = stored("dyn.detector", 0.0f);
             state.gain = stored("dyn.gain", 1.0f);
             state.limiterGain = stored("dyn.limiterGain", 1.0f);
@@ -594,6 +641,8 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
             node.runtimeState["dyn.detector"] = state.detector;
             node.runtimeState["dyn.gain"] = state.gain;
             node.runtimeState["dyn.limiterGain"] = state.limiterGain;
+            node.runtimeState["dyn.preGainDb"] = settings.preGainDb;
+            node.runtimeState["dyn.postGainDb"] = settings.postGainDb;
             node.audioRenderFrames += frames;
             rendered.frameCount = node.audioRenderFrames;
             out[0].audio = node.audioRenderOutput;
@@ -1451,7 +1500,7 @@ void evalSpectrum(Node &node, EvalContext &ctx, const std::vector<Value> &in,
         spec.spectrum = analysis->spectrumRow(ctx.audioTime);
         spec.spectrumCount = analysis->spectrumBins;
         static thread_local std::vector<float> wave;
-        spectrumWaveWindow(*analysis, ctx.audioTime, wave);
+        fillSpectrumWave(node, *analysis, ctx.audioTime, wave);
         spec.wave = wave.data();
         spec.waveCount = static_cast<int>(wave.size());
         geometry::drawSpectrumElement(element, spec);

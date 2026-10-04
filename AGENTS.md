@@ -56,9 +56,11 @@ Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
 left/right separation, live frame-window reuse, and the input-driven Spectrum
 Analyzer (silent / precomputed / live). It also checks that a Spectrum preset
 change rebuilds its ports/parameters and re-matches the links by name, that a
-migrated Geometry element actually draws, and that a Dynamics feeding an
-ADC -> DAC region stays continuous across a high-refresh preview. When NVENC is
-usable it also renders a real GPU export.
+migrated Geometry element actually draws, that the waveform display fills the
+bar and its rolling history reaches the export span, that a Dynamics feeding an
+ADC -> DAC region stays continuous across a high-refresh preview, and that a
+modulated Dynamics pre-gain ramps instead of stepping. When NVENC is usable it
+also renders a real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
 `selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
@@ -223,6 +225,12 @@ docs         rendering notes and the README overlay image
   visual history once per video frame; do not reintroduce per-sample O(N) sums
   or full-buffer shifts. Dynamics uses a linear-domain static curve
   (`detector^exponent * factor`) instead of a log10 + pow pair per sample.
+- Dynamics applies pre-gain and post-gain outside the compressor's ballistics,
+  so both must ramp across a rendered window (`DynamicsSettings::rampGains` with
+  the `...DbStart` values `evalDynamics` keeps in `runtimeState`) whenever the
+  window continues the previous one. A frame-rate modulation or slider move is
+  otherwise a per-window gain step, which is audible as cracking. Threshold and
+  ratio need no ramp because the detector/gain followers already smooth them.
 - Resolution-modulating blocks must not reallocate targets per frame: Spectrum
   quantises the modulated scale and keeps its feedback texture at the base
   scale, and `Renderer::acquire` caps the target pool at 12 with LRU eviction.
@@ -249,6 +257,16 @@ docs         rendering notes and the README overlay image
   end of `Registry::spectrumPresetNames()` (shader effect indices must not
   shift), and make every per-preset shader parameter actually read its
   `uUser[slot]` (`pfParam(slot, fallback)` for positive-only values).
+- The Spectrum waveform display maps +/-40 ms around the playhead across the
+  whole bar. A whole-file source is sampled directly, but a live analysis (the
+  analyzer of a processed chain) only carries one video frame of source at a
+  time, so `Node::pushWaveHistory` accumulates the last ~0.12 s in the block's
+  rolling `waveHistory` and the display maps that instead. Without it the
+  preview showed a short window stretched (and, before the buffer was clipped,
+  clamped to a flat line at both ends) while the export - whose rendered buffer
+  covers the whole track - showed the full span. Keep the two paths producing
+  the same window, and reset the ring when the incoming window does not
+  continue it (a seek or a rewired source).
 - DAC output buffers are prepared per video frame by `prepareDacBuffer`, which
   keeps the same `audioRenderKey` reuse/append rules as the exporter and never
   mutates a buffer currently streamed by the monitor. Rendered buffers record

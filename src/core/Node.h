@@ -139,11 +139,28 @@ public:
     int ringHead = 0;
     int ringCount = 0;
     double ringSum = 0.0;
+    // Rolling mono history of the audio a Spectrum block draws. A live
+    // analysis (a processed chain) only carries one video frame of source at a
+    // time, so the block accumulates the last ~0.12 s to fill its waveform
+    // window; `waveHead` is the oldest sample while waveCount > 0 and the
+    // newest sample sits just before `waveEndFrame` (clip frames). Never
+    // serialised.
+    std::vector<float> waveHistory;
+    int waveHead = 0;
+    int waveCount = 0;
+    long long waveEndFrame = -1;
 
     // Pushes a sample into one of the rolling buffers (oldest first once full).
     static void pushHistory(std::vector<float> &buffer, float value, int capacity);
     // Reads a sample where 0 is the oldest and 1 the newest.
     static float historyAt(const std::vector<float> &buffer, int capacity, int count, float position);
+    // Appends mono samples covering clip frames [startFrame, startFrame+frames)
+    // to the Spectrum wave history, resetting it when the incoming window does
+    // not continue what is already there (a seek or a rewired source).
+    static void pushWaveHistory(Node &node, int sampleRate, const float *samples, int channels,
+                                long long frames, long long startFrame);
+    // Interpolated sample at a clip frame, 0 outside the ring.
+    float waveHistoryAt(double frame) const;
 
     const Param *find(const std::string &key) const;
     Param *find(const std::string &key);

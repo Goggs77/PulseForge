@@ -60,6 +60,16 @@ void processDynamicsBlock(const float *input, float *output, long long frames, i
     const float limiterRelease = timeCoefficient(settings.limiterReleaseMs, rate);
     const float preGain = dbToLinear(std::clamp(settings.preGainDb, -60.0f, 60.0f));
     const float postGain = dbToLinear(std::clamp(settings.postGainDb, -60.0f, 60.0f));
+    const float preGainStart =
+        settings.rampGains
+            ? dbToLinear(std::clamp(settings.preGainDbStart, -60.0f, 60.0f))
+            : preGain;
+    const float postGainStart =
+        settings.rampGains
+            ? dbToLinear(std::clamp(settings.postGainDbStart, -60.0f, 60.0f))
+            : postGain;
+    const float preGainStep = preGain - preGainStart;
+    const float postGainStep = postGain - postGainStart;
     // Linear-domain static curve: gain = detector^exponent * factor. This
     // replaces the per-sample log10 + pow pair with a single pow.
     const float ratio = std::clamp(settings.ratio, 1.0f, 100.0f);
@@ -71,6 +81,13 @@ void processDynamicsBlock(const float *input, float *output, long long frames, i
     std::vector<float> gained(static_cast<size_t>(channels));
     for (long long frame = 0; frame < frames; ++frame) {
         const float *source = input + frame * channels;
+        // Ramp across the block and land exactly on the target, so the next
+        // window starts where this one ended.
+        const float position = frames > 1 ? static_cast<float>(frame + 1) /
+                                                static_cast<float>(frames)
+                                          : 1.0f;
+        const float windowPreGain = preGainStart + preGainStep * position;
+        const float windowPostGain = postGainStart + postGainStep * position;
 
         // Detector: the loudest channel, after pre-gain, peak detected. A peak
         // detector is what makes the block 0-latency and transparent until the
@@ -81,7 +98,7 @@ void processDynamicsBlock(const float *input, float *output, long long frames, i
             if (!std::isfinite(sample)) sample = 0.0f;
             peak = std::max(peak, std::fabs(sample));
         }
-        peak *= preGain;
+        peak *= windowPreGain;
         const float detectorCoefficient = peak > state.detector ? attack : release;
         state.detector += detectorCoefficient * (peak - state.detector);
 
@@ -95,7 +112,7 @@ void processDynamicsBlock(const float *input, float *output, long long frames, i
         }
         const float gainCoefficient = targetGain < state.gain ? attack : release;
         state.gain += gainCoefficient * (targetGain - state.gain);
-        const float gain = state.gain * preGain * postGain;
+        const float gain = state.gain * windowPreGain * windowPostGain;
 
         float outputPeak = 0.0f;
         for (int channel = 0; channel < channels; ++channel) {

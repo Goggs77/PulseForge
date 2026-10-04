@@ -804,6 +804,182 @@ int main(int argc, char **argv) {
                     }
                 }
 
+                // A processed Analysis input only carries one video frame of
+                // audio, so the waveform presets keep a rolling history: the
+                // wave has to fill the bar (sampling past the buffer used to
+                // clamp to the first/last sample and draw a flat, moving line
+                // beside the real wave) and the preview has to reach the same
+                // span the export shows.
+                if (result == 0) {
+                    Graph waveGraph;
+                    const int srcId = waveGraph.addNode("src.audio", 0.0f, 0.0f)->id;
+                    const int analyzerId = waveGraph.addNode("dsp.analyze", 200.0f, 0.0f)->id;
+                    const int spectrumId = waveGraph.addNode("render.spectrum", 400.0f, 0.0f)->id;
+                    const int outputId = waveGraph.addNode("out.video", 700.0f, 0.0f)->id;
+                    Node *src = waveGraph.find(srcId);
+                    Node *analyzer = waveGraph.find(analyzerId);
+                    Node *spectrum = waveGraph.find(spectrumId);
+                    Node *output = waveGraph.find(outputId);
+                    const std::vector<std::string> presets = Registry::spectrumPresetNames();
+                    const auto presetIndex = [&](const char *name) {
+                        for (size_t i = 0; i < presets.size(); ++i) {
+                            if (presets[i] == name) return static_cast<int>(i);
+                        }
+                        return -1;
+                    };
+                    std::string what;
+                    bool ok = src && analyzer && spectrum && output;
+                    if (ok) {
+                        spectrum->setInt("preset", presetIndex("waveform_line"));
+                        EvalContext shape;
+                        shape.fps = 60.0f;
+                        shape.width = 320;
+                        shape.height = 180;
+                        waveGraph.evaluate(shape);  // resolve the preset schema
+                        spectrum->setFloat("thickness", 1.0f);
+                        std::string why;
+                        ok = waveGraph.connect(src->id, 0, analyzer->id, 0, &why) &&
+                             waveGraph.connect(analyzer->id, 0, spectrum->id, 0, &why) &&
+                             waveGraph.connect(spectrum->id, 0, output->id, 0, &why);
+                        if (!ok) what = why;
+                    }
+                    const auto makeWindow = [](long long startFrame, float frequency) {
+                        auto buffer = std::make_shared<AudioBuffer>();
+                        buffer->channels = 1;
+                        buffer->sampleRate = 48000;
+                        buffer->startFrame = startFrame;
+                        buffer->frameCount = 960;  // 20 ms: shorter than the 80 ms view
+                        buffer->samples.resize(960);
+                        for (int i = 0; i < 960; ++i) {
+                            buffer->samples[static_cast<size_t>(i)] =
+                                0.8f * std::sin(6.2831853f * frequency *
+                                                static_cast<float>(startFrame + i) / 48000.0f);
+                        }
+                        return buffer;
+                    };
+                    auto firstWindow = makeWindow(2000, 200.0f);    // slow half
+                    auto secondWindow = makeWindow(2960, 800.0f);   // fast half
+                    auto thirdWindow = makeWindow(3920, 800.0f);
+                    const auto renderFrame = [&](const std::shared_ptr<AudioBuffer> &audio,
+                                                 int frame) {
+                        EvalContext ctx;
+                        ctx.width = 320;
+                        ctx.height = 180;
+                        ctx.fps = 60.0f;
+                        ctx.duration = 1.0;
+                        ctx.time = static_cast<double>(frame) / 60.0;
+                        ctx.frame = frame;
+                        ctx.audioTime = ctx.time;
+                        ctx.audio = audio;
+                        std::string renderError;
+                        return renderer.renderFrame(waveGraph, ctx, &renderError);
+                    };
+                    const auto brightestRow = [](const Image &pixels, int x) {
+                        int best = -1;
+                        int bestValue = 0;
+                        for (int y = 0; y < pixels.height; ++y) {
+                            const unsigned char *pixel =
+                                static_cast<const unsigned char *>(pixels.data) +
+                                (static_cast<size_t>(y) * pixels.width + x) * 4;
+                            const int value = pixel[0] + pixel[1] + pixel[2];
+                            if (value > bestValue) {
+                                bestValue = value;
+                                best = y;
+                            }
+                        }
+                        return bestValue > 0 ? best : -1;
+                    };
+                    // Counts how often the drawn line crosses the centre, which
+                    // is the signal's zero crossing: a slow wave on the left of
+                    // the bar means the history reached further back than the
+                    // incoming window.
+                    const auto centreCrossings = [&](const Image &pixels, int firstX, int lastX) {
+                        int crossings = 0;
+                        int previous = 0;
+                        for (int x = firstX; x < lastX; ++x) {
+                            const int row = brightestRow(pixels, x);
+                            if (row < 0) continue;
+                            const int sign = row < pixels.height / 2 ? 1 : -1;
+                            if (previous != 0 && sign != previous) ++crossings;
+                            previous = sign;
+                        }
+                        return crossings;
+                    };
+                    const auto imageOf = [&]() {
+                        const Node *node = waveGraph.find(spectrum->id);
+                        return node && !node->outputs.empty() ? node->outputs[0].image
+                                                              : ImageBufferPtr{};
+                    };
+                    if (ok) {
+                        if (!renderFrame(firstWindow, 3)) {  // no whole-file analysis: live
+                            ok = false;
+                            what = "the first frame did not render";
+                        }
+                    }
+                    if (ok) {
+                        ImageBufferPtr image = imageOf();
+                        if (!image || !image->valid()) {
+                            ok = false;
+                            what = "no waveform image";
+                        } else {
+                            Image pixels = LoadImageFromTexture(image->texture.texture);
+                            const int left = brightestRow(pixels, 0);
+                            const int right = brightestRow(pixels, pixels.width - 1);
+                            const int nearLeft = brightestRow(pixels, 2);
+                            if (left < 0 || right < 0) {
+                                ok = false;
+                                what = "the waveform does not span the bar";
+                            } else if (left == nearLeft) {
+                                ok = false;
+                                what = "the waveform starts on a flat clamped line";
+                            }
+                            UnloadImage(pixels);
+                        }
+                    }
+                    if (ok && !renderFrame(secondWindow, 4)) {
+                        ok = false;
+                        what = "the second frame did not render";
+                    }
+                    if (ok && !renderFrame(thirdWindow, 5)) {
+                        ok = false;
+                        what = "the third frame did not render";
+                    }
+                    if (ok) {
+                        const Node *node = waveGraph.find(spectrum->id);
+                        if (!node || node->waveCount != 2880 ||
+                            node->waveEndFrame != 4880) {
+                            ok = false;
+                            what = "the wave history did not accumulate the windows";
+                        }
+                    }
+                    if (ok) {
+                        ImageBufferPtr image = imageOf();
+                        if (!image || !image->valid()) {
+                            ok = false;
+                            what = "no waveform image";
+                        } else {
+                            Image pixels = LoadImageFromTexture(image->texture.texture);
+                            const int leftCrossings =
+                                centreCrossings(pixels, 0, pixels.width / 4);
+                            const int rightCrossings =
+                                centreCrossings(pixels, pixels.width * 3 / 4, pixels.width);
+                            // Left quarter: one 20 ms window of the slow wave.
+                            // Right quarter: the fast wave. Without the history
+                            // both quarters would show the fast wave.
+                            if (leftCrossings * 2 > rightCrossings) {
+                                ok = false;
+                                what = "the preview wave did not reach the export span";
+                            } else {
+                                std::printf("  spectrum : waveform fills the bar and keeps "
+                                            "history (crossings %d vs %d)\n",
+                                            leftCrossings, rightCrossings);
+                            }
+                            UnloadImage(pixels);
+                        }
+                    }
+                    if (!ok) result = fail("Spectrum waveform window: " + what);
+                }
+
                 // The export file name has to follow the output container.
                 if (result == 0) {
                     const std::string renamed =
@@ -1578,6 +1754,115 @@ int main(int argc, char **argv) {
                             }
                         }
                         if (!liveOk) result = fail("Dynamics live window: " + liveWhat);
+                    }
+
+                    // Pre/post-gain are applied outside the compressor's
+                    // ballistics, so a frame-rate modulation step has to be
+                    // ramped across the window; a step is audible as cracking.
+                    if (result == 0) {
+                        auto flat = std::make_shared<AudioBuffer>();
+                        flat->channels = 1;
+                        flat->sampleRate = 48000;
+                        flat->frameCount = 48000;
+                        flat->samples.assign(48000, 0.5f);
+                        Graph gainGraph;
+                        Node *dynamics = gainGraph.addNode("dsp.dynamics", 0, 0);
+                        Node *preGain = gainGraph.addNode("math.constant", 200, 0);
+                        bool gainOk = dynamics && preGain;
+                        std::string gainWhat;
+                        if (gainOk) {
+                            dynamics->setFloat("threshold", 0.0f);
+                            dynamics->setFloat("ratio", 1.0f);
+                            dynamics->setBool("limiter", false);
+                            preGain->setFloat("value", 0.0f);  // 0 dB
+                            std::string why;
+                            gainOk = gainGraph.connect(preGain->id, 0, dynamics->id, 1, &why);
+                            if (!gainOk) gainWhat = why;
+                        } else {
+                            gainWhat = "blocks missing";
+                        }
+                        double maxStep = 0.0;
+                        if (gainOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.offline = false;
+                            ctx.audio = flat;
+                            ctx.frame = 0;
+                            ctx.time = 0.0;
+                            ctx.audioTime = 0.0;
+                            gainGraph.evaluate(ctx);
+                            preGain->setFloat("value", 1.0f);  // +6 dB
+                            ctx.frame = 1;
+                            ctx.time = 1.0 / 60.0;
+                            ctx.audioTime = ctx.time;
+                            gainGraph.evaluate(ctx);
+                            const AudioBuffer *rendered = dynamics->audioRenderOutput.get();
+                            if (!rendered || rendered->frameCount < 1600) {
+                                gainOk = false;
+                                gainWhat = "no rendered window";
+                            } else {
+                                for (int i = 0; i < 800; ++i) {
+                                    const double previous = i == 0
+                                                                ? rendered->samples[799]
+                                                                : rendered->samples[799 + i];
+                                    maxStep = std::max(
+                                        maxStep,
+                                        std::fabs(static_cast<double>(rendered->samples[800 + i]) -
+                                                  previous));
+                                }
+                                if (std::fabs(rendered->samples[1599] - 1.0f) > 1e-3) {
+                                    gainOk = false;
+                                    gainWhat = "the ramp did not reach +6 dB (" +
+                                               std::to_string(rendered->samples[1599]) + ")";
+                                } else if (maxStep > 0.01) {
+                                    gainOk = false;
+                                    gainWhat = "the pre-gain stepped (max " +
+                                               std::to_string(maxStep) + ")";
+                                }
+                            }
+                        }
+                        // Reversing the modulation must ramp back down from the
+                        // value the previous window ended on.
+                        if (gainOk) {
+                            preGain->setFloat("value", 0.0f);
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.offline = false;
+                            ctx.audio = flat;
+                            ctx.frame = 2;
+                            ctx.time = 2.0 / 60.0;
+                            ctx.audioTime = ctx.time;
+                            gainGraph.evaluate(ctx);
+                            const AudioBuffer *rendered = dynamics->audioRenderOutput.get();
+                            if (!rendered || rendered->frameCount < 2400) {
+                                gainOk = false;
+                                gainWhat = "no third window";
+                            } else {
+                                double step = 0.0;
+                                for (int i = 0; i < 800; ++i) {
+                                    const double previous =
+                                        i == 0 ? rendered->samples[1599]
+                                               : rendered->samples[1599 + i];
+                                    step = std::max(
+                                        step,
+                                        std::fabs(static_cast<double>(rendered->samples[1600 + i]) -
+                                                  previous));
+                                }
+                                if (step > 0.01 || std::fabs(rendered->samples[2399] - 0.5f) > 1e-3) {
+                                    gainOk = false;
+                                    gainWhat = "the release stepped (max " +
+                                               std::to_string(step) + ")";
+                                }
+                            }
+                        }
+                        if (!gainOk) {
+                            result = fail("Dynamics gain ramp: " + gainWhat);
+                        } else {
+                            std::printf("  dynamics : modulated pre-gain ramps (max step %.5f)\n",
+                                        maxStep);
+                        }
                     }
 
                     // A Dynamics in front of an ADC -> DAC region must not

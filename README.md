@@ -267,7 +267,7 @@ executable when *Save preferences* is pressed.
 | Frequency Band | Analysis | Value | Log-frequency range with average/peak/sum, shaping and attack/release |
 | Envelope Follower | Scalar | Scalar | Attack/release, threshold, gain, floor |
 | Curve / Remap | Scalar | Scalar | Input range to output range with power, smoothstep and clamping |
-| Dynamics | Audio, Pre-gain, Threshold, Ratio, Attack, Release, Post-gain | Audio | Zero-latency single-band compressor / downward expander with an optional 0 dBFS limiter (Hard Clip or Soft Clip and independent attack/release). The block draws dry and wet loudness in a 4:3 dBFS graph; the modulation ports follow the usual conventions (levels scale by `1 + input`, threshold adds 24 dB per unit, times shift by octaves) |
+| Dynamics | Audio, Pre-gain, Threshold, Ratio, Attack, Release, Post-gain | Audio | Zero-latency single-band compressor / downward expander with an optional 0 dBFS limiter (Hard Clip or Soft Clip and independent attack/release). The block draws dry and wet loudness in a 4:3 dBFS graph; the modulation ports follow the usual conventions (levels scale by `1 + input`, threshold adds 24 dB per unit, times shift by octaves). Pre-gain and Post-gain ramp from the value the previous window ended on, so a modulation step is a continuous amplitude change instead of a click |
 | ADC | Audio | left, right, ... | Starts an audio-rate region: each channel becomes a Scalar stream at the audio sample rate, so Math, Modulation, Timing and Debug blocks between it and a DAC process every sample (x2.0838 then tanh is real saturation, not a gain). `Channels` defaults to 2 (left/right) and can be 1..8 |
 | DAC | left, right, ... | Audio | Ends an audio-rate region and converts the per-channel Scalar streams back to Audio at the same rate. An unconnected channel follows the first connected one, so legacy single-port chains stay dual-mono. `Channels` defaults to 2 |
 
@@ -387,6 +387,11 @@ Spectrum also carries the four Geometry elements, drawn with the original
 Geometry code: `radial_bars`, `bar_spectrum`, `waveform_ring` and
 `waveform_line`. They expose Scale / Rotation / X / Y / Position / Colour plus
 the element's own shape parameters (count, radius, thickness, spin, ...).
+The waveform elements show +/-40 ms around the playhead across the whole bar. A
+live Analysis window (a processed chain such as a DAC) only carries one video
+frame at a time, so the block accumulates a rolling history of it: the preview
+reaches the same span the export draws instead of clamping to a flat line at
+the ends of a shorter buffer.
 
 Each Spectrum preset decides the block's ports and Inspector parameters, so the
 shader effects show `Scale`/`Feedback`/`Colour A/B` plus their own modulation

@@ -1,6 +1,7 @@
 #include "core/Node.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace pf {
 
@@ -116,6 +117,64 @@ float Node::historyAt(const std::vector<float> &buffer, int capacity, int count,
     const int start = capacity - filled;
     const int clamped = std::clamp(start + index, 0, static_cast<int>(buffer.size()) - 1);
     return buffer[static_cast<size_t>(clamped)];
+}
+
+void Node::pushWaveHistory(Node &node, int sampleRate, const float *samples, int channels,
+                           long long frames, long long startFrame) {
+    if (!samples || frames <= 0 || sampleRate <= 0) return;
+    const int capacity =
+        std::clamp(static_cast<int>(sampleRate * 0.12), 4096, 65536);
+    if (static_cast<int>(node.waveHistory.size()) != capacity) {
+        node.waveHistory.assign(static_cast<size_t>(capacity), 0.0f);
+        node.waveHead = 0;
+        node.waveCount = 0;
+        node.waveEndFrame = -1;
+    }
+    // A window that is not the continuation of the ring is a seek or a rewired
+    // source: start over instead of mixing two positions of the track.
+    const long long oldest = node.waveEndFrame - node.waveCount;
+    if (node.waveEndFrame < 0 || startFrame > node.waveEndFrame ||
+        startFrame + frames <= oldest) {
+        node.waveHead = 0;
+        node.waveCount = 0;
+        node.waveEndFrame = startFrame;
+    }
+    const long long begin = std::max(startFrame, node.waveEndFrame);
+    const long long end = startFrame + frames;
+    const int clampedChannels = std::max(1, channels);
+    for (long long frame = begin; frame < end; ++frame) {
+        float value = 0.0f;
+        const float *source = samples + (frame - startFrame) * clampedChannels;
+        for (int channel = 0; channel < clampedChannels; ++channel) value += source[channel];
+        value /= static_cast<float>(clampedChannels);
+        node.waveHistory[static_cast<size_t>((node.waveHead + node.waveCount) % capacity)] = value;
+        if (node.waveCount < capacity) {
+            ++node.waveCount;
+        } else {
+            node.waveHead = (node.waveHead + 1) % capacity;
+        }
+    }
+    // A window that overlaps the ring without adding anything (a repeated
+    // display tick, or a small step back) must not move the ring's end.
+    if (end > node.waveEndFrame) node.waveEndFrame = end;
+}
+
+float Node::waveHistoryAt(double frame) const {
+    if (waveHistory.empty() || waveCount <= 0) return 0.0f;
+    const double oldest = static_cast<double>(waveEndFrame - waveCount);
+    if (frame <= oldest) {
+        return waveHistory[static_cast<size_t>(waveHead)];
+    }
+    if (frame >= static_cast<double>(waveEndFrame)) {
+        const int newest = (waveHead + waveCount - 1) % static_cast<int>(waveHistory.size());
+        return waveHistory[static_cast<size_t>(newest)];
+    }
+    const int index = static_cast<int>(frame - oldest);
+    const int capacity = static_cast<int>(waveHistory.size());
+    const float first = waveHistory[static_cast<size_t>((waveHead + index) % capacity)];
+    const float second = waveHistory[static_cast<size_t>((waveHead + index + 1) % capacity)];
+    const float t = static_cast<float>(frame - std::floor(frame));
+    return first + (second - first) * t;
 }
 
 }  // namespace pf
