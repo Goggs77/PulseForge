@@ -1164,6 +1164,9 @@ int runApp(int argc, char **argv) {
             return 1;
         }
     }
+    // The Textbox block rasterises the same Inter files the editor atlases use,
+    // so video text is sharp at any size instead of upscaling a fixed atlas.
+    state.renderer.setDefaultFonts(ui::theme().regularFontPath, ui::theme().boldFontPath);
     state.renderer.shaders().setSearchPaths({"assets/shaders", "assets", "."});
     state.projectDirectory = GetWorkingDirectory();
     state.preferencesPath = state.projectDirectory + "/pulseforge_preferences.json";

@@ -125,6 +125,8 @@ void init(bool dark) {
     // made the text look pixelated and broke thin strokes.
     const char *regular = "resource/fonts/Inter/static/Inter_18pt-Regular.ttf";
     const char *bold = "resource/fonts/Inter/static/Inter_24pt-SemiBold.ttf";
+    gTheme.regularFontPath = regular;
+    gTheme.boldFontPath = bold;
     // Latin-1 plus the typographic symbols the UI uses, so characters such as
     // x, /, minus, <=, >=, pi and arrows render instead of falling back.
     static std::vector<int> codepoints;

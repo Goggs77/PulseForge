@@ -60,6 +60,30 @@ public:
     Texture2D blackTexture() const { return black_; }
     Texture2D spectrumTexture() const { return spectrum_; }
     Texture2D waveformTexture() const { return waveform_; }
+
+    // ---- pictures and fonts (Picture / Textbox blocks) ------------------
+    // A decoded picture: one texture per frame (animated gif/apng/webp keep
+    // every frame), plus the error the loader hit when the file could not be
+    // read. Cached per block id and reloaded when the path changes.
+    struct Picture {
+        std::string path;
+        std::string error;
+        std::vector<Texture2D> frames;
+        int width = 0;
+        int height = 0;
+        float fps = 0.0f;
+        bool resolved = false;
+    };
+    const Picture *picture(int nodeId, const std::string &path);
+    void releasePicture(int nodeId);
+    void releasePictures();
+
+    // The editor hands over the TTFs its own atlases are built from, so a
+    // Textbox can rasterise at the size the video needs instead of upscaling a
+    // fixed atlas. A block can still point at its own .ttf.
+    void setDefaultFonts(std::string regular, std::string bold);
+    Font textFont(const std::string &path, float size, bool bold);
+
     void updateAnalysisTextures(const EvalContext &ctx);
     // Uploads one analysis's spectrum row and waveform window to the shader
     // textures. Spectrum blocks call this for their own Analysis input so a
@@ -114,6 +138,10 @@ private:
     std::vector<PooledTarget> pool_;
     unsigned long long poolTick_ = 0;
     std::unordered_map<int, ImageBufferPtr> persistent_;
+    std::unordered_map<int, Picture> pictures_;
+    std::unordered_map<std::string, Font> fonts_;
+    std::string regularFontPath_;
+    std::string boldFontPath_;
     std::unordered_map<unsigned int, UniformLocs> locationCache_;
     ShaderLibrary shaders_;
     Texture2D white_{};

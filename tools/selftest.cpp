@@ -49,6 +49,43 @@ void writeLE32(std::ofstream &out, unsigned int value) {
     out.write(reinterpret_cast<const char *>(bytes), 4);
 }
 
+// 24-bit BMP with the top half red and the bottom half blue (rows are stored
+// bottom-up, so the blue rows go first). Used by the Picture block test: the
+// two colours also prove the image is drawn the right way up.
+bool writePictureBmp(const std::string &path, int width, int height) {
+    std::ofstream out(path.c_str(), std::ios::binary);
+    if (!out.good()) return false;
+    const int stride = (width * 3 + 3) & ~3;
+    const unsigned int imageBytes = static_cast<unsigned int>(stride) * height;
+    out.write("BM", 2);
+    writeLE32(out, 54u + imageBytes);
+    writeLE32(out, 0u);
+    writeLE32(out, 54u);
+    writeLE32(out, 40u);
+    writeLE32(out, static_cast<unsigned int>(width));
+    writeLE32(out, static_cast<unsigned int>(height));
+    writeLE16(out, 1);
+    writeLE16(out, 24);
+    writeLE32(out, 0u);
+    writeLE32(out, imageBytes);
+    writeLE32(out, 2835u);
+    writeLE32(out, 2835u);
+    writeLE32(out, 0u);
+    writeLE32(out, 0u);
+    std::vector<unsigned char> row(static_cast<size_t>(stride), 0);
+    for (int y = 0; y < height; ++y) {
+        // Stored bottom-up: the first stored rows are the picture's bottom.
+        const bool top = y >= height / 2;
+        for (int x = 0; x < width; ++x) {
+            row[static_cast<size_t>(x) * 3 + 0] = top ? 0 : 255;  // B
+            row[static_cast<size_t>(x) * 3 + 1] = 0;              // G
+            row[static_cast<size_t>(x) * 3 + 2] = top ? 255 : 0;  // R
+        }
+        out.write(reinterpret_cast<const char *>(row.data()), stride);
+    }
+    return out.good();
+}
+
 bool generateTestWav(const std::string &path, double seconds, int sampleRate) {
     const int frames = static_cast<int>(seconds * sampleRate);
     std::vector<float> samples(static_cast<size_t>(frames), 0.0f);
@@ -1188,6 +1225,215 @@ int main(int argc, char **argv) {
                                     "(centre %d, 2x %d, shift %d/%d, offset %d/%d)\n",
                                     centre, rightZoomed, leftShifted, rightShifted, leftOffset,
                                     rightOffset);
+                    }
+                }
+
+                // Picture and Textbox: the two media blocks in Render. The BMP
+                // has a red top half and a blue bottom half, so the sampled rows
+                // prove the decode *and* the orientation; the Textbox draws a
+                // white glyph over it; the gif check proves an animated file
+                // advances with the timeline.
+                if (result == 0) {
+                    const std::string picturePath = "selftest_picture.bmp";
+                    bool ok = writePictureBmp(picturePath, 24, 24);
+                    std::string what;
+                    Graph mediaGraph;
+                    int pictureId = 0;
+                    int textboxId = 0;
+                    if (ok) {
+                        pictureId = mediaGraph.addNode("render.picture", 0.0f, 0.0f)->id;
+                        textboxId = mediaGraph.addNode("render.textbox", 260.0f, 0.0f)->id;
+                        const int outputId = mediaGraph.addNode("out.video", 540.0f, 0.0f)->id;
+                        (void)outputId;
+                    }
+                    Node *picture = mediaGraph.find(pictureId);
+                    Node *textbox = mediaGraph.find(textboxId);
+                    if (!ok) {
+                        what = "could not write the test picture";
+                    } else if (!picture || !textbox) {
+                        ok = false;
+                        what = "the Picture/Textbox blocks are not registered";
+                    } else {
+                        picture->setText("file", picturePath);
+                        picture->setInt("mode", 0);  // Raw: the file's own pixels
+                        textbox->setText("text", "T");
+                        textbox->setFloat("size", 0.35f);
+                        textbox->setFloat("x", 0.2f);
+                        textbox->setFloat("y", 0.1f);
+                        textbox->setFloat("w", 0.6f);
+                        textbox->setFloat("h", 0.8f);
+                        textbox->setFloat("backgroundOpacity", 0.0f);
+                        std::string why;
+                        ok = mediaGraph.connect(picture->id, 0, textbox->id, 0, &why) &&
+                             mediaGraph.connect(textbox->id, 0, mediaGraph.sinkNodeId(), 0, &why);
+                        if (!ok) what = why;
+                    }
+                    const auto renderMedia = [&](double time) {
+                        EvalContext ctx;
+                        ctx.width = 160;
+                        ctx.height = 90;
+                        ctx.fps = 30.0f;
+                        ctx.duration = 1.0;
+                        ctx.time = time;
+                        ctx.frame = static_cast<int>(time * 30.0);
+                        ctx.audioTime = time;
+                        std::string renderError;
+                        return renderer.renderFrame(mediaGraph, ctx, &renderError) != nullptr;
+                    };
+                    // Reads one pixel of a node's Image as (r, g, b).
+                    const auto pixelAt = [&](const ImageBufferPtr &image, float u, float v) {
+                        if (!image || !image->valid()) return Vector3{-1.0f, -1.0f, -1.0f};
+                        Image pixels = LoadImageFromTexture(image->texture.texture);
+                        const int x = std::clamp(static_cast<int>(u * pixels.width), 0,
+                                                 pixels.width - 1);
+                        const int y = std::clamp(static_cast<int>(v * pixels.height), 0,
+                                                 pixels.height - 1);
+                        const unsigned char *pixel =
+                            static_cast<const unsigned char *>(pixels.data) +
+                            (static_cast<size_t>(y) * pixels.width + x) * 4;
+                        const Vector3 value{static_cast<float>(pixel[0]),
+                                            static_cast<float>(pixel[1]),
+                                            static_cast<float>(pixel[2])};
+                        UnloadImage(pixels);
+                        return value;
+                    };
+                    const auto outputImage = [&](int nodeId) {
+                        const Node *node = mediaGraph.find(nodeId);
+                        return node && !node->outputs.empty() ? node->outputs[0].image
+                                                              : ImageBufferPtr{};
+                    };
+                    if (ok) {
+                        ok = renderMedia(0.1);
+                        if (!ok) what = "the media frame did not render";
+                    }
+                    if (ok) {
+                        const Vector3 upper = pixelAt(outputImage(pictureId), 0.5f, 0.45f);
+                        const Vector3 lower = pixelAt(outputImage(pictureId), 0.5f, 0.55f);
+                        const Vector3 corner = pixelAt(outputImage(pictureId), 0.02f, 0.02f);
+                        if (upper.x < 180.0f || upper.z > 60.0f || lower.z < 180.0f ||
+                            lower.x > 60.0f || corner.x > 20.0f) {
+                            ok = false;
+                            what = "the picture is missing, flipped or not centred";
+                        }
+                    }
+                    if (ok) {
+                        // The glyph is white, the layer under it stays visible.
+                        bool foundGlyph = false;
+                        ImageBufferPtr image = outputImage(textboxId);
+                        if (image && image->valid()) {
+                            Image pixels = LoadImageFromTexture(image->texture.texture);
+                            for (int y = 0; y < pixels.height && !foundGlyph; ++y) {
+                                for (int x = 0; x < pixels.width; ++x) {
+                                    const unsigned char *pixel =
+                                        static_cast<const unsigned char *>(pixels.data) +
+                                        (static_cast<size_t>(y) * pixels.width + x) * 4;
+                                    if (pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200) {
+                                        foundGlyph = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            UnloadImage(pixels);
+                        }
+                        const Vector3 layer = pixelAt(image, 0.5f, 0.45f);
+                        if (!foundGlyph) {
+                            ok = false;
+                            what = "the Textbox did not draw its text";
+                        } else if (layer.x < 180.0f) {
+                            ok = false;
+                            what = "the Textbox did not keep its Layer";
+                        }
+                    }
+                    if (ok) {
+                        // Animated pictures: a two frame gif built with ffmpeg has
+                        // to show different frames at different times.
+                        const std::string gifPath = "selftest_picture.gif";
+                        std::vector<std::string> args = {
+                            ffmpeg::ffmpegPath(), "-hide_banner", "-loglevel", "error", "-y",
+                            "-f", "lavfi", "-i", "color=c=red:s=16x16:r=10:d=0.1",
+                            "-f", "lavfi", "-i", "color=c=blue:s=16x16:r=10:d=0.1",
+                            "-filter_complex", "[0:v][1:v]concat=n=2:v=1", gifPath};
+                        ChildProcess process;
+                        std::string gifError;
+                        const bool built = process.start(args, &gifError) &&
+                                           process.wait(nullptr) &&
+                                           std::ifstream(gifPath.c_str()).good();
+                        if (built) {
+                            Graph gifGraph;
+                            const int gifPicture = gifGraph.addNode("render.picture", 0, 0)->id;
+                            const int gifOutput = gifGraph.addNode("out.video", 400, 0)->id;
+                            gifGraph.find(gifPicture)->setText("file", gifPath);
+                            std::string why;
+                            ok = gifGraph.connect(gifPicture, 0, gifOutput, 0, &why);
+                            const auto gifColour = [&](double time) {
+                                EvalContext ctx;
+                                ctx.width = 160;
+                                ctx.height = 90;
+                                ctx.fps = 30.0f;
+                                ctx.duration = 1.0;
+                                ctx.time = time;
+                                ctx.frame = static_cast<int>(time * 30.0);
+                                ctx.audioTime = time;
+                                std::string renderError;
+                                if (!renderer.renderFrame(gifGraph, ctx, &renderError)) {
+                                    return Vector3{-1.0f, -1.0f, -1.0f};
+                                }
+                                const Node *node = gifGraph.find(gifPicture);
+                                return pixelAt(node && !node->outputs.empty()
+                                                   ? node->outputs[0].image
+                                                   : ImageBufferPtr{},
+                                               0.5f, 0.5f);
+                            };
+                            // Walk the first loop and require both frames to
+                            // show up; the exported rate is whatever the file
+                            // carries, so no single time pair is guaranteed.
+                            bool sawRed = false;
+                            bool sawBlue = false;
+                            for (int step = 0; step < 21 && ok; ++step) {
+                                const Vector3 colour = gifColour(0.005 + 0.01 * step);
+                                if (colour.x > 150.0f && colour.z < 60.0f) sawRed = true;
+                                if (colour.z > 150.0f && colour.x < 60.0f) sawBlue = true;
+                            }
+                            if (!sawRed || !sawBlue) {
+                                ok = false;
+                                what = "the animated picture did not advance";
+                            }
+                        }
+                        std::remove(gifPath.c_str());
+                    }
+                    if (ok) {
+                        // The blocks also have to survive a real export, not only
+                        // the preview: mux a few frames through ffmpeg.
+                        Project mediaProject;
+                        mediaProject.graph = mediaGraph;
+                        mediaProject.name = "Media blocks";
+                        mediaProject.video.width = 320;
+                        mediaProject.video.height = 180;
+                        mediaProject.video.fps = 30.0;
+                        mediaProject.video.useAudioDuration = false;
+                        mediaProject.video.duration = 0.3;
+                        mediaProject.output = outputSpecForContainer("mp4");
+                        mediaProject.output.videoCodec = "libx264";
+                        ExportRequest request;
+                        request.outputPath = "selftest_media.mp4";
+                        request.overwrite = true;
+                        request.audioSampleRate = 48000;
+                        std::string exportError;
+                        ok = Exporter::run(renderer, mediaProject, request, AudioPtr{}, nullptr,
+                                           nullptr, nullptr, &exportError);
+                        if (!ok) {
+                            what = "media export: " + exportError;
+                        } else if (!ffmpeg::probe("selftest_media.mp4").ok) {
+                            ok = false;
+                            what = "the exported media video is unreadable";
+                        }
+                    }
+                    std::remove(picturePath.c_str());
+                    if (!ok) {
+                        result = fail("Picture/Textbox blocks: " + what);
+                    } else {
+                        std::printf("  render   : Picture decodes upright, Textbox draws over its "
+                                    "layer, animated gif advances\n");
                     }
                 }
 

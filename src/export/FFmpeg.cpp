@@ -1,6 +1,7 @@
 #include "export/FFmpeg.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -291,6 +292,20 @@ MediaInfo ffmpeg::probe(const std::string &path) {
         const json::Value &stream = streams.at(i);
         if (stream["codec_type"].asString() == "video" && info.videoCodec.empty()) {
             info.videoCodec = stream["codec_name"].asString();
+            info.videoWidth = stream["width"].asInt(0);
+            info.videoHeight = stream["height"].asInt(0);
+            // "10/1" style rationals; 0/0 for a still image.
+            const auto parseRate = [](const std::string &text) {
+                const size_t slash = text.find('/');
+                if (slash == std::string::npos) return std::atof(text.c_str());
+                const double numerator = std::atof(text.substr(0, slash).c_str());
+                const double denominator = std::atof(text.substr(slash + 1).c_str());
+                return denominator > 0.0 ? numerator / denominator : 0.0;
+            };
+            info.videoFps = parseRate(stream["avg_frame_rate"].asString("0/0"));
+            if (info.videoFps <= 0.0) {
+                info.videoFps = parseRate(stream["r_frame_rate"].asString("0/0"));
+            }
         }
         if (stream["codec_type"].asString() != "audio") continue;
         info.sampleRate = std::atoi(stream["sample_rate"].asString("0").c_str());
@@ -302,6 +317,64 @@ MediaInfo ffmpeg::probe(const std::string &path) {
     }
     info.ok = info.duration > 0.0;
     return info;
+}
+
+bool ffmpeg::decodeImageSequence(const std::string &path, int maxFrames, int maxSize,
+                                 size_t maxBytes, int *outWidth, int *outHeight, double *outFps,
+                                 std::vector<unsigned char> *outPixels, std::string *error) {
+    const auto fail = [&](const std::string &message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (outPixels) outPixels->clear();
+    MediaInfo info = probe(path);
+    if (info.videoWidth <= 0 || info.videoHeight <= 0) {
+        return fail(info.error.empty() ? "not a picture ffmpeg can read" : info.error);
+    }
+    // Scale to the cap before decoding, so ffmpeg never hands back a frame
+    // bigger than the caller asked for (rawvideo is uncompressed).
+    int width = info.videoWidth;
+    int height = info.videoHeight;
+    const int longest = std::max(width, height);
+    if (maxSize > 0 && longest > maxSize) {
+        const double scale = static_cast<double>(maxSize) / static_cast<double>(longest);
+        width = std::max(1, static_cast<int>(std::lround(width * scale)));
+        height =
+            std::max(1, static_cast<int>(std::lround(static_cast<double>(height) * scale)));
+    }
+    const size_t frameBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+    if (frameBytes == 0) return fail("the picture has no pixels");
+    int frames = std::max(1, maxFrames);
+    if (maxBytes > 0) {
+        const int affordable = static_cast<int>(maxBytes / frameBytes);
+        frames = std::max(1, std::min(frames, affordable));
+    }
+    char filter[96];
+    std::snprintf(filter, sizeof(filter), "scale=%d:%d", width, height);
+    std::vector<std::string> arguments = {
+        ffmpegPath(),     "-hide_banner", "-v",           "error",   "-i",
+        path,             "-vsync",       "0",            "-frames:v", std::to_string(frames),
+        "-vf",            filter,         "-f",           "rawvideo", "-pix_fmt",
+        "rgba",           "-"};
+    ChildProcess process;
+    if (!process.start(arguments, error)) return false;
+    if (!process.wait(nullptr)) {
+        const std::string message = process.stderrText();
+        return fail(message.empty() ? "ffmpeg could not decode the picture" : message);
+    }
+    const std::string &raw = process.stdoutText();
+    const size_t available = raw.size() / frameBytes;
+    if (available == 0) return fail("ffmpeg returned no picture frames");
+    const size_t used = std::min(available, static_cast<size_t>(frames));
+    if (outPixels) {
+        outPixels->assign(reinterpret_cast<const unsigned char *>(raw.data()),
+                          reinterpret_cast<const unsigned char *>(raw.data()) +
+                              used * frameBytes);
+    }
+    if (outWidth) *outWidth = width;
+    if (outHeight) *outHeight = height;
+    if (outFps) *outFps = info.videoFps;
+    return true;
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,9 @@ struct MediaInfo {
     double duration = 0.0;
     int sampleRate = 0;
     int channels = 0;
+    int videoWidth = 0;
+    int videoHeight = 0;
+    double videoFps = 0.0;
     long long bitRate = 0;  // bits per second, -1/0 when the container has none
     std::string codec;
     std::string videoCodec;
@@ -33,6 +36,14 @@ bool available();
 // channels is clamped to 1..2 and the stream is resampled to `sampleRate`.
 bool decodeAudioFloat(const std::string &path, int sampleRate, int *outChannels,
                       std::vector<float> *outSamples, std::string *error);
+
+// Decodes a still or animated picture (the Picture block's gif/apng/webp support)
+// into top-row-first RGBA8 frames, scaled down so the longest side is at most
+// `maxSize` and never more than `maxFrames` frames or ~`maxBytes` of pixels.
+// `outFps` is the stream's average rate (0 when unknown).
+bool decodeImageSequence(const std::string &path, int maxFrames, int maxSize, size_t maxBytes,
+                         int *outWidth, int *outHeight, double *outFps,
+                         std::vector<unsigned char> *outPixels, std::string *error);
 
 // True when this ffmpeg build carries an encoder with that name (cached).
 bool hasEncoder(const std::string &name);

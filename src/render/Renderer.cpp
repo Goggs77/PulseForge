@@ -1,9 +1,11 @@
 #include "render/Renderer.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 #include "core/Registry.h"
+#include "export/FFmpeg.h"
 #include "rlgl.h"
 
 namespace pf {
@@ -118,6 +120,11 @@ void Renderer::shutdown() {
     if (output_ && output_->valid()) UnloadRenderTexture(output_->texture);
     output_.reset();
     current_.reset();
+    releasePictures();
+    for (auto &kv : fonts_) {
+        if (kv.second.texture.id) UnloadFont(kv.second);
+    }
+    fonts_.clear();
     shaders_.reset();
     if (white_.id) UnloadTexture(white_);
     if (black_.id) UnloadTexture(black_);
@@ -216,6 +223,146 @@ void Renderer::resetPersistent() {
         if (kv.second && kv.second->valid()) UnloadRenderTexture(kv.second->texture);
     }
     persistent_.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Pictures and fonts (Picture / Textbox blocks)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool isAnimatedPicture(const std::string &path) {
+    const size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos) return false;
+    std::string extension = path.substr(dot + 1);
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return extension == "gif" || extension == "apng" || extension == "webp" ||
+           extension == "mng";
+}
+
+}  // namespace
+
+void Renderer::releasePicture(int nodeId) {
+    const auto it = pictures_.find(nodeId);
+    if (it == pictures_.end()) return;
+    for (Texture2D &texture : it->second.frames) {
+        if (texture.id) UnloadTexture(texture);
+    }
+    pictures_.erase(it);
+}
+
+void Renderer::releasePictures() {
+    for (auto &kv : pictures_) {
+        for (Texture2D &texture : kv.second.frames) {
+            if (texture.id) UnloadTexture(texture);
+        }
+    }
+    pictures_.clear();
+}
+
+const Renderer::Picture *Renderer::picture(int nodeId, const std::string &path) {
+    const auto found = pictures_.find(nodeId);
+    if (found != pictures_.end() && found->second.resolved && found->second.path == path) {
+        return &found->second;
+    }
+    if (found != pictures_.end()) releasePicture(nodeId);
+    Picture &entry = pictures_[nodeId];
+    entry.path = path;
+    entry.resolved = true;
+    if (path.empty()) {
+        entry.error = "no picture selected";
+        return &entry;
+    }
+    constexpr int kMaxPictureSize = 2048;
+    constexpr int kMaxPictureFrames = 96;
+    constexpr size_t kMaxPictureBytes = 256u * 1024u * 1024u;
+    if (!isAnimatedPicture(path)) {
+        // raylib reads the still formats (png, jpg, bmp, tga, psd, hdr, pnm ...)
+        // and the first frame of a gif; anything bigger than the cap is scaled.
+        Image image = LoadImage(path.c_str());
+        if (image.data && image.width > 0 && image.height > 0) {
+            const int longest = std::max(image.width, image.height);
+            if (longest > kMaxPictureSize) {
+                const float scale = static_cast<float>(kMaxPictureSize) /
+                                    static_cast<float>(longest);
+                ImageResize(&image, std::max(1, static_cast<int>(image.width * scale)),
+                            std::max(1, static_cast<int>(image.height * scale)));
+            }
+            entry.width = image.width;
+            entry.height = image.height;
+            Texture2D texture = LoadTextureFromImage(image);
+            UnloadImage(image);
+            if (texture.id) {
+                SetTextureFilter(texture, TEXTURE_FILTER_BILINEAR);
+                entry.frames.push_back(texture);
+                return &entry;
+            }
+        }
+    }
+    // Animated files (and any format raylib cannot read) go through ffmpeg,
+    // which also reports the frame rate the animation plays at.
+    int width = 0;
+    int height = 0;
+    double fps = 0.0;
+    std::vector<unsigned char> pixels;
+    std::string error;
+    if (!ffmpeg::decodeImageSequence(path, kMaxPictureFrames, kMaxPictureSize, kMaxPictureBytes,
+                                     &width, &height, &fps, &pixels, &error)) {
+        entry.error = error;
+        return &entry;
+    }
+    const size_t frameBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+    const size_t count = frameBytes > 0 ? pixels.size() / frameBytes : 0;
+    for (size_t i = 0; i < count; ++i) {
+        Image frame{pixels.data() + i * frameBytes, width, height, 1,
+                    PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+        Texture2D texture = LoadTextureFromImage(frame);
+        if (!texture.id) continue;
+        SetTextureFilter(texture, TEXTURE_FILTER_BILINEAR);
+        entry.frames.push_back(texture);
+    }
+    if (entry.frames.empty()) {
+        entry.error = "the picture decoded to no frames";
+        return &entry;
+    }
+    entry.width = width;
+    entry.height = height;
+    entry.fps = static_cast<float>(fps > 0.0 ? fps : 10.0);
+    return &entry;
+}
+
+void Renderer::setDefaultFonts(std::string regular, std::string bold) {
+    regularFontPath_ = std::move(regular);
+    boldFontPath_ = std::move(bold);
+}
+
+Font Renderer::textFont(const std::string &path, float size, bool bold) {
+    const bool custom = !path.empty();
+    const std::string key = custom ? path : (bold ? boldFontPath_ : regularFontPath_);
+    if (key.empty()) return GetFontDefault();
+    if (!FileExists(key.c_str())) {
+        // A missing file falls back to the editor font instead of squares.
+        return custom ? textFont(std::string(), size, bold) : GetFontDefault();
+    }
+    // Rasterise at the requested size, quantised so a drifting size does not
+    // load a fresh atlas every frame.
+    const int atlas = std::clamp((static_cast<int>(size) + 7) / 8 * 8, 8, 512);
+    const std::string cacheKey = key + "|" + std::to_string(atlas);
+    const auto found = fonts_.find(cacheKey);
+    if (found != fonts_.end()) return found->second;
+    if (fonts_.size() >= 16) {
+        for (auto &kv : fonts_) {
+            if (kv.second.texture.id) UnloadFont(kv.second);
+        }
+        fonts_.clear();
+    }
+    Font font = LoadFontEx(key.c_str(), atlas, nullptr, 0);
+    if (font.texture.id == 0) return GetFontDefault();
+    SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
+    fonts_.emplace(cacheKey, font);
+    return font;
 }
 
 void Renderer::beginTarget(const ImageBufferPtr &target, bool clear, Color clearColor) {

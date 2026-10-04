@@ -58,7 +58,9 @@ templates. Automation's Slice mode is checked numerically (holds the first/last
 value outside the window and mirrors when reversed), and the Sorting check
 covers the group's layered order (compacted depths, row rules), the member list
 parsing/formatting and a Sticky Note/Group project round trip. It also checks
-the ADC -> DAC
+the Picture block (a BMP with a red top and blue bottom decodes the right way
+up), the Textbox (white glyph over a kept Layer) and that a two frame gif
+advances with the timeline. It also checks the ADC -> DAC
 Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
 left/right separation, live frame-window reuse, and the input-driven Spectrum
 Analyzer (silent / precomputed / live). It also checks that a Spectrum preset
@@ -72,9 +74,9 @@ also renders a real GPU export.
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
 `selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
 `selftest_dynamics.pforge`, `selftest_dynamics.mp4`, `selftest_dry_source.wav`,
-`selftest_dry.mp4`, `selftest_dac.mp4`, `selftest_silent.mp4` and (when GPUs are
-available) `selftest_nvenc.mp4` into the current directory - delete them when
-you are done.
+`selftest_dry.mp4`, `selftest_dac.mp4`, `selftest_silent.mp4`,
+`selftest_media.mp4` and (when GPUs are available) `selftest_nvenc.mp4` into the
+current directory - delete them when you are done.
 
 Other tools:
 
@@ -299,6 +301,20 @@ docs         rendering notes and the README overlay image
 - `assets/shaders` ships copy-me templates (`passthrough.glsl`, `scale.glsl`,
   `rotation.glsl`) beside the preset shaders; the selftest compiles all three
   through the Shader block, so a preamble change that breaks them fails fast.
+- The **Picture** and **Textbox** blocks keep their GPU resources in the
+  Renderer, not in core: `Renderer::picture` caches one texture per frame per
+  block id (reloaded when the path changes, unloaded in `shutdown`), and
+  `Renderer::textFont` caches custom .ttf atlases. The editor hands over the
+  TTFs its own atlases are built from with `setDefaultFonts`, so a Textbox can
+  rasterise at the size the video needs instead of upscaling a fixed atlas
+  (CrystalGUI's font by default). Stills load through raylib first and ffmpeg is
+  the fallback; `ffmpeg::decodeImageSequence` scales to the cap *before*
+  decoding and bounds frames and bytes, because `-f rawvideo` is uncompressed -
+  never feed it an unbounded image. Animated frames are picked with
+  `ctx.time * file fps`, so preview and export show the same frame. The Textbox
+  wraps text with its own small core-side wrapper (the UI one is not reachable
+  from core) and always draws at least the first line, so a region shorter than
+  one line still shows something.
 - Geometry (`geom.primitives`) owns primitives only and must not read
   `ctx.audio`/`ctx.analysis`. Spectrum and waveform shapes are
   `render.spectrum` effects; `Project::fromJson` converts old Geometry shapes

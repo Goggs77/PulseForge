@@ -1792,6 +1792,187 @@ void evalTransform(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     out[0] = Value::makeImage(target);
 }
 
+// Draws a picture file (still or animated) into the frame, centred. The block
+// owns a target aspect ratio and width as fractions of the frame; the fill mode
+// decides how the source maps into that region. Animated files loop at their own
+// frame rate, so preview and export show the same frame for the same time.
+void evalPicture(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                 std::vector<Value> &out) {
+    if (!ctx.renderer) return;
+    const Renderer::Picture *picture = ctx.renderer->picture(node.id, node.pstr("file"));
+    if (!picture) return;
+    if (!picture->error.empty()) {
+        node.status = picture->error;
+        return;
+    }
+    node.status.clear();
+    const float aspect =
+        std::clamp(scalarOrParam(node, in, 0, "aspect", 16.0f / 9.0f), 0.05f, 20.0f);
+    const float width = std::clamp(scalarOrParam(node, in, 1, "width", 0.5f), 0.01f, 2.0f);
+    const float opacity = std::clamp(scalarOrParam(node, in, 2, "opacity", 1.0f), 0.0f, 1.0f);
+    node.publishEffective("aspect", aspect);
+    node.publishEffective("width", width);
+    node.publishEffective("opacity", opacity);
+
+    const float frameWidth = static_cast<float>(ctx.width);
+    const float frameHeight = static_cast<float>(ctx.height);
+    const float regionWidth = width * frameWidth;
+    const float regionHeight = regionWidth / std::max(0.01f, aspect);
+    const float sourceAspect =
+        picture->height > 0 ? static_cast<float>(picture->width) / static_cast<float>(picture->height)
+                            : 1.0f;
+    float drawWidth = regionWidth;
+    float drawHeight = regionHeight;
+    switch (node.pint("mode", 0)) {
+        case 0:  // Raw: the file's own pixels, ignoring the block's aspect and size
+            drawWidth = static_cast<float>(picture->width);
+            drawHeight = static_cast<float>(picture->height);
+            break;
+        case 1:  // Preserve height: match the region's height, keep the source aspect
+            drawHeight = regionHeight;
+            drawWidth = regionHeight * sourceAspect;
+            break;
+        case 2:  // Preserve width
+            drawWidth = regionWidth;
+            drawHeight = sourceAspect > 0.0f ? regionWidth / sourceAspect : regionHeight;
+            break;
+        default:  // Stretch: force the region
+            break;
+    }
+    int frame = 0;
+    if (picture->frames.size() > 1) {
+        const double rate = picture->fps > 0.0f ? picture->fps : 10.0;
+        const long long index =
+            static_cast<long long>(std::floor(std::max(0.0, ctx.time) * rate));
+        frame = static_cast<int>(index % static_cast<long long>(picture->frames.size()));
+    }
+    const Texture2D texture = picture->frames[static_cast<size_t>(frame)];
+    ImageBufferPtr target = ctx.renderer->acquire(ctx.width, ctx.height);
+    if (!target) {
+        node.status = "out of render targets";
+        return;
+    }
+    ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+    const Rectangle source{0.0f, 0.0f, static_cast<float>(texture.width),
+                           static_cast<float>(texture.height)};
+    const Rectangle destination{(frameWidth - drawWidth) * 0.5f,
+                                (frameHeight - drawHeight) * 0.5f, drawWidth, drawHeight};
+    Color tint = WHITE;
+    tint.a = static_cast<unsigned char>(std::lround(opacity * 255.0f));
+    DrawTexturePro(texture, source, destination, Vector2{0, 0}, 0.0f, tint);
+    ctx.renderer->endTarget();
+    out[0] = Value::makeImage(target);
+}
+
+// Word wraps to a pixel width, honouring explicit newlines. The UI has its own
+// wrapper, but core cannot use it, so the Textbox carries a small one.
+std::vector<std::string> wrapTextLines(const Font &font, const std::string &text, float size,
+                                       float spacing, float maxWidth) {
+    std::vector<std::string> lines;
+    std::string line;
+    const auto measure = [&](const std::string &value) {
+        return MeasureTextEx(font, value.c_str(), size, spacing).x;
+    };
+    size_t index = 0;
+    while (index < text.size()) {
+        if (text[index] == '\n') {
+            lines.push_back(line);
+            line.clear();
+            ++index;
+            continue;
+        }
+        if (text[index] == ' ') {
+            ++index;
+            continue;
+        }
+        size_t end = index;
+        while (end < text.size() && text[end] != ' ' && text[end] != '\n') ++end;
+        const std::string word = text.substr(index, end - index);
+        const std::string candidate = line.empty() ? word : line + " " + word;
+        if (line.empty() || measure(candidate) <= maxWidth) {
+            line = candidate;
+        } else {
+            lines.push_back(line);
+            line = word;  // a word wider than the region keeps its own line
+        }
+        index = end;
+    }
+    lines.push_back(line);
+    return lines;
+}
+
+// Draws text inside a region of the frame, over the optional Layer image. The
+// font is the editor's CrystalGUI font unless the block picks a .ttf/.otf; the
+// foreground and background colours each carry their own opacity.
+void evalTextbox(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                 std::vector<Value> &out) {
+    if (!ctx.renderer) return;
+    const float frameWidth = static_cast<float>(ctx.width);
+    const float frameHeight = static_cast<float>(ctx.height);
+    const Rectangle region{node.pfloat("x", 0.05f) * frameWidth,
+                           node.pfloat("y", 0.35f) * frameHeight,
+                           std::max(0.01f, node.pfloat("w", 0.9f)) * frameWidth,
+                           std::max(0.01f, node.pfloat("h", 0.3f)) * frameHeight};
+    // Opacity inputs follow the level convention: they scale by (1 + input).
+    const float foregroundOpacity =
+        std::clamp(node.pfloat("foregroundOpacity", 1.0f) *
+                       std::max(0.0f, 1.0f + scalarFrom(in, 1)),
+                   0.0f, 1.0f);
+    const float backgroundOpacity =
+        std::clamp(node.pfloat("backgroundOpacity", 0.0f) *
+                       std::max(0.0f, 1.0f + scalarFrom(in, 2)),
+                   0.0f, 1.0f);
+    node.publishEffective("foregroundOpacity", foregroundOpacity);
+    node.publishEffective("backgroundOpacity", backgroundOpacity);
+
+    ImageBufferPtr target = ctx.renderer->acquire(ctx.width, ctx.height);
+    if (!target) {
+        node.status = "out of render targets";
+        return;
+    }
+    ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
+    if (!in.empty() && in[0].image && in[0].image->valid()) ctx.renderer->blit(in[0].image);
+    if (backgroundOpacity > 0.002f) {
+        Color background = node.pcolor("background");
+        background.a = static_cast<unsigned char>(std::lround(backgroundOpacity * 255.0f));
+        DrawRectangleRec(region, background);
+    }
+    const std::string text = node.pstr("text");
+    if (!text.empty() && foregroundOpacity > 0.002f) {
+        const float size = std::max(4.0f, node.pfloat("size", 0.14f) * frameHeight);
+        const Font font = ctx.renderer->textFont(node.pstr("font"), size, node.pbool("bold", false));
+        const float base = font.baseSize > 0 ? static_cast<float>(font.baseSize) : size;
+        const float spacing = size / std::max(1.0f, base);
+        const float lineHeight = size * 1.2f;
+        const float inset = std::min(region.width, region.height) * 0.05f;
+        const Rectangle inner{region.x + inset, region.y + inset,
+                              std::max(1.0f, region.width - inset * 2.0f),
+                              std::max(1.0f, region.height - inset * 2.0f)};
+        const std::vector<std::string> lines =
+            wrapTextLines(font, text, size, spacing, inner.width);
+        Color foreground = node.pcolor("foreground");
+        foreground.a = static_cast<unsigned char>(std::lround(foregroundOpacity * 255.0f));
+        const int align = node.pint("align", 0);
+        float lineY = inner.y;
+        int drawn = 0;
+        for (const std::string &line : lines) {
+            // The first line always draws, even when the region is shorter than
+            // one line; the rest stop once the region is full.
+            if (drawn > 0 && lineY + lineHeight > inner.y + inner.height + 0.5f) break;
+            const float measured = MeasureTextEx(font, line.c_str(), size, spacing).x;
+            float lineX = inner.x;
+            if (align == 1) lineX = inner.x + (inner.width - measured) * 0.5f;
+            else if (align == 2) lineX = inner.x + inner.width - measured;
+            DrawTextEx(font, line.c_str(), Vector2{std::floor(lineX), std::floor(lineY)}, size,
+                       spacing, foreground);
+            lineY += lineHeight;
+            ++drawn;
+        }
+    }
+    ctx.renderer->endTarget();
+    out[0] = Value::makeImage(target);
+}
+
 void evalPostFx(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
     if (!ctx.renderer || !ctx.shaders) return;
     Shader *shader = ctx.shaders->builtin("postfx");
@@ -2822,6 +3003,65 @@ void Registry::registerBuiltins() {
             makeParam("offsetY", "Pre-offset Y", 0.0f, -2.0f, 2.0f, 0.005f, "Transform"),
         };
         def.evaluate = evalTransform;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "render.picture";
+        def.category = "Render";
+        def.label = "Picture";
+        def.description =
+            "Draws a picture file into the frame, centred. Raw keeps the file's own pixel size, "
+            "Preserve height/width fit the block's aspect ratio without distorting, and Stretch "
+            "forces the region. Animated gif/apng/webp files loop on their own frame rate. "
+            "Aspect (width/height), Width (fraction of the frame) and Opacity are Scalar inputs "
+            "as well as Inspector values.";
+        def.inputs = {PortDesc{"Aspect", PortType::Scalar, "unconnected: Inspector value"},
+                      PortDesc{"Width", PortType::Scalar, "unconnected: Inspector value"},
+                      PortDesc{"Opacity", PortType::Scalar, "unconnected: Inspector value"}};
+        def.outputs = {PortDesc{"Image", PortType::Image}};
+        def.params = {
+            makeFileParam("file", "Picture", "",
+                          ".png,.jpg,.jpeg,.bmp,.gif,.apng,.webp,.tga,.psd,.hdr,.pnm", "Picture"),
+            makeEnumParam("mode", "Fill",
+                          {"Raw", "Preserve height", "Preserve width", "Stretch"}, 0, "Layout"),
+            makeParam("aspect", "Aspect (w/h)", 1.7777778f, 0.05f, 20.0f, 0.001f, "Layout"),
+            makeParam("width", "Width (frame)", 0.5f, 0.01f, 2.0f, 0.005f, "Layout"),
+            makeParam("opacity", "Opacity", 1.0f, 0.0f, 1.0f, 0.01f, "Look"),
+        };
+        def.evaluate = evalPicture;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "render.textbox";
+        def.category = "Render";
+        def.label = "Textbox";
+        def.description =
+            "Draws text inside a region of the frame, over the optional Layer image. The font is "
+            "the editor's CrystalGUI font unless a .ttf/.otf is picked; the foreground and "
+            "background colours each carry their own opacity, and both opacities accept Scalar "
+            "inputs.";
+        def.inputs = {PortDesc{"Layer", PortType::Image, "optional background"},
+                      PortDesc{"Fg opacity", PortType::Scalar, "scales the text opacity"},
+                      PortDesc{"Bg opacity", PortType::Scalar, "scales the box opacity"}};
+        def.outputs = {PortDesc{"Image", PortType::Image}};
+        def.params = {
+            makeTextParam("text", "Text", "Text", "Text"),
+            makeFileParam("font", "Font (.ttf/.otf)", "", ".ttf,.otf", "Text"),
+            makeParam("size", "Size (frame height)", 0.14f, 0.01f, 1.0f, 0.005f, "Text"),
+            makeBoolParam("bold", "Bold", false, "Text"),
+            makeEnumParam("align", "Align", {"Left", "Center", "Right"}, 0, "Text"),
+            makeParam("x", "Region X", 0.05f, -1.0f, 2.0f, 0.005f, "Region"),
+            makeParam("y", "Region Y", 0.35f, -1.0f, 2.0f, 0.005f, "Region"),
+            makeParam("w", "Region W", 0.9f, 0.01f, 2.0f, 0.005f, "Region"),
+            makeParam("h", "Region H", 0.3f, 0.01f, 2.0f, 0.005f, "Region"),
+            colorParam("foreground", "Foreground", 0xFFFFFFFF, "Look"),
+            makeParam("foregroundOpacity", "Fg opacity", 1.0f, 0.0f, 1.0f, 0.01f, "Look"),
+            colorParam("background", "Background", 0x000000FF, "Look"),
+            makeParam("backgroundOpacity", "Bg opacity", 0.0f, 0.0f, 1.0f, 0.01f, "Look"),
+        };
+        def.evaluate = evalTextbox;
         add(std::move(def));
     }
     {

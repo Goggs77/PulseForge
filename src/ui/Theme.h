@@ -23,6 +23,10 @@ struct Theme {
 
     // Picks the smallest atlas that is at least `size` pixels tall.
     const Font &font(float size, bool bold = false) const;
+    // The TTFs the atlases above are built from; the renderer loads them at the
+    // larger sizes a Textbox block asks for instead of upscaling an atlas.
+    std::string regularFontPath;
+    std::string boldFontPath;
     float bodySize = 16.0f;
     float headingSize = 22.0f;
     float captionSize = 13.0f;
