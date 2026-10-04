@@ -3147,18 +3147,48 @@ int main(int argc, char **argv) {
                             bridgeWhat = "a plain ADC -> DAC bridge is not treated as the source";
                         }
                         if (bridgeOk) {
-                            // A second consumer of the bridge needs the audio-rate
-                            // pass, or its per-sample values would be wrong.
+                            // A meter tapping the bridge only reads it, so the
+                            // audio is still the imported clip.
                             const int meterId = bridge.graph.addNode("dbg.meter", 200, 200)->id;
                             bridge.graph.connect(adcId, 0, meterId, 0, &why);
-                            if (Exporter::audioRoute(bridge) != AudioRoute::Processed) {
+                            if (Exporter::audioRoute(bridge) != AudioRoute::Source) {
                                 bridgeOk = false;
-                                bridgeWhat = "a tapped bridge is still treated as the source";
+                                bridgeWhat = "a meter tap broke the passthrough route";
                             }
                             bridge.graph.removeNode(meterId);
                         }
+                        if (bridgeOk) {
+                            // Meters *inline* between the ADC and the DAC are
+                            // transparent too, which is how the common
+                            // ADC -> meters -> DAC chain is wired.
+                            const int inlineId = bridge.graph.addNode("dbg.meter", 200, 300)->id;
+                            bridge.graph.disconnectInput(dacId, 0);
+                            bridge.graph.connect(adcId, 0, inlineId, 0, &why);
+                            bridge.graph.connect(inlineId, 0, dacId, 0, &why);
+                            if (Exporter::audioRoute(bridge) != AudioRoute::Source) {
+                                bridgeOk = false;
+                                bridgeWhat = "an inline meter broke the passthrough route";
+                            }
+                            bridge.graph.disconnectInput(dacId, 0);
+                            bridge.graph.removeNode(inlineId);
+                            bridge.graph.connect(adcId, 0, dacId, 0, &why);
+                        }
                         Node *adc = bridge.graph.find(adcId);
                         Node *dac = bridge.graph.find(dacId);
+                        if (bridgeOk) {
+                            // Anything that can change a sample ends the shortcut.
+                            const int mathId = bridge.graph.addNode("math.arithmetic", 300, 200)->id;
+                            bridge.graph.disconnectInput(dacId, 0);
+                            bridge.graph.connect(adcId, 0, mathId, 0, &why);
+                            bridge.graph.connect(mathId, 0, dacId, 0, &why);
+                            if (Exporter::audioRoute(bridge) != AudioRoute::Processed) {
+                                bridgeOk = false;
+                                bridgeWhat = "a processor in the path is treated as a passthrough";
+                            }
+                            bridge.graph.disconnectInput(dacId, 0);
+                            bridge.graph.removeNode(mathId);
+                            bridge.graph.connect(adcId, 0, dacId, 0, &why);
+                        }
                         if (bridgeOk) {
                             adc->setInt("mode", 1);  // RMS is a measurement, not a copy
                             if (Exporter::audioRoute(bridge) != AudioRoute::Processed) {
@@ -3192,6 +3222,119 @@ int main(int argc, char **argv) {
                         } else {
                             std::printf("  routing  : a plain ADC -> DAC bridge uses the original "
                                         "audio\n");
+                        }
+                    }
+
+                    // A processed Analysis input must measure the same window in
+                    // preview and in export. The analyzer keeps its own history of
+                    // what reaches its port, so a one-video-frame window is not
+                    // zero-padded into a spuriously different reading; this is the
+                    // Frequency Band modulation mismatch between preview and
+                    // export.
+                    if (result == 0) {
+                        auto buildProcessed = [&](int *analyzerOut) {
+                            auto graph = std::make_shared<Graph>();
+                            const int srcId = graph->addNode("src.audio", 0.0f, 0.0f)->id;
+                            const int adcId = graph->addNode("dsp.adc", 200.0f, 0.0f)->id;
+                            const int dacId = graph->addNode("dsp.dac", 400.0f, 0.0f)->id;
+                            const int outId = graph->addNode("out.audio", 600.0f, 0.0f)->id;
+                            const int analyzerId = graph->addNode("dsp.analyze", 400.0f, 160.0f)->id;
+                            *analyzerOut = analyzerId;
+                            std::string why;
+                            if (!graph->connect(srcId, 0, adcId, 0, &why) ||
+                                !graph->connect(adcId, 0, dacId, 0, &why) ||
+                                !graph->connect(adcId, 1, dacId, 1, &why) ||
+                                !graph->connect(dacId, 0, outId, 0, &why) ||
+                                !graph->connect(dacId, 0, analyzerId, 0, &why)) {
+                                return std::shared_ptr<Graph>{};
+                            }
+                            return graph;
+                        };
+                        int previewAnalyzer = 0;
+                        int exportAnalyzer = 0;
+                        std::shared_ptr<Graph> previewGraph = buildProcessed(&previewAnalyzer);
+                        std::shared_ptr<Graph> exportGraph = buildProcessed(&exportAnalyzer);
+                        bool windowOk = previewGraph && exportGraph;
+                        std::string windowWhat;
+                        if (!windowOk) {
+                            windowWhat = "could not wire the processed analysis chain";
+                        }
+                        const auto levelAfter = [&](Graph &graph, int analyzerId, bool offline,
+                                                    int frames) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.audio = clip.buffer();
+                            ctx.analysis = analysis;
+                            ctx.offline = offline;
+                            float level = 0.0f;
+                            for (int frame = 0; frame < frames; ++frame) {
+                                ctx.frame = frame;
+                                ctx.time = frame / 60.0;
+                                ctx.audioTime = frame / 60.0;
+                                graph.evaluate(ctx);
+                                if (const Node *node = graph.find(analyzerId)) {
+                                    if (node->outputs.size() > 1) level = node->outputs[1].scalar;
+                                }
+                            }
+                            return level;
+                        };
+                        if (windowOk) {
+                            const float previewLevel =
+                                levelAfter(*previewGraph, previewAnalyzer, false, 10);
+                            const float exportLevel =
+                                levelAfter(*exportGraph, exportAnalyzer, true, 10);
+                            if (std::fabs(previewLevel - exportLevel) > 0.02f) {
+                                windowOk = false;
+                                windowWhat = "preview level " + std::to_string(previewLevel) +
+                                             " vs export " + std::to_string(exportLevel);
+                            }
+                        }
+                        if (!windowOk) {
+                            result = fail("processed analysis window: " + windowWhat);
+                        } else {
+                            std::printf("  analyzer : preview and export measure the same window\n");
+                        }
+                    }
+
+                    // An export must not leave whole-track render buffers behind:
+                    // the preview's window reuse would accept them and the monitor
+                    // would never be handed a new sample again, which silenced
+                    // playback after an export.
+                    if (result == 0) {
+                        Project exported = project;
+                        const int sink = exported.graph.audioSinkNodeId();
+                        const Link *sinkLink =
+                            sink > 0 ? exported.graph.findInputLink(sink, 0) : nullptr;
+                        Node *dac = sinkLink ? exported.graph.find(sinkLink->fromNode) : nullptr;
+                        AudioPtr renderedTrack;
+                        std::string renderError;
+                        bool exportOk =
+                            dac && Exporter::renderOutputAudio(exported, clip.buffer(), analysis,
+                                                               0.0, 0.5, {}, {}, &renderedTrack,
+                                                               &renderError);
+                        if (!exportOk) {
+                            result = fail("post-export playback: " + renderError);
+                        } else {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.audio = clip.buffer();
+                            ctx.analysis = analysis;
+                            ctx.offline = false;
+                            ctx.frame = 20;
+                            ctx.time = 20.0 / 60.0;
+                            ctx.audioTime = ctx.time;
+                            exported.graph.evaluate(ctx);
+                            // One video frame of samples at the preview's rate,
+                            // not the export's whole-track buffer.
+                            if (!dac->audioRenderOutput || dac->audioRenderFrames != 800) {
+                                result = fail("post-export playback: the preview reused the stale "
+                                              "export buffer");
+                            } else {
+                                std::printf("  export   : playback starts from a fresh window "
+                                            "afterwards\n");
+                            }
                         }
                     }
 

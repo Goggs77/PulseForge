@@ -561,13 +561,22 @@ punch periodic zero-fills into the preview. The monitor streams whichever node
 drives the Audio Output (a DAC or a block such as Dynamics), matching what the
 export muxes.
 
-A Unity ADC wired straight into a DAC, channel for channel and with nothing else
-tapping the bridge, is recognised as a **copy of the imported clip**: export
-muxes the original file with its matched encoder and preview plays the decoded
-clip, instead of rendering and re-encoding the whole region. Adding any processor,
-changing the ADC to RMS/Peak, mismatching the channel count or letting the DAC
-clamp material that peaks above full scale puts the region back in the normal
-audio-rate path.
+A Unity ADC whose channels reach a DAC untouched - directly or through meters -
+is recognised as a **copy of the imported clip**. The examination is purely
+structural, so a Spectrum Analyzer or any other block reading elsewhere in the
+graph keeps seeing the rendered signal (the graph always runs live during an
+export); only the muxing changes: export uses the original file with its matched
+encoder and playback plays the decoded clip, instead of rendering and
+re-encoding the whole region. Anything that can change a sample - a Math or
+Modulation block in the path, an RMS/Peak ADC, a channel mismatch, or a DAC clamp
+that would bite material peaking above full scale - puts the region back on the
+normal audio-rate path.
+
+Preview and export also measure the **same Analysis window** for a processed
+input: the analyzer keeps a short history of whatever reaches its port, so the
+one-video-frame window of a live chain is not zero-padded into a different
+reading - which used to make a Frequency Band modulation react in the preview and
+barely move in the export.
 
 Analysis is computed once per media load, in parallel across all cores: FFT
 frames (default 2048/512) are reduced to 64 log-spaced bands plus per-frame rms,

@@ -268,13 +268,45 @@ std::string Exporter::describeCommand(const std::vector<std::string> &arguments)
     return line;
 }
 
-// A Unity ADC wired straight into a DAC, channel for channel, copies the clip
-// bit for bit: nothing between the two blocks can change a sample, and the DAC's
-// clamp only bites when the material can exceed full scale. Such a bridge does
-// not need the audio-rate pass at all, so the export muxes the original file (and
-// playback uses the decoded clip) straight away.
+// Walks one DAC input back towards the ADC, allowing only transparent blocks
+// (the VU/Digital Meter passes its value through untouched) in between. Returns
+// the ADC output port the channel comes from, or -1 when anything that can
+// change a sample sits on the way.
+int passthroughSourcePort(const Graph &graph, const Node &dac, int dacPort,
+                          const Node **adcOut) {
+    const Node *current = &dac;
+    int port = dacPort;
+    const Link *link = graph.findInputLink(current->id, port);
+    for (int guard = 0; link && guard < 64; ++guard) {
+        const Node *source = graph.find(link->fromNode);
+        if (!source) return -1;
+        if (source->kind == "dbg.meter") {
+            // Transparent: one Scalar in, one Scalar out, value untouched.
+            if (source->inputPorts().size() != 1 || source->outputPorts().size() != 1) return -1;
+            if (link->fromPort != 0) return -1;
+            current = source;
+            port = 0;
+            link = graph.findInputLink(current->id, port);
+            continue;
+        }
+        if (source->kind == "dsp.adc") {
+            *adcOut = source;
+            return link->fromPort;
+        }
+        return -1;  // anything else can change the signal
+    }
+    return -1;
+}
+
+// A Unity ADC whose channels reach a DAC untouched - directly or through
+// meters - copies the imported clip bit for bit. The verification is purely
+// structural: it looks at the wiring, never at where else the signal goes, so a
+// Spectrum Analyzer hanging off the DAC keeps reading the rendered graph (which
+// still runs live). The export can then mux the original file (and playback uses
+// the decoded clip) instead of rendering and re-encoding that region.
 bool isPassthroughBridge(const Project &project) {
     const Graph &graph = project.graph;
+    if (project.audio.path.empty()) return false;
     const int sink = graph.audioSinkNodeId();
     const Link *sinkLink = sink > 0 ? graph.findInputLink(sink, 0) : nullptr;
     const Node *dac = sinkLink ? graph.find(sinkLink->fromNode) : nullptr;
@@ -283,24 +315,19 @@ bool isPassthroughBridge(const Project &project) {
     if (channels <= 0 || channels != project.audio.channels) return false;
     const Node *adc = nullptr;
     for (int port = 0; port < channels; ++port) {
-        const Link *link = graph.findInputLink(dac->id, port);
-        const Node *source = link ? graph.find(link->fromNode) : nullptr;
-        if (!source || source->kind != "dsp.adc") return false;
-        if (link->fromPort != port) return false;  // left to left, right to right
-        if (adc && adc->id != source->id) return false;
-        adc = source;
+        const Node *found = nullptr;
+        const int fromPort = passthroughSourcePort(graph, *dac, port, &found);
+        if (!found || fromPort != port) return false;  // left to left, right to right
+        if (adc && adc->id != found->id) return false;
+        adc = found;
     }
     if (!adc || static_cast<int>(adc->outputPorts().size()) != channels) return false;
     if (adc->pint("mode", 0) != 0) return false;  // Unity, not RMS or Peak
     const Link *audioLink = graph.findInputLink(adc->id, 0);
     const Node *clip = audioLink ? graph.find(audioLink->fromNode) : nullptr;
     if (!clip || clip->kind != "src.audio") return false;
-    // Anything else reading the bridge would need its audio-rate pass, and a
-    // second consumer of the DAC would too.
-    for (const Link &link : graph.links) {
-        if (link.fromNode == adc->id && link.toNode != dac->id) return false;
-        if (link.fromNode == dac->id && link.toNode != sink) return false;
-    }
+    // The DAC's clamp only changes the samples when the material can exceed full
+    // scale; the importer records the clip's peak so this stays exact.
     if (dac->pbool("clamp", true) && project.audio.peak > 1.0f) return false;
     return true;
 }
@@ -313,6 +340,16 @@ AudioRoute Exporter::audioRoute(const Project &project) {
     if (source->kind == "src.audio") return AudioRoute::Source;
     if (isPassthroughBridge(project)) return AudioRoute::Source;
     return AudioRoute::Processed;
+}
+
+void Exporter::resetRenderedAudio(Graph &graph) {
+    for (Node &node : graph.nodes) {
+        node.audioRenderOutput.reset();
+        node.audioRenderStart = -1;
+        node.audioRenderFrames = 0;
+        node.audioRenderKey.clear();
+        node.audioRenderWrite = -1;
+    }
 }
 
 bool Exporter::renderOutputAudio(Project &project, const AudioPtr &audio,
@@ -385,7 +422,7 @@ bool Exporter::renderOutputAudio(Project &project, const AudioPtr &audio,
     const Node *sink = project.graph.find(sourceId);
     AudioPtr result = sink ? sink->audioRenderOutput : nullptr;
     // The render pass needs the pre-pass modulation state; the rendered audio
-    // buffers stay so the nodes can reuse them.
+    // buffers stay so the video pass can reuse them.
     for (const auto &entry : savedState) {
         if (Node *node = project.graph.find(entry.first)) node->runtimeState = entry.second;
     }
@@ -397,6 +434,9 @@ bool Exporter::renderOutputAudio(Project &project, const AudioPtr &audio,
         if (error) *error = "the Audio Output produced no audio";
         return false;
     }
+    // `result` keeps the track alive; the nodes must not hold whole-track
+    // buffers into the next preview pass.
+    resetRenderedAudio(project.graph);
     if (rendered) *rendered = std::move(result);
     return true;
 }
@@ -641,6 +681,11 @@ bool Exporter::run(Renderer &renderer, Project &project, const ExportRequest &re
         progress.status = "done";
         onProgress(progress);
     }
+    // The export's passes left every node holding a buffer that spans the whole
+    // track; the preview's reuse check would accept those stale windows and the
+    // monitor would never be handed a new sample again - the app went silent
+    // after an export. Playback now starts from fresh windows.
+    resetRenderedAudio(project.graph);
     return true;
 }
 

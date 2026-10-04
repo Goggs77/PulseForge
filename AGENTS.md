@@ -70,6 +70,9 @@ advances with the timeline, and the meter's ballistics (a VU that averages and
 releases slowly, a digital meter that stays raw). The Self Reference check paints
 a known pattern into the window, captures it, and asserts the image is upright,
 absent before the first capture and handed out without a copy. It also checks
+that a processed Analysis input measures the same window in preview and export
+(and that the passthrough bridge accepts an inline meter but not a processor),
+and that the preview starts from a fresh window after an export. It also checks
 the ADC -> DAC
 Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
 left/right separation, live frame-window reuse, and the input-driven Spectrum
@@ -288,19 +291,28 @@ docs         rendering notes and the README overlay image
   `buildCommand`'s `muteAudio` flag is what turns an empty override into `-an`;
   without it the empty path would fall back to the media file.
 - `Exporter::audioRoute` also reports `Source` for a **passthrough bridge**: a
-  Unity ADC wired channel-for-channel into a DAC that reaches the Audio Output,
-  with nothing else tapped off either block and the DAC's clamp unable to bite
-  (`MediaRef::peak <= 1`, measured on import and again on project open because
-  the peak is derived and not saved). That is a bit-exact copy of the imported
-  clip, so export muxes the original file and the monitor plays the decoded
-  clip instead of rendering and re-encoding the region - keep every condition
-  strict, since dropping one (an RMS ADC, a channel mismatch, a second consumer
-  that needs per-sample values) silently changes the exported audio.
+  Unity ADC whose channels reach a DAC that feeds the Audio Output untouched.
+  `passthroughSourcePort` walks each DAC input back and accepts only transparent
+  blocks in between - `dbg.meter` passes its value through untouched, so a
+  `ADC -> meters -> DAC` chain still qualifies - then requires the ADC to be
+  Unity, its Audio input to be `src.audio`, and the channel count to match. The
+  check is deliberately **structural**: it never looks at consumers, because a
+  Spectrum Analyzer hanging off the DAC must keep reading the rendered graph
+  (which always runs live, even when the muxing is skipped). The only measured
+  condition is the conservative clamp guard (`MediaRef::peak <= 1`, derived and
+  re-measured on import and project open because it is not saved). Dropping any
+  condition silently changes the exported audio.
 - Monitor playback follows the route live: `prepareMonitorAudio` starts
   `AudioClip::startLiveStream` for a processed chain and the app pushes the DAC
   window after every preview render, so rewiring the Audio Output or editing a
   parameter is heard on the next displayed frame. `Exporter::renderOutputAudio`
   remains the offline per-frame renderer used by export.
+- A node's rendered audio buffer is only valid for the pass that filled it.
+  `Exporter::resetRenderedAudio` is called at the end of the audio pre-pass, at
+  the end of a run and when the monitor starts a processed stream: an export
+  leaves whole-track buffers whose windows the preview's reuse check would accept
+  as fresh, and the monitor would then never be handed a new sample again (the
+  app went silent after an export).
 - ADC/DAC define **audio-rate regions**. `Graph::evaluate` detects every
   ADC -> Scalar -> DAC path with `buildAudioRatePlan` and evaluates its
   pure-Scalar nodes (Math, Modulation, Timing, Debug) once per audio sample:
@@ -428,7 +440,12 @@ docs         rendering notes and the README overlay image
   port is unconnected, uses `ctx.analysis` only when that port is exactly the
   decoded clip, and otherwise measures a live window with `analyzeWindow`.
   `analyzeWindow` ends at the current video frame's end, so the analysis matches
-  the samples the region produced in the same evaluation.
+  the samples the region produced in the same evaluation. A processed input
+  reaches this block one video frame at a time, which is shorter than the FFT
+  window, so the analyzer first pushes what it receives into the node's
+  `waveHistory` and analyses the last `fftSize` samples of that history: without
+  it the preview zero-padded most of the window and a Frequency Band modulation
+  read differently from the export, which sees the whole rendered buffer.
   `AnalysisData::originTime` maps that window in time, and
   `AnalysisData::source` feeds the Spectrum block's spectrum/waveform textures
   through `Renderer::uploadAnalysisTextures`. `analysisFrom` treats a connected

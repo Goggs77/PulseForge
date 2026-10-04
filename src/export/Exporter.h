@@ -56,6 +56,12 @@ public:
     // Classifies the Audio Output wiring without rendering anything.
     static AudioRoute audioRoute(const Project &project);
 
+    // Drops every node's rendered audio buffer. A buffer is only valid for the
+    // pass that filled it: an offline pass leaves whole-track buffers whose
+    // windows the preview's reuse check would accept as fresh, which silenced
+    // playback after an export.
+    static void resetRenderedAudio(Graph &graph);
+
     // Renders the graph's Audio Output over [startTime, endTime) for the
     // processed route (the monitor uses it to play what the export will mux).
     // `rendered` is left empty for the source and silent routes. Returns false

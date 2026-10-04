@@ -436,6 +436,10 @@ bool prepareMonitorAudio(UiState &state, std::string *error) {
         case AudioRoute::Processed: {
             // Render the chain live, one video frame at a time, so the audio
             // follows the video clock and parameter edits are heard at once.
+            // A previous export can leave whole-track buffers whose windows the
+            // preview would reuse instead of rendering new ones, so drop them
+            // before the stream starts.
+            Exporter::resetRenderedAudio(state.project.graph);
             const int rate = state.clip.sampleRate() > 0 ? state.clip.sampleRate() : 48000;
             int channels = 2;
             const int sink = state.project.graph.audioSinkNodeId();

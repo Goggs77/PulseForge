@@ -385,10 +385,37 @@ void evalAnalyzer(Node &node, EvalContext &ctx, const std::vector<Value> &in, st
                       std::llround(windowEnd * std::max(1, audio->sampleRate)),
                       audio->sampleRate);
         if (!node.runtimeAnalysis || node.runtimeAnalysisKey != key) {
+            // A processed stream usually reaches this block one video frame at a
+            // time, which is shorter than the FFT window: analysing that sliver
+            // zero-pads most of it and reads differently from the export, whose
+            // rendered buffer holds the whole track. Keep a short history of what
+            // arrives here and measure a full window in both cases.
+            const AnalysisSettings settings{};
+            const int fftSize = std::max(256, settings.fftSize);
+            Node::pushWaveHistory(node, audio->sampleRate, audio->samples.data(),
+                                  audio->channels, audio->frameCount, audio->startFrame);
+            const long long available = std::min<long long>(node.waveCount, fftSize);
+            AudioPtr window = audio;
+            double analysisEnd = windowEnd;
+            if (available > 0) {
+                auto history = std::make_shared<AudioBuffer>();
+                history->channels = 1;
+                history->sampleRate = audio->sampleRate;
+                history->startFrame = node.waveEndFrame - available;
+                history->frameCount = available;
+                history->samples.resize(static_cast<size_t>(available));
+                for (long long i = 0; i < available; ++i) {
+                    history->samples[static_cast<size_t>(i)] =
+                        node.waveHistoryAt(static_cast<double>(history->startFrame + i));
+                }
+                window = history;
+                analysisEnd =
+                    static_cast<double>(history->startFrame + history->frameCount) /
+                    std::max(1, history->sampleRate);
+            }
             // Include the video frame's freshly generated samples: the region
             // ran before this block in the same evaluation.
-            node.runtimeAnalysis =
-                analyzeWindow(*audio, windowEnd, AnalysisSettings{}, audio);
+            node.runtimeAnalysis = analyzeWindow(*window, analysisEnd, settings, window);
             node.runtimeAnalysisKey = key;
         }
         analysis = node.runtimeAnalysis;
