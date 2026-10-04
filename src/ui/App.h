@@ -93,6 +93,8 @@ struct UiState {
     // Mouse offset from the handle at the moment of the grab, so clicking a
     // handle does not nudge it.
     float sliceDragGrab = 0.0f;
+    // Vertical scroll of the timeline's slice lanes when they do not all fit.
+    float timelineScroll = 0.0f;
 
     // layout
     Rectangle topBarRect{};

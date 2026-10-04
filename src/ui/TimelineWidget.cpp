@@ -112,7 +112,25 @@ void drawTimeline(UiState &state, Rectangle bounds) {
     // draggable handles that are the block's Start and Finish times; the Slice
     // colour keeps several slices apart. The curve itself stays in the block and
     // inspector, the timeline only places the window.
-    float laneY = lanes.y;
+    // The lanes scroll: with more automations than the panel is tall, the wheel
+    // (or the scroll bar) walks the list instead of dropping the extra ones.
+    const float laneStep = kLaneHeight() + ui::s(4.0f);
+    int sliceLanes = 0;
+    for (const Node &node : project.graph.nodes) {
+        if (node.kind == "mod.automation" && node.pbool("slice", false)) ++sliceLanes;
+    }
+    const float laneContent = static_cast<float>(sliceLanes) * laneStep;
+    const float laneMaxScroll = std::max(0.0f, laneContent - lanes.height);
+    // Accept the wheel anywhere below the header, including the gutter with the
+    // lane names, so the panel behaves like one list.
+    const Rectangle laneViewport{bounds.x, lanes.y, bounds.width, lanes.height};
+    if (laneMaxScroll > 0.0f && !ui::inputBlocked() && ui::hovered(laneViewport) &&
+        GetMouseWheelMove() != 0.0f) {
+        state.timelineScroll -= GetMouseWheelMove() * ui::s(48.0f);
+    }
+    state.timelineScroll = std::clamp(state.timelineScroll, 0.0f, laneMaxScroll);
+    ui::beginScroll(laneViewport);
+    float laneY = lanes.y - state.timelineScroll;
     const auto laneHandle = [&](const Rectangle &lane, float x, int end, const Node &node,
                                 Color colour) {
         const Rectangle handle{x - kHandleWidth() * 0.5f, lane.y + ui::s(1.0f), kHandleWidth(),
@@ -133,7 +151,11 @@ void drawTimeline(UiState &state, Rectangle bounds) {
     };
     for (Node &node : project.graph.nodes) {
         if (node.kind != "mod.automation" || !node.pbool("slice", false)) continue;
-        if (laneY + kLaneHeight() > lanes.y + lanes.height) break;  // out of room
+        if (laneY > lanes.y + lanes.height) break;  // below the visible list
+        if (laneY + kLaneHeight() < lanes.y) {      // above it (scrolled past)
+            laneY += laneStep;
+            continue;
+        }
         const Rectangle lane{lanes.x, laneY, lanes.width, kLaneHeight()};
         const Color colour = node.pcolor("sliceColor");
         DrawRectangleRounded(lane, 0.35f, 3,
@@ -151,10 +173,21 @@ void drawTimeline(UiState &state, Rectangle bounds) {
         const float rightX = std::max(startX, finishX);
         // The name lives in the gutter left of time 0, so a slice that starts at
         // the beginning never hides it.
+        char laneName[96];
+        const bool defaultTitle =
+            node.title.empty() || (node.def && node.title == node.def->label);
+        if (defaultTitle) {
+            // Several automations usually share the default name; the block id
+            // is what the Inspector shows, so it tells them apart.
+            std::snprintf(laneName, sizeof(laneName), "%s #%d", node.displayTitle().c_str(),
+                          node.id);
+        } else {
+            std::snprintf(laneName, sizeof(laneName), "%s", node.displayTitle().c_str());
+        }
         ui::drawTextClipped(Rectangle{bounds.x + ui::s(4.0f), lane.y,
                                       kGutter() - ui::s(10.0f), lane.height},
-                            node.displayTitle().c_str(), 10.5f,
-                            palette::withAlpha(colour, 0.95f), ui::Align::Right);
+                            laneName, 10.5f, palette::withAlpha(colour, 0.95f),
+                            ui::Align::Right);
         DrawRectangleRounded(Rectangle{leftX, lane.y + ui::s(2.0f),
                                        std::max(ui::s(2.0f), rightX - leftX),
                                        lane.height - ui::s(4.0f)},
@@ -182,6 +215,12 @@ void drawTimeline(UiState &state, Rectangle bounds) {
                           kHandleWidth() + ui::s(8.0f), lane.height}};
             for (int end = 0; end < 2; ++end) {
                 if (!ui::hovered(grabs[end])) continue;
+                // A lane can be half scrolled out; only its visible part takes
+                // clicks, otherwise the window above would drag it.
+                if (std::min(grabs[end].y + grabs[end].height, lanes.y + lanes.height) <=
+                    std::max(grabs[end].y, lanes.y)) {
+                    continue;
+                }
                 state.sliceDragNode = node.id;
                 state.sliceDragEnd = end;
                 state.sliceDragGrab =
@@ -190,9 +229,15 @@ void drawTimeline(UiState &state, Rectangle bounds) {
                 break;
             }
         }
-        laneY += kLaneHeight() + ui::s(4.0f);
+        laneY += laneStep;
     }
-    if (lanes.height > 20.0f && laneY == lanes.y) {
+    ui::endScroll();
+    if (laneMaxScroll > 0.0f) {
+        ui::scrollbar(Rectangle{lanes.x + lanes.width + ui::s(2.0f), lanes.y, ui::s(7.0f),
+                                lanes.height},
+                      &state.timelineScroll, laneContent, lanes.height);
+    }
+    if (lanes.height > 20.0f && sliceLanes == 0) {
         for (const Node &node : project.graph.nodes) {
             if (node.kind != "mod.automation") continue;
             char hint[220];

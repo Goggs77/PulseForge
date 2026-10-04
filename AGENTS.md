@@ -161,8 +161,14 @@ docs         rendering notes and the README overlay image
   and `UiState::sliceDragNode`/`sliceDragEnd` carry the drag between frames. The
   `sliceColor` param colours the lane and its handles so several slices stay
   apart, and a slice is drawn from `min(start, finish)` so a reversed one still
-  fills the lane it covers. Slice and Loop are mutually exclusive in practice:
-  the slice mapping wins when both are on.
+  fills the lane it covers. The lane list scrolls (`UiState::timelineScroll`,
+  wheel anywhere under the timeline header or the scroll bar to the right of the
+  lanes), so more automations than the panel is tall stay reachable; the lanes
+  are scissored to their viewport and a lane that is half scrolled out only
+  takes clicks on its visible part. Lane names that still match the block label
+  get the block id appended ("Automation #17"), because several automations
+  usually share the default name. Slice and Loop are mutually exclusive in
+  practice: the slice mapping wins when both are on.
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
   the Frequency Band and Signal Filter Hz sliders) and an optional
   `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty
