@@ -455,6 +455,23 @@ bool prepareMonitorAudio(UiState &state, std::string *error) {
     return true;
 }
 
+// The Self Reference block reads the editor's own window. Capturing is not free
+// (a full-window GPU blit), so it only happens while one of these blocks is
+// actually enabled in the graph - a project that does not use it pays nothing.
+bool graphNeedsScreenCapture(const Graph &graph) {
+    for (const Node &node : graph.nodes) {
+        if (node.enabled && node.kind == "render.selfref") return true;
+    }
+    return false;
+}
+
+// Refreshes the Self Reference texture from the framebuffer currently being
+// drawn into, before the export overlay covers it.
+void captureEditorFrame(UiState &state) {
+    if (!graphNeedsScreenCapture(state.project.graph)) return;
+    state.renderer.refreshScreenCapture();
+}
+
 void resetMonitor(UiState &state) {
     state.clip.stopLiveStream();
     state.clip.clearPlaybackBuffer();
@@ -1028,6 +1045,9 @@ void performExport(UiState &state) {
             if (now - lastDraw < 0.08 && progress.frame != progress.frameCount) return;
             lastDraw = now;
 
+            // The preview pane follows the export frame by frame, so the editor
+            // - and a Self Reference capture of it - shows the pipeline live.
+            if (state.renderer.outputTarget()) state.previewImage = state.renderer.outputTarget();
             BeginDrawing();
             ui::beginFrame();
             ui::setModal(true);
@@ -1038,6 +1058,9 @@ void performExport(UiState &state) {
             // The editor stays visible but frozen, dimmed by the overlay below,
             // so the chrome buttons grey out like everything else.
             drawEditor(state, false);
+            // Self Reference must see the pipeline, not the exporter's grey-out:
+            // grab the frame before the dim rectangle and the progress panel.
+            captureEditorFrame(state);
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.55f));
             const Rectangle box{(GetScreenWidth() - 560.0f) * 0.5f,
                                 (GetScreenHeight() - 150.0f) * 0.5f, 560.0f, 150.0f};
@@ -1311,6 +1334,9 @@ int runApp(int argc, char **argv) {
         ClearBackground(palette::background());
         // A dialog freezes the editor behind it; popups are handled inside.
         drawEditor(state, !dialogOpen(state));
+        // Self Reference reads this frame; the export overlay is drawn later, in
+        // the progress callback, so the grey-out never enters the pipeline.
+        captureEditorFrame(state);
 
         if (capture) {
             EndTextureMode();

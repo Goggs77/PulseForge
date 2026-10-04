@@ -78,6 +78,14 @@ public:
     void releasePicture(int nodeId);
     void releasePictures();
 
+    // ---- Self Reference --------------------------------------------------
+    // A texture of whatever is being drawn right now (the editor window, or the
+    // off-screen target the --shot mode draws into). The app refreshes it at
+    // most once per drawn frame and only while a Self Reference block is in the
+    // graph; the copy is a GPU blit, so nothing is read back to the CPU.
+    void refreshScreenCapture();
+    const ImageBufferPtr &screenCapture() const { return screenCapture_; }
+
     // The editor hands over the TTFs its own atlases are built from, so a
     // Textbox can rasterise at the size the video needs instead of upscaling a
     // fixed atlas. A block can still point at its own .ttf.
@@ -139,6 +147,7 @@ private:
     unsigned long long poolTick_ = 0;
     std::unordered_map<int, ImageBufferPtr> persistent_;
     std::unordered_map<int, Picture> pictures_;
+    ImageBufferPtr screenCapture_;
     std::unordered_map<std::string, Font> fonts_;
     std::string regularFontPath_;
     std::string boldFontPath_;

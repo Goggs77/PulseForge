@@ -67,7 +67,10 @@ parsing/formatting and a Sticky Note/Group project round trip. It also checks
 the Picture block (a BMP with a red top and blue bottom decodes the right way
 up), the Textbox (white glyph over a kept Layer) and that a two frame gif
 advances with the timeline, and the meter's ballistics (a VU that averages and
-releases slowly, a digital meter that stays raw). It also checks the ADC -> DAC
+releases slowly, a digital meter that stays raw). The Self Reference check paints
+a known pattern into the window, captures it, and asserts the image is upright,
+absent before the first capture and handed out without a copy. It also checks
+the ADC -> DAC
 Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
 left/right separation, live frame-window reuse, and the input-driven Spectrum
 Analyzer (silent / precomputed / live). It also checks that a Spectrum preset
@@ -351,6 +354,21 @@ docs         rendering notes and the README overlay image
   wraps text with its own small core-side wrapper (the UI one is not reachable
   from core) and always draws at least the first line, so a region shorter than
   one line still shows something.
+- **Self Reference** (`render.selfref`) hands out `Renderer::screenCapture()`,
+  the framebuffer the editor is currently drawing into. Keep the three
+  properties that make it usable:
+  *lazy*: `captureEditorFrame` (App.cpp) checks `graphNeedsScreenCapture` first
+  and runs at most once per drawn frame, so a graph without the block pays
+  nothing and the export only captures on the ~12 Hz progress redraws;
+  *cheap*: `refreshScreenCapture` reuses one texture and blits framebuffer to
+  framebuffer (no CPU readback), flipping the rows so v = 0 is the visual top
+  like every other target, and it restores raylib's tracked FBO bindings;
+  *stable*: the capture is taken **after** `drawEditor` and **before** the export
+  dim/progress overlay, so the grey-out never enters the pipeline, and the block
+  therefore trails the graph by one frame - that lag is what prevents the mirror
+  from feeding back into itself, so do not "fix" it by capturing before the
+  graph runs. During an export the preview pane is fed the frame the exporter
+  just rendered, so the editor (and its mirror) shows the pipeline live.
 - Geometry (`geom.primitives`) owns primitives only and must not read
   `ctx.audio`/`ctx.analysis`. Spectrum and waveform shapes are
   `render.spectrum` effects; `Project::fromJson` converts old Geometry shapes

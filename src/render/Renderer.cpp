@@ -6,6 +6,7 @@
 
 #include "core/Registry.h"
 #include "export/FFmpeg.h"
+#include "glad.h"
 #include "rlgl.h"
 
 namespace pf {
@@ -121,6 +122,10 @@ void Renderer::shutdown() {
     output_.reset();
     current_.reset();
     releasePictures();
+    if (screenCapture_ && screenCapture_->valid()) {
+        UnloadRenderTexture(screenCapture_->texture);
+    }
+    screenCapture_.reset();
     for (auto &kv : fonts_) {
         if (kv.second.texture.id) UnloadFont(kv.second);
     }
@@ -336,6 +341,41 @@ const Renderer::Picture *Renderer::picture(int nodeId, const std::string &path) 
 void Renderer::setDefaultFonts(std::string regular, std::string bold) {
     regularFontPath_ = std::move(regular);
     boldFontPath_ = std::move(bold);
+}
+
+void Renderer::refreshScreenCapture() {
+    const int width = GetScreenWidth();
+    const int height = GetScreenHeight();
+    if (width <= 0 || height <= 0) return;
+    if (!screenCapture_ || screenCapture_->width != width || screenCapture_->height != height) {
+        if (screenCapture_ && screenCapture_->valid()) {
+            UnloadRenderTexture(screenCapture_->texture);
+        }
+        auto buffer = std::make_shared<ImageBuffer>();
+        buffer->texture = LoadRenderTexture(width, height);
+        buffer->width = width;
+        buffer->height = height;
+        if (!buffer->valid()) {
+            screenCapture_.reset();
+            return;
+        }
+        SetTextureFilter(buffer->texture.texture, TEXTURE_FILTER_BILINEAR);
+        screenCapture_ = buffer;
+    }
+    // Flush the queued drawing first, then blit the framebuffer we are drawing
+    // into (the window, or --shot's off-screen target) into the capture. The
+    // rows are flipped on the way, so v = 0 holds the visual top exactly like
+    // every other target in the pipeline.
+    rlDrawRenderBatchActive();
+    GLint readFbo = 0;
+    GLint drawFbo = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, screenCapture_->texture.id);
+    glBlitFramebuffer(0, height, width, 0, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    // Leave raylib's tracked framebuffer state exactly as it was.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFbo));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(drawFbo));
 }
 
 Font Renderer::textFont(const std::string &path, float size, bool bold) {

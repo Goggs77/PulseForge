@@ -1437,6 +1437,100 @@ int main(int argc, char **argv) {
                     }
                 }
 
+                // Self Reference: the editor window as an Image. Paint a known
+                // pattern into the framebuffer, capture it, and check the block
+                // hands it out the right way up (and that it is lazy - no
+                // capture, no image).
+                if (result == 0) {
+                    Graph selfGraph;
+                    Node *selfRef = selfGraph.addNode("render.selfref", 0.0f, 0.0f);
+                    Node *selfOut = selfGraph.addNode("out.video", 400.0f, 0.0f);
+                    bool ok = selfRef && selfOut;
+                    std::string what;
+                    if (!ok) {
+                        what = "the Self Reference block is not registered";
+                    } else if (!selfRef->inputPorts().empty() ||
+                               selfRef->outputPorts().size() != 1 ||
+                               selfRef->outputPorts()[0].type != PortType::Image) {
+                        ok = false;
+                        what = "Self Reference ports are wrong";
+                    } else {
+                        std::string why;
+                        ok = selfGraph.connect(selfRef->id, 0, selfOut->id, 0, &why);
+                        if (!ok) what = why;
+                    }
+                    if (ok) {
+                        // Without a capture the block has nothing to hand out.
+                        EvalContext empty;
+                        empty.renderer = &renderer;
+                        empty.width = 160;
+                        empty.height = 90;
+                        selfGraph.evaluate(empty);
+                        if (selfRef->outputs[0].image) {
+                            ok = false;
+                            what = "Self Reference produced an Image before any capture";
+                        }
+                    }
+                    if (ok) {
+                        // Top half red, bottom half blue, then capture: the image
+                        // has to keep the screen's top row at its top.
+                        BeginDrawing();
+                        ClearBackground(BLACK);
+                        DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight() / 2, RED);
+                        DrawRectangle(0, GetScreenHeight() / 2, GetScreenWidth(),
+                                      GetScreenHeight() - GetScreenHeight() / 2, BLUE);
+                        renderer.refreshScreenCapture();
+                        EndDrawing();
+                        const ImageBufferPtr &capture = renderer.screenCapture();
+                        if (!capture || !capture->valid()) {
+                            ok = false;
+                            what = "the capture texture was not created";
+                        } else {
+                            Image pixels = LoadImageFromTexture(capture->texture.texture);
+                            const auto at = [&](float v) {
+                                const int y = std::clamp(static_cast<int>(v * pixels.height), 0,
+                                                         pixels.height - 1);
+                                const int x = pixels.width / 2;
+                                const unsigned char *pixel =
+                                    static_cast<const unsigned char *>(pixels.data) +
+                                    (static_cast<size_t>(y) * pixels.width + x) * 4;
+                                return Vector3{static_cast<float>(pixel[0]),
+                                               static_cast<float>(pixel[1]),
+                                               static_cast<float>(pixel[2])};
+                            };
+                            const Vector3 top = at(0.2f);
+                            const Vector3 bottom = at(0.8f);
+                            UnloadImage(pixels);
+                            if (top.x < 180.0f || top.z > 60.0f || bottom.z < 180.0f ||
+                                bottom.x > 60.0f) {
+                                ok = false;
+                                what = "the capture is flipped or empty";
+                            }
+                        }
+                    }
+                    if (ok) {
+                        EvalContext ctx;
+                        ctx.renderer = &renderer;
+                        ctx.width = 160;
+                        ctx.height = 90;
+                        selfGraph.evaluate(ctx);
+                        const ImageBufferPtr &image = selfRef->outputs[0].image;
+                        if (!image || !image->valid()) {
+                            ok = false;
+                            what = "the Self Reference did not hand out the capture";
+                        } else if (image->width != renderer.screenCapture()->width) {
+                            ok = false;
+                            what = "the Self Reference handed out a copy, not the capture";
+                        }
+                    }
+                    if (!ok) {
+                        result = fail("Self Reference block: " + what);
+                    } else {
+                        std::printf("  render   : Self Reference captures the window upright and "
+                                    "only on demand\n");
+                    }
+                }
+
                 // A processed Analysis input only carries one video frame of
                 // audio, so the waveform presets keep a rolling history: the
                 // wave has to fill the bar (sampling past the buffer used to

@@ -1820,6 +1820,23 @@ void evalTransform(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     out[0] = Value::makeImage(target);
 }
 
+// Self Reference: the editor's own window as an Image. The app captures it once
+// per drawn frame (and only while one of these blocks is enabled), so the image
+// trails the graph by one frame - which is what keeps the mirror from feeding
+// back into itself.
+void evalSelfReference(Node &node, EvalContext &ctx, const std::vector<Value> &in,
+                       std::vector<Value> &out) {
+    (void)in;
+    if (!ctx.renderer) return;
+    const ImageBufferPtr &capture = ctx.renderer->screenCapture();
+    if (!capture || !capture->valid()) {
+        node.status = "waiting for the first frame";
+        return;
+    }
+    node.status.clear();
+    out[0] = Value::makeImage(capture);
+}
+
 // Draws a picture file (still or animated) into the frame, centred. The block
 // owns a target aspect ratio and width as fractions of the frame; the fill mode
 // decides how the source maps into that region. Animated files loop at their own
@@ -3090,6 +3107,22 @@ void Registry::registerBuiltins() {
             makeParam("backgroundOpacity", "Bg opacity", 0.0f, 0.0f, 1.0f, 0.01f, "Look"),
         };
         def.evaluate = evalTextbox;
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "render.selfref";
+        def.category = "Render";
+        def.label = "Self Reference";
+        def.description =
+            "Outputs the editor's own window as an Image, refreshed once per drawn frame while "
+            "previewing and exporting. During an export the dimmed progress overlay is left "
+            "out, so the Image shows the pipeline as it renders; the capture only runs while "
+            "an enabled Self Reference block is in the graph.";
+        def.inputs = {};
+        def.outputs = {PortDesc{"Image", PortType::Image, "the editor window"}};
+        def.params = {};
+        def.evaluate = evalSelfReference;
         add(std::move(def));
     }
     {
