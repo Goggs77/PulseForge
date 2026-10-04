@@ -83,7 +83,8 @@ int connectedPortCount(const Graph &graph, const Node &node) {
     return count;
 }
 
-std::vector<GroupSlot> groupLayerOrder(const Graph &graph, const std::vector<int> &members) {
+std::vector<GroupSlot> groupLayerOrder(const Graph &graph, const std::vector<int> &members,
+                                       int depthTolerance) {
     std::vector<GroupSlot> slots;
     slots.reserve(members.size());
     for (const int id : members) {
@@ -96,18 +97,22 @@ std::vector<GroupSlot> groupLayerOrder(const Graph &graph, const std::vector<int
         slot.connectedPorts = connectedPortCount(graph, *node);
         slots.push_back(slot);
     }
-    // Compact the depths that occur into columns, so a chain that starts at
+    // A layer covers `tolerance + 1` consecutive depths, so a tolerance of 1
+    // merges depth 0 with 1 and 2 with 3 instead of letting the merge cascade.
+    const int band = std::max(0, depthTolerance) + 1;
+    // Compact the bands that occur into columns, so a chain that starts at
     // depth 3 still begins at the group's left edge.
     std::vector<int> depths;
     for (const GroupSlot &slot : slots) {
-        if (std::find(depths.begin(), depths.end(), slot.depth) == depths.end()) {
-            depths.push_back(slot.depth);
+        const int bandIndex = slot.depth / band;
+        if (std::find(depths.begin(), depths.end(), bandIndex) == depths.end()) {
+            depths.push_back(bandIndex);
         }
     }
     std::sort(depths.begin(), depths.end());
     for (GroupSlot &slot : slots) {
         slot.column = static_cast<int>(
-            std::find(depths.begin(), depths.end(), slot.depth) - depths.begin());
+            std::find(depths.begin(), depths.end(), slot.depth / band) - depths.begin());
     }
     // Rows run top to bottom inside a column: smallest depth first (a tie inside
     // one column), then fewest connected ports, then the lowest id.

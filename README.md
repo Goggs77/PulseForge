@@ -336,7 +336,7 @@ readout.
 | Transform | Image, Matrix, Amount, Offset X/Y | Image | Applies a Matrix as a 2D affine transform: the top-left 2x2 is the linear part, rows 0/1 of the 3rd column are the translation (the 4th column of a 4x4 grid works too). Amount blends the matrix towards the identity and the pre-offset moves the image before the matrix acts, so a rotation or scale pivots anywhere; areas sampling outside the source fade to black |
 | Picture | Aspect, Width, Opacity | Image | Draws a picture file centred in the frame. `Raw` keeps the file's own pixel size, `Preserve height` / `Preserve width` fit the block's aspect ratio without distorting and `Stretch` forces the region. Aspect (width/height), Width (fraction of the frame) and Opacity are Scalar inputs as well as Inspector values. Stills (png, jpg, bmp, tga, psd, hdr, pnm, ...) load through raylib; gif/apng/webp are decoded frame by frame with ffmpeg and loop at the file's own rate, capped at 2048 px and 96 frames |
 | Textbox | Layer, Fg opacity, Bg opacity | Image | Draws text inside a region of the frame (X/Y/W/H as fractions) over the optional Layer image. The font is the editor's CrystalGUI font unless a .ttf/.otf is picked, and both the foreground and background colours carry their own opacity, each with a Scalar input |
-| Self Reference | - | Image | The editor's own window as an Image, refreshed once per drawn frame while previewing and exporting - a live mirror of the program that trails the graph by one frame, which is what stops the mirror from feeding back into itself. During an export the dimmed progress overlay is deliberately left out, so the Image keeps showing the pipeline; the capture itself only runs while an enabled Self Reference block is in the graph |
+| Self Reference | - | Image | The editor's own window as an Image, refreshed once per *video* frame while previewing and exporting - a live mirror of the program that trails the graph by one frame, which is what stops the mirror from feeding back into itself. During an export the dimmed progress overlay is deliberately left out, so the Image keeps showing the pipeline (and the export redraws every frame while a mirror exists, to stay smooth); the capture itself only runs while an enabled Self Reference block is in the graph |
 | Geometry | Layer, Scale, Rotation, X, Y | Image | Primitives only: circle, ring, polygon grid, sparks, orbit, text. Spectrum and waveform visuals live in the Spectrum block; old projects with those Geometry shapes migrate to the matching Spectrum elements on load, parameters included |
 
 ### Output
@@ -351,7 +351,7 @@ readout.
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
 | Sticky Note | - | - | A note with no ports and no effect on the render. Its text is edited in a large wrapped box in the Inspector (Enter breaks a line), and the block grows with the text - never smaller than its default size |
-| Group | - | - | Owns blocks: drop one inside to add it (the frame highlights while you drag over it), drag it out to remove it. Members are re-arranged in layers that follow the chain and move with the frame; groups cannot be nested |
+| Group | - | - | Owns blocks: drop one inside to add it (the frame highlights while you drag over it), drag it out to remove it. Members are re-arranged in layers that follow the chain and move with the frame; `Depth tolerance` merges that many neighbouring depths into one layer, and groups cannot be nested |
 
 Sorting blocks draw as translucent greyscale cards instead of a category colour:
 a light card with deep grey text on the dark theme, a dark card with light grey
@@ -365,7 +365,9 @@ happened to sit:
   links, so `Audio Source -> Analyzer -> Spectrum` gives depths 0, 1, 2 (the walk
   follows links outside the group too);
 - each depth that actually occurs is one **column**, left to right, and empty
-  depths are compacted away;
+  depths are compacted away; `Depth tolerance` widens a layer to
+  `tolerance + 1` consecutive depths (0 and 1 share a layer at 1, then 2 and 3),
+  which never cascades the way a transitive merge would;
 - rows inside a column are sorted by depth, then by the number of ports that
   carry a link (fewest first), then by block id, and top aligned;
 - the frame is sized from the arranged members, so it grows and shrinks with
@@ -558,6 +560,14 @@ frame reuse a single contiguous buffer; restarting it on every tick used to
 punch periodic zero-fills into the preview. The monitor streams whichever node
 drives the Audio Output (a DAC or a block such as Dynamics), matching what the
 export muxes.
+
+A Unity ADC wired straight into a DAC, channel for channel and with nothing else
+tapping the bridge, is recognised as a **copy of the imported clip**: export
+muxes the original file with its matched encoder and preview plays the decoded
+clip, instead of rendering and re-encoding the whole region. Adding any processor,
+changing the ADC to RMS/Peak, mismatching the channel count or letting the DAC
+clamp material that peaks above full scale puts the region back in the normal
+audio-rate path.
 
 Analysis is computed once per media load, in parallel across all cores: FFT
 frames (default 2048/512) are reduced to 64 log-spaced bands plus per-frame rms,

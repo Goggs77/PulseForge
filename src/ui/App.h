@@ -97,6 +97,9 @@ struct UiState {
     float sliceDragGrab = 0.0f;
     // Vertical scroll of the timeline's slice lanes when they do not all fit.
     float timelineScroll = 0.0f;
+    // Video frame the Self Reference capture was last taken for, so the mirror
+    // updates once per video frame instead of once per drawn display frame.
+    int lastCaptureFrame = -1;
 
     // layout
     Rectangle topBarRect{};

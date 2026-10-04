@@ -37,10 +37,13 @@ struct GroupSlot {
     int connectedPorts = 0;
 };
 
-// Layered order for a group: columns are the depths that actually occur
-// (compacted so an unused depth does not leave an empty column), and the rows
+// Layered order for a group: columns are the depth bands that actually occur
+// (compacted so an unused band does not leave an empty column), and the rows
 // inside a column are sorted by depth, then by the number of connected ports,
-// then by block id. Missing blocks and nested groups are skipped.
-std::vector<GroupSlot> groupLayerOrder(const Graph &graph, const std::vector<int> &members);
+// then by block id. A layer covers `depthTolerance + 1` consecutive depths, so
+// a tolerance of 1 puts depth 0 and 1 in the first column and 2 and 3 in the
+// second. Missing blocks and nested groups are skipped.
+std::vector<GroupSlot> groupLayerOrder(const Graph &graph, const std::vector<int> &members,
+                                       int depthTolerance = 0);
 
 }  // namespace pf

@@ -3263,6 +3263,7 @@ void Registry::registerBuiltins() {
             makeTextParam("members", "Members", "", "Group"),
             makeParam("padding", "Padding", 26.0f, 6.0f, 80.0f, 1.0f, "Layout"),
             makeParam("spacing", "Spacing", 22.0f, 4.0f, 80.0f, 1.0f, "Layout"),
+            makeIntParam("depthTolerance", "Depth tolerance", 0, 0, 16, "Layout"),
         };
         add(std::move(def));
     }

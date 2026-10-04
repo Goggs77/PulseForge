@@ -268,12 +268,51 @@ std::string Exporter::describeCommand(const std::vector<std::string> &arguments)
     return line;
 }
 
+// A Unity ADC wired straight into a DAC, channel for channel, copies the clip
+// bit for bit: nothing between the two blocks can change a sample, and the DAC's
+// clamp only bites when the material can exceed full scale. Such a bridge does
+// not need the audio-rate pass at all, so the export muxes the original file (and
+// playback uses the decoded clip) straight away.
+bool isPassthroughBridge(const Project &project) {
+    const Graph &graph = project.graph;
+    const int sink = graph.audioSinkNodeId();
+    const Link *sinkLink = sink > 0 ? graph.findInputLink(sink, 0) : nullptr;
+    const Node *dac = sinkLink ? graph.find(sinkLink->fromNode) : nullptr;
+    if (!dac || dac->kind != "dsp.dac") return false;
+    const int channels = static_cast<int>(dac->inputPorts().size());
+    if (channels <= 0 || channels != project.audio.channels) return false;
+    const Node *adc = nullptr;
+    for (int port = 0; port < channels; ++port) {
+        const Link *link = graph.findInputLink(dac->id, port);
+        const Node *source = link ? graph.find(link->fromNode) : nullptr;
+        if (!source || source->kind != "dsp.adc") return false;
+        if (link->fromPort != port) return false;  // left to left, right to right
+        if (adc && adc->id != source->id) return false;
+        adc = source;
+    }
+    if (!adc || static_cast<int>(adc->outputPorts().size()) != channels) return false;
+    if (adc->pint("mode", 0) != 0) return false;  // Unity, not RMS or Peak
+    const Link *audioLink = graph.findInputLink(adc->id, 0);
+    const Node *clip = audioLink ? graph.find(audioLink->fromNode) : nullptr;
+    if (!clip || clip->kind != "src.audio") return false;
+    // Anything else reading the bridge would need its audio-rate pass, and a
+    // second consumer of the DAC would too.
+    for (const Link &link : graph.links) {
+        if (link.fromNode == adc->id && link.toNode != dac->id) return false;
+        if (link.fromNode == dac->id && link.toNode != sink) return false;
+    }
+    if (dac->pbool("clamp", true) && project.audio.peak > 1.0f) return false;
+    return true;
+}
+
 AudioRoute Exporter::audioRoute(const Project &project) {
     const int sourceId = audioOutputSource(project.graph);
     if (sourceId <= 0) return AudioRoute::Silent;
     const Node *source = project.graph.find(sourceId);
     if (!source) return AudioRoute::Silent;
-    return source->kind == "src.audio" ? AudioRoute::Source : AudioRoute::Processed;
+    if (source->kind == "src.audio") return AudioRoute::Source;
+    if (isPassthroughBridge(project)) return AudioRoute::Source;
+    return AudioRoute::Processed;
 }
 
 bool Exporter::renderOutputAudio(Project &project, const AudioPtr &audio,

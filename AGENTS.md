@@ -216,6 +216,10 @@ docs         rendering notes and the README overlay image
   in core - the split is what makes the layout testable without a canvas.
   `sortingColours` in `NodeVisuals.cpp` is the single source for the card and
   ink shades, so the canvas and the note text can never drift apart.
+  A group's `depthTolerance` widens a layer to `tolerance + 1` consecutive
+  depths (`band = depth / (tolerance + 1)`, bands compacted into columns): a
+  quantised merge, never a transitive one, or every depth in a chain would
+  collapse into the first layer.
 - Sizes *inside* a block's live content (text, handles, strokes) are derived from
   the body rect through `visualFont`/`visualHandle`/`visualStroke`/`visualInset`,
   so they scale with the canvas zoom exactly like the block and never clip.
@@ -283,6 +287,15 @@ docs         rendering notes and the README overlay image
   `audioSeek` at 0 for the rendered WAV (it already starts at the export offset).
   `buildCommand`'s `muteAudio` flag is what turns an empty override into `-an`;
   without it the empty path would fall back to the media file.
+- `Exporter::audioRoute` also reports `Source` for a **passthrough bridge**: a
+  Unity ADC wired channel-for-channel into a DAC that reaches the Audio Output,
+  with nothing else tapped off either block and the DAC's clamp unable to bite
+  (`MediaRef::peak <= 1`, measured on import and again on project open because
+  the peak is derived and not saved). That is a bit-exact copy of the imported
+  clip, so export muxes the original file and the monitor plays the decoded
+  clip instead of rendering and re-encoding the region - keep every condition
+  strict, since dropping one (an RMS ADC, a channel mismatch, a second consumer
+  that needs per-sample values) silently changes the exported audio.
 - Monitor playback follows the route live: `prepareMonitorAudio` starts
   `AudioClip::startLiveStream` for a processed chain and the app pushes the DAC
   window after every preview render, so rewiring the Audio Output or editing a
@@ -358,8 +371,11 @@ docs         rendering notes and the README overlay image
   the framebuffer the editor is currently drawing into. Keep the three
   properties that make it usable:
   *lazy*: `captureEditorFrame` (App.cpp) checks `graphNeedsScreenCapture` first
-  and runs at most once per drawn frame, so a graph without the block pays
-  nothing and the export only captures on the ~12 Hz progress redraws;
+  and runs at most once per **video** frame (`UiState::lastCaptureFrame`), so the
+  mirror moves at the project's frame rate instead of jittering with the display
+  refresh; a graph without the block pays nothing and the export keeps its
+  ~12 Hz progress redraw (when a mirror *is* present the export redraws every
+  frame, which is what keeps the exported mirror smooth);
   *cheap*: `refreshScreenCapture` reuses one texture and blits framebuffer to
   framebuffer (no CPU readback), flipping the rows so v = 0 is the visual top
   like every other target, and it restores raylib's tracked FBO bindings;

@@ -45,6 +45,10 @@ struct MediaRef {
     bool transcodedAac = false; // media was converted to AAC in memory on import
     int transcodedRate = 0;     // sample rate of that in-memory AAC stream
     long long fileSize = -1;
+    // Peak magnitude of the decoded clip (derived, not saved). The passthrough
+    // ADC -> DAC check uses it to know whether the DAC's clamp would change a
+    // single sample; -1 means "not measured".
+    float peak = -1.0f;
 };
 
 struct ViewState {

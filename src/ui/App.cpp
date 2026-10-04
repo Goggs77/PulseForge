@@ -466,10 +466,15 @@ bool graphNeedsScreenCapture(const Graph &graph) {
 }
 
 // Refreshes the Self Reference texture from the framebuffer currently being
-// drawn into, before the export overlay covers it.
-void captureEditorFrame(UiState &state) {
+// drawn into, before the export overlay covers it. It follows the *video* frame
+// counter rather than the display refresh, so every rendered frame sees one
+// stable screenshot and the mirror moves at the project's frame rate instead of
+// jittering with the monitor.
+void captureEditorFrame(UiState &state, int videoFrame) {
+    if (state.lastCaptureFrame == videoFrame) return;
     if (!graphNeedsScreenCapture(state.project.graph)) return;
     state.renderer.refreshScreenCapture();
+    state.lastCaptureFrame = videoFrame;
 }
 
 void resetMonitor(UiState &state) {
@@ -639,6 +644,14 @@ void loadAudioFile(UiState &state, const std::string &path) {
     state.project.audio.bitRate = probe.bitRate;
     state.project.audio.transcodedAac = false;
     state.project.audio.fileSize = static_cast<long long>(fileSize);
+    // Peak of the decoded clip: the passthrough ADC -> DAC check needs it to
+    // know whether the DAC's clamp could change a sample.
+    state.project.audio.peak = 0.0f;
+    if (const AudioPtr &buffer = state.clip.buffer()) {
+        float peak = 0.0f;
+        for (const float sample : buffer->samples) peak = std::max(peak, std::fabs(sample));
+        state.project.audio.peak = peak;
+    }
 
     state.clip.buildOverview();
     state.analysis = analyzeAudio(*state.clip.buffer(), AnalysisSettings{}, {}, state.clip.buffer());
@@ -768,6 +781,15 @@ void loadProjectFile(UiState &state, const std::string &path) {
         if (state.clip.load(state.project.audio.path, mediaRate, &audioError)) {
             state.analysis =
                 analyzeAudio(*state.clip.buffer(), AnalysisSettings{}, {}, state.clip.buffer());
+            // The peak is derived, so a freshly opened project measures it again.
+            state.project.audio.peak = 0.0f;
+            if (const AudioPtr &buffer = state.clip.buffer()) {
+                float peak = 0.0f;
+                for (const float sample : buffer->samples) {
+                    peak = std::max(peak, std::fabs(sample));
+                }
+                state.project.audio.peak = peak;
+            }
             // The saved output settings are the user's, so they are kept; only
             // the in-memory AAC conversion the project was saved with has to be
             // reproduced.
@@ -1042,7 +1064,14 @@ void performExport(UiState &state) {
             state.exportStatus = status;
 
             const double now = GetTime();
-            if (now - lastDraw < 0.08 && progress.frame != progress.frameCount) return;
+            // A Self Reference has to update once per exported frame to stay
+            // smooth, so the editor is redrawn for every frame while one is in
+            // the graph; otherwise the 12 Hz progress redraw stays in place.
+            const bool wantsMirror = graphNeedsScreenCapture(state.project.graph);
+            if (!wantsMirror && now - lastDraw < 0.08 &&
+                progress.frame != progress.frameCount) {
+                return;
+            }
             lastDraw = now;
 
             // The preview pane follows the export frame by frame, so the editor
@@ -1060,7 +1089,7 @@ void performExport(UiState &state) {
             drawEditor(state, false);
             // Self Reference must see the pipeline, not the exporter's grey-out:
             // grab the frame before the dim rectangle and the progress panel.
-            captureEditorFrame(state);
+            captureEditorFrame(state, progress.frame);
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.55f));
             const Rectangle box{(GetScreenWidth() - 560.0f) * 0.5f,
                                 (GetScreenHeight() - 150.0f) * 0.5f, 560.0f, 150.0f};
@@ -1336,7 +1365,7 @@ int runApp(int argc, char **argv) {
         drawEditor(state, !dialogOpen(state));
         // Self Reference reads this frame; the export overlay is drawn later, in
         // the progress callback, so the grey-out never enters the pipeline.
-        captureEditorFrame(state);
+        captureEditorFrame(state, state.frameContext.frame);
 
         if (capture) {
             EndTextureMode();

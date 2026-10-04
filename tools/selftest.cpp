@@ -599,6 +599,25 @@ int main(int argc, char **argv) {
                         if (!layoutOk) {
                             ok = false;
                             what = "the layered order is wrong";
+                        } else {
+                            // Depth tolerance merges consecutive depths into one
+                            // layer without letting the merge cascade: with 1,
+                            // depth 0 and 1 share the first column and depth 2
+                            // starts the second.
+                            const std::vector<GroupSlot> merged = groupLayerOrder(
+                                sorting, {constant->id, arith->id, power->id, dangling->id}, 1);
+                            const bool mergedOk =
+                                merged.size() == 4 && merged[0].id == dangling->id &&
+                                merged[0].column == 0 && merged[0].row == 0 &&
+                                merged[1].id == constant->id && merged[1].column == 0 &&
+                                merged[1].row == 1 && merged[2].id == arith->id &&
+                                merged[2].column == 0 && merged[2].row == 2 &&
+                                merged[3].id == power->id && merged[3].column == 1 &&
+                                merged[3].row == 0;
+                            if (!mergedOk) {
+                                ok = false;
+                                what = "the depth tolerance did not merge the layers";
+                            }
                         }
                     }
                     if (ok) {
@@ -3098,6 +3117,81 @@ int main(int argc, char **argv) {
                             std::printf("  monitor  : source/silent/processed routing ok\n");
                         } else {
                             result = fail("monitor routing: " + monitorWhat);
+                        }
+                    }
+
+                    // A Unity ADC wired straight into a DAC copies the imported
+                    // clip sample for sample, so the export muxes the original
+                    // file and playback uses the decoded clip instead of
+                    // rendering and re-encoding the whole audio-rate region.
+                    if (result == 0) {
+                        bool bridgeOk = true;
+                        std::string bridgeWhat;
+                        Project bridge;
+                        bridge.audio.path = "track.flac";
+                        bridge.audio.channels = 2;
+                        bridge.audio.sampleRate = 48000;
+                        bridge.audio.peak = 0.8f;
+                        const int srcId = bridge.graph.addNode("src.audio", 0, 0)->id;
+                        const int adcId = bridge.graph.addNode("dsp.adc", 200, 0)->id;
+                        const int dacId = bridge.graph.addNode("dsp.dac", 400, 0)->id;
+                        const int outId = bridge.graph.addNode("out.audio", 600, 0)->id;
+                        std::string why;
+                        bridgeOk = bridge.graph.connect(srcId, 0, adcId, 0, &why) &&
+                                   bridge.graph.connect(adcId, 0, dacId, 0, &why) &&
+                                   bridge.graph.connect(adcId, 1, dacId, 1, &why) &&
+                                   bridge.graph.connect(dacId, 0, outId, 0, &why);
+                        if (!bridgeOk) bridgeWhat = "could not wire the bridge: " + why;
+                        if (bridgeOk && Exporter::audioRoute(bridge) != AudioRoute::Source) {
+                            bridgeOk = false;
+                            bridgeWhat = "a plain ADC -> DAC bridge is not treated as the source";
+                        }
+                        if (bridgeOk) {
+                            // A second consumer of the bridge needs the audio-rate
+                            // pass, or its per-sample values would be wrong.
+                            const int meterId = bridge.graph.addNode("dbg.meter", 200, 200)->id;
+                            bridge.graph.connect(adcId, 0, meterId, 0, &why);
+                            if (Exporter::audioRoute(bridge) != AudioRoute::Processed) {
+                                bridgeOk = false;
+                                bridgeWhat = "a tapped bridge is still treated as the source";
+                            }
+                            bridge.graph.removeNode(meterId);
+                        }
+                        Node *adc = bridge.graph.find(adcId);
+                        Node *dac = bridge.graph.find(dacId);
+                        if (bridgeOk) {
+                            adc->setInt("mode", 1);  // RMS is a measurement, not a copy
+                            if (Exporter::audioRoute(bridge) != AudioRoute::Processed) {
+                                bridgeOk = false;
+                                bridgeWhat = "an RMS ADC is treated as a passthrough";
+                            }
+                            adc->setInt("mode", 0);
+                        }
+                        if (bridgeOk) {
+                            bridge.audio.channels = 1;  // the layouts no longer match
+                            if (Exporter::audioRoute(bridge) != AudioRoute::Processed) {
+                                bridgeOk = false;
+                                bridgeWhat = "a channel mismatch is treated as a passthrough";
+                            }
+                            bridge.audio.channels = 2;
+                        }
+                        if (bridgeOk) {
+                            bridge.audio.peak = 1.2f;  // the DAC clamp would bite
+                            if (Exporter::audioRoute(bridge) != AudioRoute::Processed) {
+                                bridgeOk = false;
+                                bridgeWhat = "a hot clip is treated as a passthrough";
+                            }
+                            dac->setBool("clamp", false);
+                            if (Exporter::audioRoute(bridge) != AudioRoute::Source) {
+                                bridgeOk = false;
+                                bridgeWhat = "an unclamped bridge is not treated as the source";
+                            }
+                        }
+                        if (!bridgeOk) {
+                            result = fail("passthrough bridge: " + bridgeWhat);
+                        } else {
+                            std::printf("  routing  : a plain ADC -> DAC bridge uses the original "
+                                        "audio\n");
                         }
                     }
 

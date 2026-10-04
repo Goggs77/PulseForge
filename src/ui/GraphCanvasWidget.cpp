@@ -133,12 +133,18 @@ std::vector<int> groupMembersOf(const Node &group) {
     return parseGroupMembers(group.pstr("members"));
 }
 
+// The group's arranged slots: members, their depths and the layer bands the
+// Depth tolerance parameter merges.
+std::vector<GroupSlot> groupSlots(const Graph &graph, const Node &group) {
+    return groupLayerOrder(graph, groupMembersOf(group), group.pint("depthTolerance", 0));
+}
+
 // Frame of a group: the members' slots decide its size, so it grows and shrinks
 // with what it owns instead of needing a manual resize.
 Rectangle groupFrame(const Graph &graph, const Node &group) {
     const float padding = groupPadding(group);
     const float spacing = groupSpacing(group);
-    const std::vector<GroupSlot> slots = groupLayerOrder(graph, groupMembersOf(group));
+    const std::vector<GroupSlot> slots = groupSlots(graph, group);
     int columns = 0;
     std::vector<float> columnHeights;
     for (const GroupSlot &slot : slots) {
@@ -166,7 +172,7 @@ Rectangle groupFrame(const Graph &graph, const Node &group) {
 // Writes the layered arrangement into the members' positions. Columns follow
 // the compacted depth, rows are top aligned and ordered by the layout keys.
 void layoutGroup(Graph &graph, Node &group) {
-    const std::vector<GroupSlot> slots = groupLayerOrder(graph, groupMembersOf(group));
+    const std::vector<GroupSlot> slots = groupSlots(graph, group);
     if (slots.empty()) return;
     const float originX = group.x + groupPadding(group);
     const float originY = group.y + groupHeaderHeight() + groupPadding(group);
