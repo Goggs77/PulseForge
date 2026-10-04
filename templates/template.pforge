@@ -35,19 +35,19 @@
     "fileSize": -1
   },
   "view": {
-    "panX": 285.2337036,
-    "panY": 44.41093445,
-    "zoom": 1.08503294,
+    "panX": 424.2094116,
+    "panY": -212.9068909,
+    "zoom": 0.895917654,
     "selectedNode": -1,
-    "playhead": 1.70883548e-05
+    "playhead": 0
   },
   "blocks": [
     {
       "id": 1,
       "kind": "src.audio",
       "title": "Audio Source",
-      "x": 0,
-      "y": 20,
+      "x": -348.8844299,
+      "y": 452.671814,
       "enabled": true,
       "params": {}
     },
@@ -55,8 +55,8 @@
       "id": 2,
       "kind": "dsp.analyze",
       "title": "Spectrum Analyzer",
-      "x": 357.4313049,
-      "y": 18.77676392,
+      "x": 678.3156738,
+      "y": 385.4718018,
       "enabled": true,
       "params": {
         "gain": 1,
@@ -67,8 +67,8 @@
       "id": 4,
       "kind": "render.spectrum",
       "title": "Spectrum",
-      "x": 698.2215576,
-      "y": 18.57916832,
+      "x": -348.7784729,
+      "y": 734.9388428,
       "enabled": true,
       "params": {
         "preset": 4,
@@ -84,8 +84,8 @@
       "id": 5,
       "kind": "geom.primitives",
       "title": "Geometry",
-      "x": 698.1861572,
-      "y": 182.6752014,
+      "x": -91.97845459,
+      "y": 734.9388428,
       "enabled": true,
       "params": {
         "shape": 2,
@@ -112,8 +112,8 @@
       "id": 9,
       "kind": "fx.postfx",
       "title": "Post FX",
-      "x": 698.083374,
-      "y": 368.3085938,
+      "x": 421.621582,
+      "y": 734.9388428,
       "enabled": true,
       "params": {
         "bloom": 0.1799999923,
@@ -130,8 +130,8 @@
       "id": 10,
       "kind": "out.video",
       "title": "Video Output",
-      "x": 698.144165,
-      "y": 617.5692749,
+      "x": 678.4216309,
+      "y": 734.9388428,
       "enabled": true,
       "params": {}
     },
@@ -139,8 +139,8 @@
       "id": 11,
       "kind": "out.audio",
       "title": "Audio Output",
-      "x": 698.071228,
-      "y": 696.225708,
+      "x": 678.3156738,
+      "y": 284.671814,
       "enabled": true,
       "params": {}
     },
@@ -148,8 +148,8 @@
       "id": 13,
       "kind": "dbg.meter",
       "title": "VU / Digital Meter - Left",
-      "x": -234.2552795,
-      "y": 246.2035675,
+      "x": 164.7156067,
+      "y": 284.671814,
       "enabled": true,
       "params": {
         "mode": 1,
@@ -160,8 +160,8 @@
       "id": 14,
       "kind": "dbg.meter",
       "title": "VU / Digital Meter - Right",
-      "x": -0.4442062378,
-      "y": 246.693512,
+      "x": 164.7156067,
+      "y": 447.8718262,
       "enabled": true,
       "params": {
         "mode": 1,
@@ -172,8 +172,8 @@
       "id": 15,
       "kind": "dsp.adc",
       "title": "ADC",
-      "x": 0.1019897461,
-      "y": 147.3405609,
+      "x": -92.08441162,
+      "y": 284.671814,
       "enabled": true,
       "params": {
         "mode": 0,
@@ -184,13 +184,73 @@
       "id": 16,
       "kind": "dsp.dac",
       "title": "DAC",
-      "x": -0.8939590454,
-      "y": 387.2399597,
+      "x": 421.515625,
+      "y": 284.671814,
       "enabled": true,
       "params": {
         "interpolate": true,
         "clamp": true,
         "channels": 2
+      }
+    },
+    {
+      "id": 17,
+      "kind": "sort.group",
+      "title": "Audio Chain",
+      "x": -380.0844421,
+      "y": 222.2718201,
+      "enabled": true,
+      "params": {
+        "members": "15,13,14,16,1,2,11,19",
+        "padding": 26,
+        "spacing": 22
+      }
+    },
+    {
+      "id": 18,
+      "kind": "sort.group",
+      "title": "Video Chain",
+      "x": -379.9784851,
+      "y": 672.5388184,
+      "enabled": true,
+      "params": {
+        "members": "5,9,10,4,20",
+        "padding": 26,
+        "spacing": 22
+      }
+    },
+    {
+      "id": 19,
+      "kind": "sort.sticky",
+      "title": "Sticky Note",
+      "x": -348.8844299,
+      "y": 284.671814,
+      "enabled": true,
+      "params": {
+        "text": "Hello world!"
+      }
+    },
+    {
+      "id": 20,
+      "kind": "render.textbox",
+      "title": "Textbox",
+      "x": 164.8215637,
+      "y": 734.9388428,
+      "enabled": true,
+      "params": {
+        "text": "template",
+        "font": "",
+        "size": 0.1349999905,
+        "bold": false,
+        "align": 0,
+        "x": 0.3649999797,
+        "y": 0.8050000072,
+        "w": 0.275000006,
+        "h": 0.3549999893,
+        "foreground": "#FFFFFFFF",
+        "foregroundOpacity": 1,
+        "background": "#FB7DFFFF",
+        "backgroundOpacity": 0.5500000119
       }
     }
   ],
@@ -205,18 +265,6 @@
       "from": 4,
       "fromPort": 0,
       "to": 5,
-      "toPort": 0
-    },
-    {
-      "from": 5,
-      "fromPort": 0,
-      "to": 9,
-      "toPort": 0
-    },
-    {
-      "from": 9,
-      "fromPort": 0,
-      "to": 10,
       "toPort": 0
     },
     {
@@ -259,6 +307,24 @@
       "from": 16,
       "fromPort": 0,
       "to": 11,
+      "toPort": 0
+    },
+    {
+      "from": 5,
+      "fromPort": 0,
+      "to": 20,
+      "toPort": 0
+    },
+    {
+      "from": 20,
+      "fromPort": 0,
+      "to": 9,
+      "toPort": 0
+    },
+    {
+      "from": 9,
+      "fromPort": 0,
+      "to": 10,
       "toPort": 0
     }
   ]
