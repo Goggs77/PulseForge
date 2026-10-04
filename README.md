@@ -95,6 +95,9 @@ Useful cache options:
 
 ## Running
 
+The editor prints its version banner and the time the binary was built when it
+starts (the `build_stamp` build step refreshes that stamp on every build).
+
 ```powershell
 cd build/bin
 ./PulseForge.exe                     # start empty, then load audio

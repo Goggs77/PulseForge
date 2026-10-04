@@ -32,6 +32,12 @@ cmake --build I:\Goggs\Works\c++\PulseForge\build --parallel 8
 - Binaries land in `build/bin` (`PulseForge.exe`, `pf_selftest.exe`,
   `pf_probe.exe`, `pf_stage.exe`, `pf_migrate.exe`). The app expects `resource/`
   and `assets/` next to the executable, or beside the working directory.
+- The startup banner prints the version and the build time. The `build_stamp`
+  target runs `cmake/BuildStamp.cmake` on every build to rewrite
+  `build/generated/build_stamp.h` (`PF_BUILD_STAMP`), which is why the app
+  relinks even when no source changed; `main.cpp` includes it when present and
+  falls back to `__DATE__ " " __TIME__` otherwise (an IDE project, a quick g++
+  run). Change the version string in `main.cpp` itself.
 - Full rebuild: add `--clean-first`. Warnings are on (`-Wall -Wextra`) but there
   are a few known, accepted ones (an unused helper in `Registry.cpp`/`Project.cpp`
   and the vendored `jar_mod.h`).

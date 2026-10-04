@@ -129,6 +129,18 @@ if (PF_BUILD_APP)
 
     target_link_libraries(PulseForge PRIVATE pulseforge_core)
 
+    # The startup banner prints when this binary was built. The header is
+    # regenerated on every build, so the stamp stays honest even when only other
+    # files changed; main.cpp falls back to __DATE__/__TIME__ without it.
+    set(PF_STAMP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/build_stamp.h")
+    add_custom_target(build_stamp ALL
+        COMMAND ${CMAKE_COMMAND} -DPF_STAMP_OUT=${PF_STAMP_HEADER}
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildStamp.cmake"
+        BYPRODUCTS "${PF_STAMP_HEADER}"
+        COMMENT "Stamping the build time")
+    add_dependencies(PulseForge build_stamp)
+    target_include_directories(PulseForge PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
     if (MSVC)
         set_property(TARGET PulseForge PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
         target_link_options(PulseForge PRIVATE /ENTRY:mainCRTStartup)
