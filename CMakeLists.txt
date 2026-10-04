@@ -66,6 +66,7 @@ add_library(pulseforge_core STATIC
     src/core/Graph.cpp
     src/core/Project.cpp
     src/core/Json.cpp
+    src/core/Sorting.cpp
     src/core/TextEdit.cpp
     src/core/Registry.cpp
     src/dsp/AudioClip.cpp

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <unordered_map>
 
 #include "core/Node.h"
 #include "dsp/AudioClip.h"
@@ -22,6 +24,14 @@ constexpr float kVisualHeightGraph = 52.0f;
 constexpr float kVisualHeightGuard = 46.0f;
 constexpr float kVisualHeightRing = 46.0f;
 constexpr float kVisualHeightFilter = 84.0f;
+// Sticky notes are just text: the body is sized from the wrapped line count so
+// a note is not cut off. The font is fixed (not derived from the body) so the
+// measurement and the drawing agree.
+constexpr float kNoteFont = 12.5f;
+constexpr float kNoteLineHeight = 17.0f;
+constexpr float kNotePadding = 8.0f;
+constexpr float kNoteTextWidth = 192.0f - kNotePadding * 2.0f;
+constexpr const char *kNotePlaceholder = "Edit the note in the Inspector";
 // 4:3 dBFS graph plus a readout row; the plot itself is fitted to 4:3 while
 // drawing, this is the body height that gives it room at zoom 1.
 constexpr float kVisualHeightDynamics = 140.0f;
@@ -752,6 +762,32 @@ void drawDynamicsVisual(UiState &state, const Node &node, Rectangle body, float 
                       std::max(1.2f, visualStroke(plot, 0.03f)));
 }
 
+// ---------------------------------------------------------------------------
+// Sticky Note: wrapped text on the block's own (translucent) body.
+// ---------------------------------------------------------------------------
+void drawNoteVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
+    (void)state;
+    const ui::Theme &t = ui::theme();
+    // Zoom-relative padding: nodeVisualHeight measured the wrap with the same
+    // logical inner width, so the lines break the same way at every zoom.
+    const float inset = kNotePadding * zoom;
+    const Rectangle inner{body.x + inset, body.y + inset, body.width - inset * 2.0f,
+                          body.height - inset * 2.0f};
+    const std::string &text = node.pstr("text");
+    // The body was sized with the fixed note font, so draw with the same size
+    // scaled by the canvas zoom instead of deriving it from the body again.
+    const float size = std::max(7.0f, kNoteFont * zoom);
+    if (text.empty()) {
+        ui::drawTextWrapped(inner, kNotePlaceholder, size, withAlpha(t.textDim, 0.9f),
+                            kNoteLineHeight * zoom);
+        return;
+    }
+    // Sorting blocks use the theme's strongest ink: the point of a note is that
+    // it can be read, not that it matches the block colours.
+    const Color ink = ui::isDarkTheme() ? Color{235, 235, 240, 255} : Color{28, 28, 32, 255};
+    ui::drawTextWrapped(inner, text.c_str(), size, ink, kNoteLineHeight * zoom);
+}
+
 }  // namespace
 
 float nodeVisualHeight(const Node &node) {
@@ -766,6 +802,21 @@ float nodeVisualHeight(const Node &node) {
     if (node.kind == "mod.ringbuffer") return kVisualHeightRing;
     if (node.kind == "mod.filter") return kVisualHeightFilter;
     if (node.kind == "dsp.dynamics") return kVisualHeightDynamics;
+    if (node.kind == "sort.sticky") {
+        const std::string &text = node.pstr("text");
+        const char *shown = text.empty() ? kNotePlaceholder : text.c_str();
+        // The real word wrap decides the height, and nodeTotalHeight runs many
+        // times per frame, so the measurement is cached per block and text.
+        static std::unordered_map<int, std::pair<size_t, float>> cache;
+        const size_t hash = std::hash<std::string>{}(shown);
+        const auto found = cache.find(node.id);
+        if (found != cache.end() && found->second.first == hash) return found->second.second;
+        const float measured =
+            ui::textWrappedHeight(shown, kNoteFont, ui::s(kNoteTextWidth), kNoteLineHeight);
+        const float height = std::clamp(measured + kNotePadding * 2.0f, 56.0f, 420.0f);
+        cache[node.id] = {hash, height};
+        return height;
+    }
     return 0.0f;
 }
 
@@ -803,6 +854,8 @@ void drawNodeVisual(UiState &state, const Node &node, Rectangle body, Rectangle 
         drawFilterVisual(state, node, body, zoom);
     } else if (node.kind == "dsp.dynamics") {
         drawDynamicsVisual(state, node, body, zoom);
+    } else if (node.kind == "sort.sticky") {
+        drawNoteVisual(state, node, body, zoom);
     }
     EndScissorMode();
 }

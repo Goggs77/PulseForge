@@ -55,7 +55,10 @@ monitor's source/silent/processed decisions). The Math checks include Lerp/Clamp
 (port values versus Inspector fallbacks) and the Transform block's
 pass-through/zoom/translation, and the Shader check compiles the three bundled
 templates. Automation's Slice mode is checked numerically (holds the first/last
-value outside the window and mirrors when reversed). It also checks the ADC -> DAC
+value outside the window and mirrors when reversed), and the Sorting check
+covers the group's layered order (compacted depths, row rules), the member list
+parsing/formatting and a Sticky Note/Group project round trip. It also checks
+the ADC -> DAC
 Unity round trip (bit-exact), the per-sample audio-rate tanh chain, stereo
 left/right separation, live frame-window reuse, and the input-driven Spectrum
 Analyzer (silent / precomputed / live). It also checks that a Spectrum preset
@@ -181,6 +184,22 @@ docs         rendering notes and the README overlay image
 - New categories need nothing beyond `def.category`: the palette, its captions
   and the graph accent colour are generated from the registry ("Debug" is the
   most recent addition).
+- **Sorting** (`sort.sticky`, `sort.group`) is drawn by the canvas instead of
+  the generic block path: both blocks have no ports and no evaluate, they shade
+  as translucent greyscale with the theme's strongest ink (quarter-transparent
+  heading, semi-transparent body), and they never show the "category + ms"
+  footer. A group's frame is *derived*: `groupFrame` sizes it from the arranged
+  members and `layoutGroup` writes their positions every frame in
+  `syncGroups`, so the arrangement is never a saved user layout - only the
+  `members` id list is persisted (a text parameter). The drop rules live in the
+  canvas: a block dropped with its centre inside a frame joins it, one dropped
+  outside leaves, groups never nest (a group id in a member list is pruned), and
+  `syncGroups` also drops ids of deleted blocks and of blocks another group
+  already claims. The layered order itself (`blockDepth` + `groupLayerOrder` in
+  `core/Sorting.cpp`) is pure graph logic so the selftest can check it: columns
+  are the compacted depths, rows sort by depth, connected-port count and id.
+  Keep the geometry (`nodeWidth`/`nodeTotalHeight`) in the UI and the ordering
+  in core - the split is what makes the layout testable without a canvas.
 - Sizes *inside* a block's live content (text, handles, strokes) are derived from
   the body rect through `visualFont`/`visualHandle`/`visualStroke`/`visualInset`,
   so they scale with the canvas zoom exactly like the block and never clip.

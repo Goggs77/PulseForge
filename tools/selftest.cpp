@@ -18,6 +18,7 @@
 
 #include "core/Project.h"
 #include "core/Registry.h"
+#include "core/Sorting.h"
 #include "core/TextEdit.h"
 #include "dsp/Analysis.h"
 #include "dsp/AudioClip.h"
@@ -509,6 +510,119 @@ int main(int argc, char **argv) {
                 } else {
                     std::printf("  math     : Lerp mixes, Clamp restricts (ports and "
                                 "Inspector fallbacks)\n");
+                }
+            }
+
+            // Sorting: the Sticky Note and Group blocks carry no ports, the
+            // group's members are stored as a text parameter, and the layered
+            // order follows the chain (compacted depths, rows sorted by depth,
+            // connected ports and id).
+            if (result == 0) {
+                bool ok = true;
+                std::string what;
+                Graph sorting;
+                Node *sticky = sorting.addNode("sort.sticky", 0, 0);
+                Node *group = sorting.addNode("sort.group", 0, 0);
+                if (!sticky || !group) {
+                    ok = false;
+                    what = "the Sorting blocks are not registered";
+                } else if (!sticky->inputPorts().empty() || !sticky->outputPorts().empty() ||
+                           !group->inputPorts().empty() || !group->outputPorts().empty()) {
+                    ok = false;
+                    what = "Sorting blocks must not have ports";
+                }
+                if (ok) {
+                    // 1 -> 2 -> 3 (2 is not a member, so 3 keeps depth 2) and a
+                    // dangling constant 4. Member 4 has no links at all, so it
+                    // sorts above 1 in the same column (fewer connected ports).
+                    Node *constant = sorting.addNode("math.constant", 0, 0);
+                    Node *arith = sorting.addNode("math.arithmetic", 0, 0);
+                    Node *power = sorting.addNode("math.power", 0, 0);
+                    Node *dangling = sorting.addNode("math.constant", 0, 0);
+                    if (!constant || !arith || !power || !dangling) {
+                        ok = false;
+                        what = "could not build the layout graph";
+                    } else {
+                        std::string why;
+                        ok = sorting.connect(constant->id, 0, arith->id, 0, &why) &&
+                             sorting.connect(arith->id, 0, power->id, 0, &why);
+                        if (!ok) what = why;
+                    }
+                    if (ok) {
+                        const std::vector<int> members = {constant->id, power->id, dangling->id};
+                        const std::vector<GroupSlot> slots = groupLayerOrder(sorting, members);
+                        // Depth 2 compacts to the second column; the extra depth 1
+                        // that no member uses must not leave a hole.
+                        const bool layoutOk =
+                            slots.size() == 3 && slots[0].id == dangling->id &&
+                            slots[0].column == 0 && slots[0].row == 0 &&
+                            slots[1].id == constant->id && slots[1].column == 0 &&
+                            slots[1].row == 1 && slots[2].id == power->id &&
+                            slots[2].column == 1 && slots[2].row == 0;
+                        if (!layoutOk) {
+                            ok = false;
+                            what = "the layered order is wrong";
+                        }
+                    }
+                    if (ok) {
+                        // Member text survives parsing duplicates, separators and
+                        // the round trip through the parameter.
+                        const std::string text = " 7, 9;7, 12 ";
+                        const std::vector<int> parsed = parseGroupMembers(text);
+                        if (parsed.size() != 3 || parsed[0] != 7 || parsed[1] != 9 ||
+                            parsed[2] != 12 ||
+                            formatGroupMembers(parsed) != "7,9,12") {
+                            ok = false;
+                            what = "member parsing is wrong";
+                        } else {
+                            group->setText("members", formatGroupMembers(parsed));
+                            sticky->setText("text", "note text");
+                            if (group->pstr("members") != "7,9,12" ||
+                                sticky->pstr("text") != "note text") {
+                                ok = false;
+                                what = "Sorting parameters do not round trip";
+                            }
+                        }
+                    }
+                    if (ok) {
+                        // Both blocks and their text survive a save and load.
+                        Project project;
+                        project.graph.clear();
+                        project.name = "Sorting";
+                        const int groupId = project.graph.addNode("sort.group", 10.0f, 20.0f)->id;
+                        const int stickyId = project.graph.addNode("sort.sticky", 10.0f, 200.0f)->id;
+                        project.graph.find(groupId)->setText("members", "7,9,12");
+                        project.graph.find(stickyId)->setText("text", "note text");
+                        const std::string path = "selftest_sorting.pforge";
+                        std::string saveError;
+                        if (!project.save(path, &saveError)) {
+                            ok = false;
+                            what = "sorting project save: " + saveError;
+                        } else {
+                            Project loaded;
+                            std::string loadError;
+                            if (!loaded.load(path, &loadError, &renderer.shaders())) {
+                                ok = false;
+                                what = "sorting project load: " + loadError;
+                            } else {
+                                const Node *loadedGroup = loaded.graph.find(groupId);
+                                const Node *loadedSticky = loaded.graph.find(stickyId);
+                                if (!loadedGroup || !loadedSticky ||
+                                    loadedGroup->pstr("members") != "7,9,12" ||
+                                    loadedSticky->pstr("text") != "note text") {
+                                    ok = false;
+                                    what = "Sorting blocks did not round trip through a file";
+                                }
+                            }
+                        }
+                        std::remove(path.c_str());
+                    }
+                }
+                if (!ok) {
+                    result = fail("Sorting blocks: " + what);
+                } else {
+                    std::printf("  sorting  : Sticky Note and Group (layered order, "
+                                "member list round trip)\n");
                 }
             }
 

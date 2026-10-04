@@ -2927,6 +2927,41 @@ void Registry::registerBuiltins() {
         def.evaluate = evalGuard;
         add(std::move(def));
     }
+
+    // ---- Sorting ---------------------------------------------------------
+    {
+        NodeDef def;
+        def.kind = "sort.sticky";
+        def.category = "Sorting";
+        def.label = "Sticky Note";
+        def.description =
+            "A note with no ports and no effect on the render. The text is edited in the "
+            "Inspector and drawn in the block, so a pipeline can explain itself.";
+        def.inputs = {};
+        def.outputs = {};
+        def.params = {makeTextParam("text", "Text", "Note", "Note")};
+        add(std::move(def));
+    }
+    {
+        NodeDef def;
+        def.kind = "sort.group";
+        def.category = "Sorting";
+        def.label = "Group";
+        def.description =
+            "A frame that owns blocks: drop a block inside to add it (it is highlighted while "
+            "you drag over it), drag it out to remove it again. Members are arranged "
+            "automatically in layers that follow the signal chain - each column is one step "
+            "further from a block with no inputs, top aligned - and moving the group moves "
+            "them with it. Groups cannot be nested.";
+        def.inputs = {};
+        def.outputs = {};
+        def.params = {
+            makeTextParam("members", "Members", "", "Group"),
+            makeParam("padding", "Padding", 26.0f, 6.0f, 80.0f, 1.0f, "Layout"),
+            makeParam("spacing", "Spacing", 22.0f, 4.0f, 80.0f, 1.0f, "Layout"),
+        };
+        add(std::move(def));
+    }
 }
 
 }  // namespace pf

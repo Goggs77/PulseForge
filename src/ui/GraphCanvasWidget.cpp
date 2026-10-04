@@ -3,8 +3,10 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <unordered_set>
 
 #include "core/Registry.h"
+#include "core/Sorting.h"
 #include "render/Palette.h"
 #include "ui/App.h"
 #include "ui/NodeVisuals.h"
@@ -112,6 +114,165 @@ Color kindAccent(const std::string &category) {
     return Color{150, 156, 176, 255};
 }
 
+// ---------------------------------------------------------------------------
+// Sorting: sticky notes and groups
+// ---------------------------------------------------------------------------
+
+bool isSortingNode(const Node &node) { return node.def && node.def->category == "Sorting"; }
+bool isGroupNode(const Node &node) { return node.kind == "sort.group"; }
+
+float groupHeaderHeight() { return ui::s(26.0f); }
+float groupPadding(const Node &group) {
+    return ui::s(std::max(6.0f, group.pfloat("padding", 26.0f)));
+}
+float groupSpacing(const Node &group) {
+    return ui::s(std::max(4.0f, group.pfloat("spacing", 22.0f)));
+}
+
+std::vector<int> groupMembersOf(const Node &group) {
+    return parseGroupMembers(group.pstr("members"));
+}
+
+// The Sorting category draws as translucent grey with the theme's strongest
+// ink: quarter-transparent heading, semi-transparent body, grayscale that
+// contrasts against the current theme.
+struct SortingColours {
+    Color ink{};
+    Color header{};
+    Color body{};
+    Color border{};
+};
+
+SortingColours sortingColours(float alphaScale) {
+    const bool dark = ui::isDarkTheme();
+    const Color grey = dark ? Color{214, 214, 220, 255} : Color{56, 56, 62, 255};
+    SortingColours colours;
+    colours.ink = dark ? Color{240, 240, 245, 255} : Color{20, 20, 24, 255};
+    colours.header = palette::withAlpha(grey, 0.25f * alphaScale);
+    colours.body = palette::withAlpha(grey, 0.5f * alphaScale);
+    colours.border = palette::withAlpha(grey, 0.8f);
+    return colours;
+}
+
+// Frame of a group: the members' slots decide its size, so it grows and shrinks
+// with what it owns instead of needing a manual resize.
+Rectangle groupFrame(const Graph &graph, const Node &group) {
+    const float padding = groupPadding(group);
+    const float spacing = groupSpacing(group);
+    const std::vector<GroupSlot> slots = groupLayerOrder(graph, groupMembersOf(group));
+    int columns = 0;
+    std::vector<float> columnHeights;
+    for (const GroupSlot &slot : slots) {
+        const Node *member = graph.find(slot.id);
+        if (!member) continue;
+        columns = std::max(columns, slot.column + 1);
+        if (static_cast<int>(columnHeights.size()) < slot.column + 1) {
+            columnHeights.resize(static_cast<size_t>(slot.column) + 1, 0.0f);
+        }
+        columnHeights[static_cast<size_t>(slot.column)] += nodeTotalHeight(*member) + spacing;
+    }
+    if (columns <= 0) {
+        // An empty group stays a sensible drop target.
+        return Rectangle{group.x, group.y, nodeWidth() * 1.7f,
+                         groupHeaderHeight() + padding * 2.0f + ui::s(56.0f)};
+    }
+    float tallest = 0.0f;
+    for (const float height : columnHeights) tallest = std::max(tallest, height - spacing);
+    const float width = padding * 2.0f + static_cast<float>(columns) * nodeWidth() +
+                        static_cast<float>(columns - 1) * spacing;
+    const float height = groupHeaderHeight() + padding + tallest + padding;
+    return Rectangle{group.x, group.y, width, height};
+}
+
+// Writes the layered arrangement into the members' positions. Columns follow
+// the compacted depth, rows are top aligned and ordered by the layout keys.
+void layoutGroup(Graph &graph, Node &group) {
+    const std::vector<GroupSlot> slots = groupLayerOrder(graph, groupMembersOf(group));
+    if (slots.empty()) return;
+    const float originX = group.x + groupPadding(group);
+    const float originY = group.y + groupHeaderHeight() + groupPadding(group);
+    const float spacing = groupSpacing(group);
+    std::vector<float> columnY;
+    for (const GroupSlot &slot : slots) {
+        Node *member = graph.find(slot.id);
+        if (!member) continue;
+        if (static_cast<int>(columnY.size()) <= slot.column) {
+            columnY.resize(static_cast<size_t>(slot.column) + 1, originY);
+        }
+        member->x = originX + static_cast<float>(slot.column) * (nodeWidth() + spacing);
+        member->y = columnY[static_cast<size_t>(slot.column)];
+        columnY[static_cast<size_t>(slot.column)] += nodeTotalHeight(*member) + spacing;
+    }
+}
+
+// Re-arranges every group and heals its member list (a deleted block, a nested
+// group or an id claimed by an earlier group is dropped). A group whose member
+// is being dragged is skipped so the drag follows the mouse.
+void syncGroups(Graph &graph, int draggingNode) {
+    std::unordered_set<int> claimed;
+    for (Node &group : graph.nodes) {
+        if (!isGroupNode(group)) continue;
+        const std::vector<int> members = groupMembersOf(group);
+        std::vector<int> live;
+        live.reserve(members.size());
+        bool changed = false;
+        for (const int id : members) {
+            const Node *member = graph.find(id);
+            if (!member || isGroupNode(*member) || !claimed.insert(id).second) {
+                changed = true;
+                continue;
+            }
+            live.push_back(id);
+        }
+        if (changed) group.setText("members", formatGroupMembers(live));
+        if (draggingNode > 0 &&
+            std::find(live.begin(), live.end(), draggingNode) != live.end()) {
+            continue;
+        }
+        layoutGroup(graph, group);
+    }
+}
+
+// The group under a world-space point, ignoring one block (the dragged one).
+int groupAtPoint(const Graph &graph, Vector2 point, int excludeId) {
+    for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
+        const Node &node = *it;
+        if (!isGroupNode(node) || node.id == excludeId) continue;
+        if (CheckCollisionPointRec(point, groupFrame(graph, node))) return node.id;
+    }
+    return 0;
+}
+
+// Adds a dropped block to the group under it, or removes it from the group it
+// left. A block belongs to at most one group and groups never nest. Returns
+// true when a membership list changed.
+bool updateGroupMembership(Graph &graph, int nodeId, int targetGroupId) {
+    const Node *dropped = graph.find(nodeId);
+    if (!dropped || isGroupNode(*dropped)) return false;
+    bool changed = false;
+    for (Node &group : graph.nodes) {
+        if (!isGroupNode(group) || group.id == nodeId) continue;
+        std::vector<int> members = groupMembersOf(group);
+        const auto found = std::find(members.begin(), members.end(), nodeId);
+        const bool member = found != members.end();
+        const bool wanted = group.id == targetGroupId;
+        if (member == wanted) continue;
+        if (wanted) {
+            members.push_back(nodeId);
+        } else {
+            members.erase(found);
+        }
+        group.setText("members", formatGroupMembers(members));
+        changed = true;
+    }
+    if (changed) {
+        for (Node &group : graph.nodes) {
+            if (isGroupNode(group)) layoutGroup(graph, group);
+        }
+    }
+    return changed;
+}
+
 // Symbol shown in the empty middle of a block, so the operation is readable
 // without opening the inspector.
 std::string nodeBadge(const Node &node) {
@@ -132,7 +293,7 @@ std::string nodeBadge(const Node &node) {
 }  // namespace
 
 Rectangle nodeBounds(const Graph &graph, const Node &node) {
-    (void)graph;
+    if (isGroupNode(node)) return groupFrame(graph, node);
     return Rectangle{node.x, node.y, nodeWidth(), nodeTotalHeight(node)};
 }
 
@@ -213,10 +374,16 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
     state.canvas.hoveredNode = -1;
     state.canvas.hoveredPortNode = -1;
     state.canvas.hoveredVisualNode = -1;
+    // Groups re-arrange their members before anything looks at their positions,
+    // so hit testing and drawing see the same layout.
+    syncGroups(graph, state.canvas.draggingNode ? state.canvas.dragNodeId : 0);
     bool overPort = false;
     if (inside) {
         for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
             Node &node = *it;
+            // A group frame is only hit where no block sits; the fallback pass
+            // below picks it up once every block has been tried.
+            if (isGroupNode(node)) continue;
             const Rectangle world = nodeBounds(graph, node);
             const Rectangle box{worldToScreen(Vector2{world.x, world.y}).x,
                                 worldToScreen(Vector2{world.x, world.y}).y, world.width * view.zoom,
@@ -257,6 +424,11 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                 break;
             }
         }
+        // Nothing on top: a group frame under the cursor becomes the hit, which
+        // is where clicking its header or padding selects it.
+        if (!overPort && state.canvas.hoveredNode <= 0 && state.canvas.hoveredVisualNode <= 0) {
+            state.canvas.hoveredNode = groupAtPoint(graph, screenToWorld(mouse), 0);
+        }
     }
 
     // ---- draw links -------------------------------------------------------
@@ -284,8 +456,65 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                    highlight ? 3.0f : 2.0f);
     }
 
+    // ---- draw groups (behind their members) -------------------------------
+    int dropTarget = 0;
+    if (state.canvas.draggingNode) {
+        const Node *dragged = graph.find(state.canvas.dragNodeId);
+        if (dragged && !isGroupNode(*dragged)) {
+            const Rectangle draggedBox = nodeBounds(graph, *dragged);
+            const Vector2 centre{draggedBox.x + draggedBox.width * 0.5f,
+                                 draggedBox.y + draggedBox.height * 0.5f};
+            dropTarget = groupAtPoint(graph, centre, dragged->id);
+        }
+    }
+    for (Node &group : graph.nodes) {
+        if (!isGroupNode(group)) continue;
+        const Rectangle world = nodeBounds(graph, group);
+        const Vector2 origin = worldToScreen(Vector2{world.x, world.y});
+        const Rectangle box{origin.x, origin.y, world.width * view.zoom,
+                            world.height * view.zoom};
+        if (box.x > viewport.x + viewport.width || box.x + box.width < viewport.x ||
+            box.y > viewport.y + viewport.height || box.y + box.height < viewport.y) {
+            continue;
+        }
+        const SortingColours colours = sortingColours(group.enabled ? 1.0f : 0.55f);
+        const float header = std::min(box.height, groupHeaderHeight() * view.zoom);
+        const bool selected = group.id == state.selectedNode;
+        const bool highlighted = dropTarget == group.id;
+        DrawRectangleRounded(box, 0.03f, 6, colours.body);
+        DrawRectangleRounded(Rectangle{box.x, box.y, box.width, header}, 0.06f, 6,
+                             colours.header);
+        DrawRectangleRoundedLines(box, 0.03f, 6,
+                                  highlighted ? t.accent
+                                              : (selected ? t.accent : colours.border));
+        if (highlighted) {
+            DrawRectangleRoundedLines(Rectangle{box.x - 2.0f, box.y - 2.0f, box.width + 4.0f,
+                                                box.height + 4.0f},
+                                      0.03f, 6, palette::withAlpha(t.accent, 0.65f));
+        }
+        std::vector<int> members = groupMembersOf(group);
+        size_t live = 0;
+        for (const int id : members) {
+            if (graph.find(id)) ++live;
+        }
+        char title[160];
+        if (live > 0) {
+            std::snprintf(title, sizeof(title), "%s  -  %zu blocks",
+                          group.displayTitle().c_str(), live);
+        } else {
+            std::snprintf(title, sizeof(title), "%s  -  drop blocks inside",
+                          group.displayTitle().c_str());
+        }
+        ui::drawTextClipped(Rectangle{box.x + 10.0f * view.zoom, box.y,
+                                      box.width - 20.0f * view.zoom, header},
+                            title, 12.5f * view.zoom, colours.ink, ui::Align::Left, true);
+    }
+
     // ---- draw nodes -------------------------------------------------------
     for (Node &node : graph.nodes) {
+        // Groups are frames drawn behind the blocks above; their own box would
+        // only add a second border.
+        if (isGroupNode(node)) continue;
         const Rectangle world = nodeBounds(graph, node);
         const Vector2 origin = worldToScreen(Vector2{world.x, world.y});
         const Rectangle box{origin.x, origin.y, world.width * view.zoom, world.height * view.zoom};
@@ -294,24 +523,33 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
             continue;
         }
         const bool selected = node.id == state.selectedNode;
-        const Color accent = kindAccent(node.def->category);
-        DrawRectangleRounded(box, 0.06f, 6, palette::withAlpha(t.panelRaised, node.enabled ? 0.96f : 0.6f));
+        const bool sorting = isSortingNode(node);
+        const SortingColours colours = sortingColours(node.enabled ? 1.0f : 0.55f);
+        const Color accent = sorting ? colours.ink : kindAccent(node.def->category);
+        DrawRectangleRounded(box, 0.06f, 6,
+                             sorting ? colours.body
+                                     : palette::withAlpha(t.panelRaised,
+                                                          node.enabled ? 0.96f : 0.6f));
         const float headerHeight = box.height * headerFraction(node);
         DrawRectangleRounded(Rectangle{box.x, box.y, box.width, headerHeight}, 0.12f, 6,
-                             palette::withAlpha(accent, node.enabled ? 0.85f : 0.4f));
+                             sorting ? colours.header
+                                     : palette::withAlpha(accent, node.enabled ? 0.85f : 0.4f));
         DrawRectangleRoundedLines(box, 0.06f, 6,
-                                  selected ? t.accent : palette::withAlpha(t.border, 0.95f));
+                                  selected ? t.accent
+                                           : (sorting ? colours.border
+                                                      : palette::withAlpha(t.border, 0.95f)));
         if (selected) {
             DrawRectangleRoundedLines(Rectangle{box.x - 2.0f, box.y - 2.0f, box.width + 4.0f,
                                                 box.height + 4.0f},
                                       0.06f, 6, t.accent);
         }
         ui::drawText(Rectangle{box.x + 8.0f * view.zoom, box.y, box.width - 16.0f, headerHeight},
-                     node.displayTitle().c_str(), 13.0f * view.zoom, ui::readableOn(accent),
-                     ui::Align::Left, true);
+                     node.displayTitle().c_str(), 13.0f * view.zoom,
+                     sorting ? colours.ink : ui::readableOn(accent), ui::Align::Left, true);
         if (!node.enabled) {
             ui::drawText(Rectangle{box.x, box.y, box.width - 6.0f * view.zoom, headerHeight},
-                         "off", 11.0f * view.zoom, palette::withAlpha(ui::readableOn(accent), 0.85f),
+                         "off", 11.0f * view.zoom,
+                         palette::withAlpha(sorting ? colours.ink : ui::readableOn(accent), 0.85f),
                          ui::Align::Right);
         }
 
@@ -377,14 +615,19 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
             ui::drawText(badgeRect, badge.c_str(), badgeSize,
                          palette::withAlpha(t.text, 0.95f), ui::Align::Center, true);
         }
-        char info[96];
-        if (!node.status.empty()) {
-            std::snprintf(info, sizeof(info), "%s", node.status.c_str());
-            ui::drawTextClipped(footer, info, 10.0f * view.zoom, t.danger);
-        } else {
-            std::snprintf(info, sizeof(info), "%s  %.2f ms", node.def->category.c_str(),
-                          node.lastEvalMs);
-            ui::drawTextClipped(footer, info, 10.0f * view.zoom, palette::withAlpha(t.textDim, 0.9f));
+        // Sorting blocks carry nothing to evaluate, so their footer stays empty
+        // instead of reporting the category and 0.00 ms.
+        if (!sorting) {
+            char info[96];
+            if (!node.status.empty()) {
+                std::snprintf(info, sizeof(info), "%s", node.status.c_str());
+                ui::drawTextClipped(footer, info, 10.0f * view.zoom, t.danger);
+            } else {
+                std::snprintf(info, sizeof(info), "%s  %.2f ms", node.def->category.c_str(),
+                              node.lastEvalMs);
+                ui::drawTextClipped(footer, info, 10.0f * view.zoom,
+                                    palette::withAlpha(t.textDim, 0.9f));
+            }
         }
         (void)rows;
     }
@@ -434,6 +677,21 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                     }
                 }
                 state.canvas.draggingLink = false;
+            }
+            // A dropped block joins the group under it, or leaves the group it
+            // was in; the group then re-arranges its members.
+            if (state.canvas.draggingNode) {
+                if (Node *node = graph.find(state.canvas.dragNodeId)) {
+                    if (!isGroupNode(*node)) {
+                        const Rectangle box = nodeBounds(graph, *node);
+                        const Vector2 centre{box.x + box.width * 0.5f,
+                                             box.y + box.height * 0.5f};
+                        if (updateGroupMembership(graph, node->id,
+                                                  groupAtPoint(graph, centre, node->id))) {
+                            state.project.dirty = true;
+                        }
+                    }
+                }
             }
             state.canvas.draggingNode = false;
             state.canvas.visualDragNode = -1;

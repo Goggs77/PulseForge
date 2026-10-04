@@ -341,6 +341,30 @@ readout.
 | Video Output | Image | - | Terminal block; whatever reaches it is previewed and exported |
 | Audio Output | Audio | - | Terminal block; the signal connected here is the only audio the export carries. Unconnected exports a silent video |
 
+### Sorting
+
+| Block | Inputs | Outputs | Notes |
+| --- | --- | --- | --- |
+| Sticky Note | - | - | A note with no ports and no effect on the render; the text is edited in the Inspector and wrapped inside the block |
+| Group | - | - | Owns blocks: drop one inside to add it (the frame highlights while you drag over it), drag it out to remove it. Members are re-arranged in layers that follow the chain and move with the frame; groups cannot be nested |
+
+Sorting blocks draw as translucent greyscale against the current theme instead of
+a category colour, so a documented pipeline stays readable.
+
+The Group's arrangement is derived from the graph, not from where the blocks
+happened to sit:
+
+- a block's **depth** is the shortest number of steps to a block with no input
+  links, so `Audio Source -> Analyzer -> Spectrum` gives depths 0, 1, 2 (the walk
+  follows links outside the group too);
+- each depth that actually occurs is one **column**, left to right, and empty
+  depths are compacted away;
+- rows inside a column are sorted by depth, then by the number of ports that
+  carry a link (fewest first), then by block id, and top aligned;
+- the frame is sized from the arranged members, so it grows and shrinks with
+  them, and the member list heals itself: a deleted block, a nested group or an
+  id already claimed by another group is dropped from the `Members` text.
+
 ## Writing shaders
 
 The **Shader** block points at a `.glsl` file (the file picker in the inspector
