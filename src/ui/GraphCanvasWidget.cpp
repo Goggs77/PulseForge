@@ -133,27 +133,6 @@ std::vector<int> groupMembersOf(const Node &group) {
     return parseGroupMembers(group.pstr("members"));
 }
 
-// The Sorting category draws as translucent grey with the theme's strongest
-// ink: quarter-transparent heading, semi-transparent body, grayscale that
-// contrasts against the current theme.
-struct SortingColours {
-    Color ink{};
-    Color header{};
-    Color body{};
-    Color border{};
-};
-
-SortingColours sortingColours(float alphaScale) {
-    const bool dark = ui::isDarkTheme();
-    const Color grey = dark ? Color{214, 214, 220, 255} : Color{56, 56, 62, 255};
-    SortingColours colours;
-    colours.ink = dark ? Color{240, 240, 245, 255} : Color{20, 20, 24, 255};
-    colours.header = palette::withAlpha(grey, 0.25f * alphaScale);
-    colours.body = palette::withAlpha(grey, 0.5f * alphaScale);
-    colours.border = palette::withAlpha(grey, 0.8f);
-    return colours;
-}
-
 // Frame of a group: the members' slots decide its size, so it grows and shrinks
 // with what it owns instead of needing a manual resize.
 Rectangle groupFrame(const Graph &graph, const Node &group) {

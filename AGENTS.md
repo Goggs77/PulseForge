@@ -186,8 +186,10 @@ docs         rendering notes and the README overlay image
   most recent addition).
 - **Sorting** (`sort.sticky`, `sort.group`) is drawn by the canvas instead of
   the generic block path: both blocks have no ports and no evaluate, they shade
-  as translucent greyscale with the theme's strongest ink (quarter-transparent
-  heading, semi-transparent body), and they never show the "category + ms"
+  as translucent greyscale cards that contrast against the theme - a light card
+  with deep grey ink on the dark theme, a dark card with light grey ink on the
+  light theme, a quarter-transparent heading and a semi-transparent body - and
+  they never show the "category + ms"
   footer. A group's frame is *derived*: `groupFrame` sizes it from the arranged
   members and `layoutGroup` writes their positions every frame in
   `syncGroups`, so the arrangement is never a saved user layout - only the
@@ -200,6 +202,8 @@ docs         rendering notes and the README overlay image
   are the compacted depths, rows sort by depth, connected-port count and id.
   Keep the geometry (`nodeWidth`/`nodeTotalHeight`) in the UI and the ordering
   in core - the split is what makes the layout testable without a canvas.
+  `sortingColours` in `NodeVisuals.cpp` is the single source for the card and
+  ink shades, so the canvas and the note text can never drift apart.
 - Sizes *inside* a block's live content (text, handles, strokes) are derived from
   the body rect through `visualFont`/`visualHandle`/`visualStroke`/`visualInset`,
   so they scale with the canvas zoom exactly like the block and never clip.

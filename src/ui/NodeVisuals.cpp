@@ -767,7 +767,6 @@ void drawDynamicsVisual(UiState &state, const Node &node, Rectangle body, float 
 // ---------------------------------------------------------------------------
 void drawNoteVisual(UiState &state, const Node &node, Rectangle body, float zoom) {
     (void)state;
-    const ui::Theme &t = ui::theme();
     // Zoom-relative padding: nodeVisualHeight measured the wrap with the same
     // logical inner width, so the lines break the same way at every zoom.
     const float inset = kNotePadding * zoom;
@@ -777,15 +776,15 @@ void drawNoteVisual(UiState &state, const Node &node, Rectangle body, float zoom
     // The body was sized with the fixed note font, so draw with the same size
     // scaled by the canvas zoom instead of deriving it from the body again.
     const float size = std::max(7.0f, kNoteFont * zoom);
+    const SortingColours colours = sortingColours();
     if (text.empty()) {
-        ui::drawTextWrapped(inner, kNotePlaceholder, size, withAlpha(t.textDim, 0.9f),
+        ui::drawTextWrapped(inner, kNotePlaceholder, size, withAlpha(colours.ink, 0.65f),
                             kNoteLineHeight * zoom);
         return;
     }
     // Sorting blocks use the theme's strongest ink: the point of a note is that
     // it can be read, not that it matches the block colours.
-    const Color ink = ui::isDarkTheme() ? Color{235, 235, 240, 255} : Color{28, 28, 32, 255};
-    ui::drawTextWrapped(inner, text.c_str(), size, ink, kNoteLineHeight * zoom);
+    ui::drawTextWrapped(inner, text.c_str(), size, colours.ink, kNoteLineHeight * zoom);
 }
 
 }  // namespace
@@ -818,6 +817,22 @@ float nodeVisualHeight(const Node &node) {
         return height;
     }
     return 0.0f;
+}
+
+SortingColours sortingColours(float alphaScale) {
+    const bool dark = ui::isDarkTheme();
+    // The card contrasts against the theme, and the ink contrasts against the
+    // card: a light grey card with deep grey text on the dark theme, the other
+    // way round on the light theme. The heading is a quarter transparent, the
+    // body semi transparent, so the two shades stay close enough for the same
+    // ink to read on both.
+    const Color grey = dark ? Color{208, 208, 216, 255} : Color{48, 48, 56, 255};
+    SortingColours colours;
+    colours.ink = dark ? Color{36, 36, 42, 255} : Color{235, 235, 240, 255};
+    colours.header = withAlpha(grey, 0.78f * alphaScale);
+    colours.body = withAlpha(grey, (dark ? 0.62f : 0.70f) * alphaScale);
+    colours.border = withAlpha(grey, 0.85f);
+    return colours;
 }
 
 void drawNodeVisual(UiState &state, const Node &node, Rectangle body, Rectangle clip, float zoom) {

@@ -14,6 +14,17 @@ class Node;
 // its live content. Blocks without content return 0.
 float nodeVisualHeight(const Node &node);
 
+// Sorting blocks (Sticky Note, Group) draw as greyscale cards instead of a
+// category colour: a light card with deep grey ink on the dark theme, and the
+// other way round on the light theme. `alphaScale` fades a disabled block.
+struct SortingColours {
+    Color ink{};
+    Color header{};
+    Color body{};
+    Color border{};
+};
+SortingColours sortingColours(float alphaScale = 1.0f);
+
 // Draws the live content of `node` inside `body` (screen space), clipped to the
 // intersection of `body` and `clip` (usually the canvas viewport) so a block that
 // hangs over the edge of the pipeline panel never paints outside it. `state`

@@ -348,8 +348,10 @@ readout.
 | Sticky Note | - | - | A note with no ports and no effect on the render; the text is edited in the Inspector and wrapped inside the block |
 | Group | - | - | Owns blocks: drop one inside to add it (the frame highlights while you drag over it), drag it out to remove it. Members are re-arranged in layers that follow the chain and move with the frame; groups cannot be nested |
 
-Sorting blocks draw as translucent greyscale against the current theme instead of
-a category colour, so a documented pipeline stays readable.
+Sorting blocks draw as translucent greyscale cards instead of a category colour:
+a light card with deep grey text on the dark theme, a dark card with light grey
+text on the light theme. The heading is a quarter transparent and the body semi
+transparent, so a documented pipeline stays readable in either theme.
 
 The Group's arrangement is derived from the graph, not from where the blocks
 happened to sit:
