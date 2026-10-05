@@ -1024,12 +1024,11 @@ float scalarOr(const std::vector<Value> &in, size_t port, float fallback) {
     return fallback;
 }
 
+// Gain and offset, nothing else: bounding a value is the Clamp block's job,
+// and its limits take modulation of their own.
 float applyOutputShape(Node &node, float value, const char *gainKey = "gain",
                        const char *offsetKey = "offset") {
-    value = value * node.pfloat(gainKey, 1.0f) + node.pfloat(offsetKey, 0.0f);
-    const float lo = node.pfloat("clampMin", -1.0e6f);
-    const float hi = node.pfloat("clampMax", 1.0e6f);
-    return std::clamp(value, std::min(lo, hi), std::max(lo, hi));
+    return value * node.pfloat(gainKey, 1.0f) + node.pfloat(offsetKey, 0.0f);
 }
 
 void evalConstant(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
@@ -2563,8 +2562,6 @@ void Registry::registerBuiltins() {
             makeParam("bValue", "B (constant)", 0.0f, -64.0f, 64.0f, 0.0f, "Operation"),
             makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
             makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
-            makeParam("clampMin", "Clamp min", -64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
-            makeParam("clampMax", "Clamp max", 64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
         };
         def.evaluate = evalArithmetic;
         add(std::move(def));
@@ -2626,8 +2623,6 @@ void Registry::registerBuiltins() {
             makeBoolParam("signed", "Keep base sign", true, "Power"),
             makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
             makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
-            makeParam("clampMin", "Clamp min", -64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
-            makeParam("clampMax", "Clamp max", 64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
         };
         def.evaluate = evalPower;
         add(std::move(def));
@@ -2645,8 +2640,6 @@ void Registry::registerBuiltins() {
             makeParam("inputScale", "Input scale", 1.0f, -16.0f, 16.0f, 0.01f, "Function"),
             makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
             makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
-            makeParam("clampMin", "Clamp min", -64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
-            makeParam("clampMax", "Clamp max", 64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
         };
         def.evaluate = evalExponential;
         add(std::move(def));
@@ -2666,8 +2659,6 @@ void Registry::registerBuiltins() {
             makeParam("floor", "Input floor", 1.0e-4f, 1.0e-9f, 1.0f, 0.0f, "Function"),
             makeParam("gain", "Gain", 1.0f, -16.0f, 16.0f, 0.01f, "Output"),
             makeParam("offset", "Offset", 0.0f, -16.0f, 16.0f, 0.01f, "Output"),
-            makeParam("clampMin", "Clamp min", -64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
-            makeParam("clampMax", "Clamp max", 64.0f, -1.0e6f, 1.0e6f, 0.0f, "Output"),
         };
         def.evaluate = evalLogarithm;
         add(std::move(def));

@@ -171,6 +171,11 @@ docs         rendering notes and the README overlay image
   while an unconnected port falls back to the Inspector. `scalarOrParam` in
   `Registry.cpp` is the helper; keep both directions working so a block is
   usable with or without patch cables.
+- Math blocks shape their output with `applyOutputShape` (gain and offset) and
+  carry **no clamp of their own**: bounding a value is the Clamp block's job,
+  whose Min/Max are ports. Do not re-add Clamp min/max parameters to `math.*`;
+  the retired keys an older project still carries are ignored on load (the
+  loader walks the node's own parameters) and dropped on the next save.
 - A block that modulates a parameter **publishes the value it actually used**
   through `Node::publishEffective(key, value)`. The inspector slider and the
   in-block previews follow it (`Node::effectiveParam`) so an LFO visibly moves

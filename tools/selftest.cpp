@@ -585,6 +585,50 @@ int main(int argc, char **argv) {
                 }
             }
 
+            // The Math output stage is gain and offset only: bounding a value
+            // is the Clamp block's job, so a signal past the retired +/-64
+            // window has to come through untouched.
+            if (result == 0) {
+                bool ok = true;
+                std::string what;
+                Graph mathGraph;
+                const int sourceId = mathGraph.addNode("math.constant", 0, 0)->id;
+                const int arithmeticId = mathGraph.addNode("math.arithmetic", 200, 0)->id;
+                Node *source = mathGraph.find(sourceId);
+                Node *arithmetic = mathGraph.find(arithmeticId);
+                if (!source || !arithmetic) {
+                    ok = false;
+                    what = "the Arithmetic block is not registered";
+                } else {
+                    source->setFloat("value", 200.0f);
+                    arithmetic->setInt("op", 0);   // Add
+                    arithmetic->setFloat("bValue", 0.0f);
+                    arithmetic->setFloat("gain", 1.0f);
+                    arithmetic->setFloat("offset", 0.0f);
+                    std::string why;
+                    ok = mathGraph.connect(sourceId, 0, arithmeticId, 0, &why);
+                    if (!ok) {
+                        what = why;
+                    } else {
+                        EvalContext ctx;
+                        ctx.fps = 60.0f;
+                        mathGraph.evaluate(ctx);
+                        const float shaped = arithmetic->outputs[0].scalar;
+                        if (std::fabs(shaped - 200.0f) > 1e-3f) {
+                            ok = false;
+                            what = "the output is still clamped (" +
+                                   std::to_string(shaped) + ")";
+                        }
+                    }
+                }
+                if (!ok) {
+                    result = fail("Math output stage: " + what);
+                } else {
+                    std::printf("  math     : output gain/offset is unbounded (Clamp does the "
+                                "bounding)\n");
+                }
+            }
+
             // Sorting: the Sticky Note and Group blocks carry no ports, the
             // group's members are stored as a text parameter, and the layered
             // order follows the chain (compacted depths, rows sorted by depth,

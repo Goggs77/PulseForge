@@ -281,7 +281,7 @@ executable when *Save preferences* is pressed.
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
 | Constant | - | Scalar | Fixed value |
-| Arithmetic | A, B | Result | add, subtract, multiply, divide, min, max, modulo, with gain/offset and clamping |
+| Arithmetic | A, B | Result | add, subtract, multiply, divide, min, max, modulo, with gain/offset |
 | Lerp | A, B, Factor | Out | Mixes two Scalars (0 = A, 1 = B). Each port falls back to its Inspector value when nothing is connected, so it works as a constant, a crossfader or a modulation target |
 | Clamp | In, Min, Max | Out | Restricts a Scalar to a range, -1..1 by default. Min/Max accept their own inputs, are ordered (a Min above Max still works) and fall back to the Inspector |
 | Power | Base, Exponent | Result | Negative bases keep their sign instead of becoming NaN |
@@ -300,6 +300,10 @@ executable when *Save preferences* is pressed.
 Arithmetic, Automation, Matrix and Determinant show a symbol in the middle of
 their block (`+`, `-`, `x`, `/`, `<=`, `>=`, `%`, `0..1`, `+/-`, `3x3`) so the
 pipeline can be read without opening the inspector.
+
+The output stage of Arithmetic, Power, Exponential and Logarithm is gain and
+offset only: they do not bound their result. Bound a signal with the **Clamp**
+block, whose Min and Max accept modulation of their own.
 
 Vector and matrix outputs are consumed by the `uVector2/3/4` and `uMatrix`
 inputs of a **Shader** block whose file declares them, and by the **Position**
