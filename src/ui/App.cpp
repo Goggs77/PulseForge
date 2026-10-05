@@ -1017,10 +1017,7 @@ void renderPreviewFrame(UiState &state) {
     ctx.duration = duration;
     ctx.time = state.playhead;
     ctx.frame = static_cast<int>(state.playhead * state.project.video.fps);
-    const double wantedAudioTime = state.project.video.trimStart + state.playhead;
-    ctx.audioTime = state.clip.duration() > 0.0
-                        ? std::min(state.clip.duration(), wantedAudioTime)
-                        : wantedAudioTime;
+    ctx.audioTime = state.project.audioTimeAt(state.playhead, state.clip.duration());
     ctx.audio = state.clip.buffer();
     ctx.analysis = state.analysis;
     ctx.offline = false;
@@ -1075,6 +1072,18 @@ void performExport(UiState &state) {
             state.playhead = std::clamp(
                 progress.videoTime, 0.0,
                 std::max(0.0, state.project.effectiveDuration(state.clip.duration())));
+            // The in-block previews (the Audio Source waveform, the LFO and
+            // automation pivots, the meters) read the editor's evaluation
+            // context, so that has to follow the exported frame too. Without it
+            // a Self Reference capture shows a frozen waveform while the
+            // playhead moves.
+            EvalContext &frame = state.frameContext;
+            frame.time = state.playhead;
+            frame.frame = progress.frame;
+            frame.duration = state.project.effectiveDuration(state.clip.duration());
+            frame.audioTime = state.project.audioTimeAt(state.playhead, state.clip.duration());
+            frame.audio = state.clip.buffer();
+            frame.analysis = state.analysis;
 
             const double now = GetTime();
             // A Self Reference has to update once per exported frame to stay

@@ -1956,6 +1956,28 @@ int main(int argc, char **argv) {
                     }
                 }
 
+                // The in-block previews follow the exported frame: the mapping
+                // a playhead takes to a clip position (trim start, clamped into
+                // the clip) is shared by the preview loop and the export
+                // progress callback, so a Self Reference capture of the Audio
+                // Source waveform moves with the export instead of freezing.
+                if (result == 0) {
+                    Project timing;
+                    timing.video.trimStart = 2.5;
+                    const double inside = timing.audioTimeAt(1.5, 10.0);
+                    const double past = timing.audioTimeAt(9.0, 10.0);
+                    const double empty = timing.audioTimeAt(1.0, 0.0);
+                    if (std::fabs(inside - 4.0) > 1e-9 || std::fabs(past - 10.0) > 1e-9 ||
+                        std::fabs(empty - 3.5) > 1e-9) {
+                        result = fail("audio timing: the playhead -> clip mapping is wrong (" +
+                                      std::to_string(inside) + " " + std::to_string(past) + " " +
+                                      std::to_string(empty) + ")");
+                    } else {
+                        std::printf("  timing   : the in-block previews follow the exported "
+                                    "frame\n");
+                    }
+                }
+
                 // GPU encoders: the table has to suit the container and the
                 // ffmpeg arguments have to use the per-family quality options.
                 if (result == 0) {

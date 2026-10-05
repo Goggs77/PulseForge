@@ -341,6 +341,13 @@ docs         rendering notes and the README overlay image
   playhead afterwards. Keep the closing `ExportProgress` call reporting
   `videoTime = end`, or the bar would jump back to zero on the last callback and
   a Self Reference capture records that glitch.
+- The export also follows into `state.frameContext` (`time`, `frame`,
+  `duration`, `audioTime` through `Project::audioTimeAt`, `audio`, `analysis`):
+  the in-block previews read that context, so without it the Audio Source
+  waveform and the LFO/automation pivots freeze at wherever the preview left
+  them and a Self Reference capture of the mirror shows a static UI while the
+  video moves. Any new in-block visual must read `state.frameContext` (not
+  `GetTime()`) to get the same treatment.
 - ADC/DAC define **audio-rate regions**. `Graph::evaluate` detects every
   ADC -> Scalar -> DAC path with `buildAudioRatePlan` and evaluates its
   pure-Scalar nodes (Math, Modulation, Timing, Debug) once per audio sample:

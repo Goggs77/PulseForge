@@ -85,6 +85,12 @@ public:
     // Duration in seconds used for rendering (audio length unless overridden).
     double effectiveDuration(double audioDuration) const;
 
+    // The clip position a playhead maps to: the video trim start plus the
+    // playhead, clamped into the clip. The preview loop and the export progress
+    // callback share it, so the in-block previews (the Audio Source waveform)
+    // read the same time as the frame being shown or rendered.
+    double audioTimeAt(double playhead, double clipDuration) const;
+
     bool save(const std::string &path, std::string *error);
     // `shaders` is optional; it lets a retired "shader.pass" node be migrated to
     // the Shader block with the ports of the .glsl file it points at.

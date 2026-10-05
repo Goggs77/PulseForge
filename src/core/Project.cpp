@@ -129,6 +129,11 @@ double Project::effectiveDuration(double audioDuration) const {
     return std::max(1.0 / 240.0, duration);
 }
 
+double Project::audioTimeAt(double playhead, double clipDuration) const {
+    const double wanted = video.trimStart + playhead;
+    return clipDuration > 0.0 ? std::min(clipDuration, wanted) : wanted;
+}
+
 std::vector<std::string> supportedContainers() { return {"mp4", "webm", "mkv", "mov", "avi"}; }
 
 const std::vector<VideoEncoderInfo> &videoEncoders() {
