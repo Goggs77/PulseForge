@@ -217,7 +217,9 @@ executable when *Save preferences* is pressed.
   defaults to AAC for the same compatibility reason; FLAC and Opus are one click
   away when you want them.
 - **Dropdown lists** scroll with the wheel and show a scroll bar when the
-  enumeration is longer than the box; options never spill outside it.
+  enumeration is longer than the box; options never spill outside it. The row
+  of the current value is marked when the list opens, so the marker is never
+  the pick of another dropdown.
 - **While a dialog or list is open**, everything behind it stops responding to
   clicks and hover, including the CrystalGUI chrome buttons.
 - **Preview playback follows the Audio Output**: a direct link from the Audio

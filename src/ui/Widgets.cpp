@@ -858,6 +858,9 @@ bool dropdown(Rectangle r, int *value, const std::vector<std::string> &options,
             gPopup.hasListResult = false;
             gPopup.openedThisFrame = true;
             gPopup.scroll = 0.0f;
+            // What the list marks as selected until a row is picked: the value
+            // the dropdown shows now, not the result of an earlier popup.
+            gPopup.listResult = index;
         }
         return false;
     }
