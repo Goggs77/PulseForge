@@ -1757,11 +1757,77 @@ int main(int argc, char **argv) {
                             what = "the Self Reference handed out a copy, not the capture";
                         }
                     }
+                    if (ok) {
+                        // The export hyper resolution: the factor is the largest
+                        // an enabled Self Reference asks for, and the capture
+                        // blit has to work for a target that is not the window.
+                        if (selfRef->pint("hyper", 0) != 1) {
+                            ok = false;
+                            what = "the hyper resolution parameter is missing";
+                        } else {
+                            selfRef->setInt("hyper", 3);
+                            const int scale = selfGraph.renderCaptureScale();
+                            selfRef->enabled = false;
+                            const int disabledScale = selfGraph.renderCaptureScale();
+                            selfRef->enabled = true;
+                            selfRef->setInt("hyper", 1);
+                            if (scale != 3 || disabledScale != 1) {
+                                ok = false;
+                                what = "the hyper resolution factor is not resolved";
+                            }
+                        }
+                    }
+                    if (ok) {
+                        const int captureWidth = 480;
+                        const int captureHeight = 270;
+                        RenderTexture2D target = LoadRenderTexture(captureWidth, captureHeight);
+                        if (target.texture.id == 0) {
+                            ok = false;
+                            what = "could not create the hyper resolution target";
+                        } else {
+                            BeginTextureMode(target);
+                            ClearBackground(BLACK);
+                            DrawRectangle(0, 0, captureWidth, captureHeight / 2, RED);
+                            DrawRectangle(0, captureHeight / 2, captureWidth, captureHeight / 2,
+                                          BLUE);
+                            renderer.refreshScreenCapture(captureWidth, captureHeight);
+                            EndTextureMode();
+                            UnloadRenderTexture(target);
+                            const ImageBufferPtr &scaled = renderer.screenCapture();
+                            if (!scaled || !scaled->valid() || scaled->width != captureWidth ||
+                                scaled->height != captureHeight) {
+                                ok = false;
+                                what = "the hyper resolution capture has the wrong size";
+                            } else {
+                                Image pixels = LoadImageFromTexture(scaled->texture.texture);
+                                const auto at = [&](float v) {
+                                    const int y = std::clamp(
+                                        static_cast<int>(v * pixels.height), 0,
+                                        pixels.height - 1);
+                                    const unsigned char *pixel =
+                                        static_cast<const unsigned char *>(pixels.data) +
+                                        (static_cast<size_t>(y) * pixels.width + pixels.width / 2) *
+                                            4;
+                                    return Vector3{static_cast<float>(pixel[0]),
+                                                   static_cast<float>(pixel[1]),
+                                                   static_cast<float>(pixel[2])};
+                                };
+                                const Vector3 top = at(0.2f);
+                                const Vector3 bottom = at(0.8f);
+                                UnloadImage(pixels);
+                                if (top.x < 180.0f || top.z > 60.0f || bottom.z < 180.0f ||
+                                    bottom.x > 60.0f) {
+                                    ok = false;
+                                    what = "the scaled capture is flipped or empty";
+                                }
+                            }
+                        }
+                    }
                     if (!ok) {
                         result = fail("Self Reference block: " + what);
                     } else {
                         std::printf("  render   : Self Reference captures the window upright and "
-                                    "only on demand\n");
+                                    "only on demand, and scales\n");
                     }
                 }
 

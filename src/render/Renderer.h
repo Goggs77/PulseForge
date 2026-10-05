@@ -84,6 +84,10 @@ public:
     // most once per drawn frame and only while a Self Reference block is in the
     // graph; the copy is a GPU blit, so nothing is read back to the CPU.
     void refreshScreenCapture();
+    // Same, for a framebuffer that is not the window: `width`/`height` are the
+    // size of whatever is currently bound (the export hyper resolution draws
+    // the editor into a bigger off-screen target).
+    void refreshScreenCapture(int width, int height);
     const ImageBufferPtr &screenCapture() const { return screenCapture_; }
 
     // The editor hands over the TTFs its own atlases are built from, so a

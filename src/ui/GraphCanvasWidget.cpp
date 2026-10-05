@@ -17,18 +17,19 @@ namespace {
 
 // Block geometry follows the GUI scaling factor so labels always fit their
 // boxes; the canvas zoom then scales the whole layout on top of that.
-float nodeWidth() { return ui::s(192.0f); }
-float headerHeight() { return ui::s(26.0f); }
-float portRowHeight() { return ui::s(18.0f); }
-float portDotRadius() { return ui::s(6.0f); }
-float footerHeight() { return ui::s(18.0f); }
+float nodeWidth() { return ui::sWorld(192.0f); }
+float headerHeight() { return ui::sWorld(26.0f); }
+float portRowHeight() { return ui::sWorld(18.0f); }
+float portDotRadius() { return ui::sWorld(6.0f); }
+float footerHeight() { return ui::sWorld(18.0f); }
 
 float nodeTotalHeight(const Node &node) {
     const float rows = std::max(1.0f, std::max(static_cast<float>(node.inputPorts().size()),
                                                 static_cast<float>(node.outputPorts().size())));
     // Blocks with live content reserve extra body space between the ports and
     // the footer for it.
-    return headerHeight() + rows * portRowHeight() + ui::s(nodeVisualHeight(node)) + footerHeight();
+    return headerHeight() + rows * portRowHeight() + ui::sWorld(nodeVisualHeight(node)) +
+           footerHeight();
 }
 
 // Fraction of the block height taken by the port rows.
@@ -38,7 +39,9 @@ float portAreaFraction(const Node &node) {
     return (rows * portRowHeight()) / nodeTotalHeight(node);
 }
 
-float visualFraction(const Node &node) { return ui::s(nodeVisualHeight(node)) / nodeTotalHeight(node); }
+float visualFraction(const Node &node) {
+    return ui::sWorld(nodeVisualHeight(node)) / nodeTotalHeight(node);
+}
 
 float portRows(const Node &node) {
     const size_t inputs = node.def ? node.inputPorts().size() : 0;
@@ -121,12 +124,12 @@ Color kindAccent(const std::string &category) {
 bool isSortingNode(const Node &node) { return node.def && node.def->category == "Sorting"; }
 bool isGroupNode(const Node &node) { return node.kind == "sort.group"; }
 
-float groupHeaderHeight() { return ui::s(26.0f); }
+float groupHeaderHeight() { return ui::sWorld(26.0f); }
 float groupPadding(const Node &group) {
-    return ui::s(std::max(6.0f, group.pfloat("padding", 26.0f)));
+    return ui::sWorld(std::max(6.0f, group.pfloat("padding", 26.0f)));
 }
 float groupSpacing(const Node &group) {
-    return ui::s(std::max(4.0f, group.pfloat("spacing", 22.0f)));
+    return ui::sWorld(std::max(4.0f, group.pfloat("spacing", 22.0f)));
 }
 
 std::vector<int> groupMembersOf(const Node &group) {
@@ -159,7 +162,7 @@ Rectangle groupFrame(const Graph &graph, const Node &group) {
     if (columns <= 0) {
         // An empty group stays a sensible drop target.
         return Rectangle{group.x, group.y, nodeWidth() * 1.7f,
-                         groupHeaderHeight() + padding * 2.0f + ui::s(56.0f)};
+                         groupHeaderHeight() + padding * 2.0f + ui::sWorld(56.0f)};
     }
     float tallest = 0.0f;
     for (const float height : columnHeights) tallest = std::max(tallest, height - spacing);
@@ -775,7 +778,8 @@ void addNodeFromKind(UiState &state, const std::string &kind) {
     const int count = state.project.graph.nodeCount();
     //Keep new nodes in view.
     const float x = - state.project.view.panX + 250.0f + static_cast<float>(count % 31) * 4.0f;
-    const float y = - state.project.view.panY + 160.0f + static_cast<float>(count % 11) * ui::s(24.0f);
+    const float y = -state.project.view.panY + 160.0f +
+                    static_cast<float>(count % 11) * ui::sWorld(24.0f);
     Node *node = state.project.graph.addNode(kind, x, y);
     if (!node) {
         setStatus(state, "Unknown block kind: " + kind, true);

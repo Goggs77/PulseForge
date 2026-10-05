@@ -100,6 +100,11 @@ struct UiState {
     // Video frame the Self Reference capture was last taken for, so the mirror
     // updates once per video frame instead of once per drawn display frame.
     int lastCaptureFrame = -1;
+    // Off-screen target for the export hyper resolution: the editor is drawn
+    // into it at the Self Reference's multiple of the window size, then blitted
+    // into the renderer's capture. Kept between frames and rebuilt when the size
+    // changes; unused (and so never created) while the factor is 1.
+    RenderTexture2D editorTarget{};
 
     // layout
     Rectangle topBarRect{};

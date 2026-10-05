@@ -78,6 +78,12 @@ Theme &theme();
 // Scales a logical pixel measurement by the GUI scaling factor.
 inline float s(float value) { return value * theme().uiScale * theme().renderScale; }
 
+// A measurement in the graph canvas's own coordinate space (block and group
+// geometry). The canvas zoom maps world units to pixels and a render-scaled pass
+// doubles that zoom, so world geometry follows the GUI scale alone - everything
+// drawn inside a block after worldToScreen() is screen space and uses s().
+inline float sWorld(float value) { return value * theme().uiScale; }
+
 // The pixel size a text of `size` is drawn at in the current pass; the font
 // atlas is picked with it, so glyphs are rasterised at (or just above) that
 // size instead of being scaled up.

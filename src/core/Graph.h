@@ -54,6 +54,12 @@ public:
     int videoSinkNodeId() const;
     int audioSinkNodeId() const;
 
+    // The hyper resolution the Self Reference blocks ask for: the largest
+    // enabled block's factor, clamped to 1..4. 1 captures the editor at the
+    // window resolution, anything higher renders it that many times bigger for
+    // the export, so a Transform can zoom into the mirror without blurring.
+    int renderCaptureScale() const;
+
     int nodeCount() const { return static_cast<int>(nodes.size()); }
 };
 

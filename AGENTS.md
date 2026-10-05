@@ -122,6 +122,9 @@ cannot be injected. Use the off-screen capture mode instead:
 PulseForge.exe --shot out.png --size 2000x1200 --shot-frames 40 [project.pforge|audio.wav]
 ```
 
+- The shot follows a Self Reference's *Hyper resolution for export*: with the
+  block set to 2 the PNG comes out at twice the `--size`, which is the way to
+  inspect that pass (chrome boxes included) without running an export.
 - Verify visually with a screenshot plus a numeric check (crop + `ffmpeg
   signalstats`, or `volumeDetect` on exported audio) rather than by eye alone.
 - Drive UI state through data where possible (a test `.pforge`, a preferences
@@ -438,6 +441,20 @@ docs         rendering notes and the README overlay image
   from feeding back into itself, so do not "fix" it by capturing before the
   graph runs. During an export the preview pane is fed the frame the exporter
   just rendered, so the editor (and its mirror) shows the pipeline live.
+- **Hyper resolution** (`render.selfref`'s `hyper` parameter, 1..4) is what keeps
+  a mirror sharp when a Transform zooms into it: `Graph::renderCaptureScale()`
+  resolves the largest enabled Self Reference's factor and
+  `captureEditorScaled` (App.cpp) draws the whole editor again into
+  `UiState::editorTarget` at that multiple of the window, then blits that into
+  the capture. Layout, `Theme::renderScale`, the canvas zoom (`ui::sWorld` is the
+  world-space counterpart that deliberately ignores it) and the lazily loaded
+  large font atlases all follow the factor, so the frame is the window's layout
+  with more pixels. Two rules: the preview never runs this pass (it is export
+  only, so the cost stays opt-in), and the CrystalGUI chrome boxes are drawn by
+  `drawScaledChromeBoxes` instead of the library, because the box element's
+  shader fills a window-sized quad and flips about the window height, which
+  mirrors or drops every box in a target of another size. `--shot` follows the
+  factor too, which is how the pass can be inspected without an export.
 - Geometry (`geom.primitives`) owns primitives only and must not read
   `ctx.audio`/`ctx.analysis`. Spectrum and waveform shapes are
   `render.spectrum` effects; `Project::fromJson` converts old Geometry shapes

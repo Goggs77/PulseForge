@@ -3147,10 +3147,15 @@ void Registry::registerBuiltins() {
             "Outputs the editor's own window as an Image, refreshed once per drawn frame while "
             "previewing and exporting. During an export the dimmed progress overlay is left "
             "out, so the Image shows the pipeline as it renders; the capture only runs while "
-            "an enabled Self Reference block is in the graph.";
+            "an enabled Self Reference block is in the graph. Hyper resolution renders the "
+            "whole editor that many times bigger for an export, so a Transform can zoom into "
+            "the mirror without blurring; 1 keeps the window resolution and the on-screen "
+            "preview never pays for it.";
         def.inputs = {};
         def.outputs = {PortDesc{"Image", PortType::Image, "the editor window"}};
-        def.params = {};
+        def.params = {
+            makeIntParam("hyper", "Hyper resolution for export", 1, 1, 4, "Capture"),
+        };
         def.evaluate = evalSelfReference;
         add(std::move(def));
     }

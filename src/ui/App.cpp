@@ -712,6 +712,44 @@ void updateWindowTitle(UiState &state) {
 void drawChromeLabels(UiState &state);
 void drawPaletteLabels(UiState &state, Rectangle bounds);
 
+// Set while the export hyper resolution draws the editor, where the CrystalGUI
+// boxes are replaced by drawScaledChromeBoxes().
+bool gScaledChrome = false;
+
+// The scaled pass draws the chrome boxes itself. CrystalGUI's box element fills
+// a quad of the *window* size and flips its rectangle about the window height,
+// so into an off-screen target of another size the boxes come out mirrored or
+// missing. The geometry and the theme colours are the same ones the labels use,
+// so the mirror still looks like the editor; the 1:1 paths keep the library.
+void drawScaledChromeBoxes(Rectangle paletteRect) {
+    const ui::Theme &t = ui::theme();
+    auto drawBox = [&](const ChromeRect &entry) {
+        if (!entry.node) return;
+        const auto *instance =
+            static_cast<const CguiButtonInstanceData *>(entry.node->instanceData);
+        Color fill = entry.accent ? t.accent : (entry.flat ? t.controlFillFlat : t.controlFill);
+        if (instance && instance->hovered) {
+            fill = palette::modulate(fill, instance->held ? 1.18f : 1.10f);
+        }
+        if (instance && instance->disabled) fill = palette::modulate(fill, 0.65f);
+        const float roundness = ui::roundness(entry.rect, ui::s(6.0f));
+        DrawRectangleRounded(entry.rect, roundness, 6, fill);
+        DrawRectangleRoundedLines(entry.rect, roundness, 6,
+                                  entry.accent ? t.accent : t.controlBorder);
+    };
+    // Palette rows scroll, so they keep the clip the library path uses.
+    const Rectangle clip{paletteView(paletteRect)};
+    BeginScissorMode(static_cast<int>(clip.x), static_cast<int>(clip.y),
+                     static_cast<int>(clip.width), static_cast<int>(clip.height));
+    for (const ChromeRect &entry : gChromeRects) {
+        if (!entry.topBar) drawBox(entry);
+    }
+    EndScissorMode();
+    for (const ChromeRect &entry : gChromeRects) {
+        if (entry.topBar) drawBox(entry);
+    }
+}
+
 void drawEditor(UiState &state, bool interactive) {
     // Two modal layers: the editor behind is frozen and ignores the mouse, while
     // the dialog drawn on top stays interactive on its own account.
@@ -728,16 +766,21 @@ void drawEditor(UiState &state, bool interactive) {
     // the buttons exactly like the rest of the editor.
     if (state.root) {
         if (interactive) CguiUpdate(state.root);
-        // The palette scrolls, so its CrystalGUI buttons are clipped to the
-        // panel: otherwise a short window lets them draw over the status bar.
-        if (gPaletteLayer) {
-            const Rectangle view{paletteView(state.paletteRect)};
-            BeginScissorMode(static_cast<int>(view.x), static_cast<int>(view.y),
-                             static_cast<int>(view.width), static_cast<int>(view.height));
-            CguiDrawNode(gPaletteLayer);
-            EndScissorMode();
+        if (gScaledChrome) {
+            // The scaled pass draws the boxes itself (see the helper above).
+            drawScaledChromeBoxes(state.paletteRect);
+        } else {
+            // The palette scrolls, so its CrystalGUI buttons are clipped to the
+            // panel: otherwise a short window lets them draw over the status bar.
+            if (gPaletteLayer) {
+                const Rectangle view{paletteView(state.paletteRect)};
+                BeginScissorMode(static_cast<int>(view.x), static_cast<int>(view.y),
+                                 static_cast<int>(view.width), static_cast<int>(view.height));
+                CguiDrawNode(gPaletteLayer);
+                EndScissorMode();
+            }
+            if (gTopLayer) CguiDrawNode(gTopLayer);
         }
-        if (gTopLayer) CguiDrawNode(gTopLayer);
         drawChromeLabels(state);
         drawPaletteLabels(state, state.paletteRect);
     }
@@ -1006,6 +1049,85 @@ void computeLayout(UiState &state, float width, float height) {
                                     contentHeight - previewHeight - gap};
 }
 
+// The export hyper resolution: draws the whole editor again at `scale` times the
+// window resolution and captures that, so a Transform that zooms into the mirror
+// has the pixels to work with. Layout, GUI scale, font atlases, canvas zoom and
+// the CrystalGUI chrome all follow the factor, so the frame is the window's
+// layout with more pixels rather than a bigger canvas. The target lives in
+// UiState::editorTarget (the --shot path reads it back); the window-scale state
+// is restored before returning, so the caller keeps drawing the frame it was in
+// the middle of. Returns false when the target could not be created.
+bool captureEditorScaled(UiState &state, int scale) {
+    const int width = GetScreenWidth();
+    const int height = GetScreenHeight();
+    const int targetWidth = width * scale;
+    const int targetHeight = height * scale;
+    if (width <= 0 || height <= 0 || targetWidth <= 0 || targetHeight <= 0) return false;
+    if (state.editorTarget.texture.id == 0 ||
+        state.editorTarget.texture.width != targetWidth ||
+        state.editorTarget.texture.height != targetHeight) {
+        if (state.editorTarget.texture.id != 0) UnloadRenderTexture(state.editorTarget);
+        state.editorTarget = LoadRenderTexture(targetWidth, targetHeight);
+        if (state.editorTarget.texture.id != 0) {
+            SetTextureFilter(state.editorTarget.texture, TEXTURE_FILTER_BILINEAR);
+        }
+    }
+    if (state.editorTarget.texture.id == 0) {
+        state.editorTarget = RenderTexture2D{};
+        return false;
+    }
+
+    ui::loadLargeFonts();
+    ui::theme().renderScale = static_cast<float>(scale);
+    ViewState &view = state.project.view;
+    const float zoom = view.zoom;
+    const float panX = view.panX;
+    const float panY = view.panY;
+    view.zoom = zoom * static_cast<float>(scale);
+    view.panX = panX * static_cast<float>(scale);
+    view.panY = panY * static_cast<float>(scale);
+    // The chrome is built in screen coordinates, so it has to be rebuilt for the
+    // scaled layout (and rebuilt again once the pass is over) - and it must be
+    // rebuilt *after* the layout, because it reads the panel rects.
+    computeLayout(state, static_cast<float>(targetWidth), static_cast<float>(targetHeight));
+    buildChrome(state);
+    updateChromeLayout(state);
+
+    // Widget ids are handed out in draw order, so this pass starts its own run.
+    ui::beginFrame();
+    BeginTextureMode(state.editorTarget);
+    ClearBackground(palette::background());
+    gScaledChrome = true;
+    drawEditor(state, false);
+    gScaledChrome = false;
+    // The capture has to come out of this target, so blit while it is bound.
+    state.renderer.refreshScreenCapture(targetWidth, targetHeight);
+    EndTextureMode();
+
+    view.zoom = zoom;
+    view.panX = panX;
+    view.panY = panY;
+    ui::theme().renderScale = 1.0f;
+    computeLayout(state, static_cast<float>(width), static_cast<float>(height));
+    buildChrome(state);
+    updateChromeLayout(state);
+    return true;
+}
+
+// Captures the editor for a Self Reference once per video frame, using the extra
+// hyper resolution pass when an enabled Self Reference asks for one. The
+// interactive preview keeps calling captureEditorFrame() and never pays for it.
+void captureEditorForFrame(UiState &state, int videoFrame) {
+    if (state.lastCaptureFrame == videoFrame) return;
+    if (!graphNeedsScreenCapture(state.project.graph)) return;
+    const int scale = state.project.graph.renderCaptureScale();
+    if (scale > 1 && captureEditorScaled(state, scale)) {
+        state.lastCaptureFrame = videoFrame;
+        return;
+    }
+    captureEditorFrame(state, videoFrame);
+}
+
 void renderPreviewFrame(UiState &state) {
     const double duration = state.project.effectiveDuration(state.clip.duration());
     EvalContext &ctx = state.frameContext;
@@ -1111,7 +1233,7 @@ void performExport(UiState &state) {
             drawEditor(state, false);
             // Self Reference must see the pipeline, not the exporter's grey-out:
             // grab the frame before the dim rectangle and the progress panel.
-            captureEditorFrame(state, progress.frame);
+            captureEditorForFrame(state, progress.frame);
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.55f));
             const Rectangle box{(GetScreenWidth() - 560.0f) * 0.5f,
                                 (GetScreenHeight() - 150.0f) * 0.5f, 560.0f, 150.0f};
@@ -1374,24 +1496,32 @@ int runApp(int argc, char **argv) {
         const bool capture = !shotPath.empty() && frameCounter >= shotFrames &&
                              GetTime() >= startupTime + shotDelay;
         RenderTexture2D captureTarget{};
+        // A shot follows the Self Reference's hyper resolution as well, so the
+        // same pass can be inspected (and screenshotted) at the bigger size.
+        const int shotScale = capture ? state.project.graph.renderCaptureScale() : 1;
+        const bool scaledShot = capture && shotScale > 1 && captureEditorScaled(state, shotScale);
         if (capture) {
-            captureTarget = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
-            BeginTextureMode(captureTarget);
+            captureTarget = scaledShot ? state.editorTarget
+                                       : LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
+            if (!scaledShot) BeginTextureMode(captureTarget);
         } else {
             BeginDrawing();
         }
-        // Widget ids are handed out in draw order, so they must be reset before
-        // the panels are drawn.
-        ui::beginFrame();
-        ClearBackground(palette::background());
-        // A dialog freezes the editor behind it; popups are handled inside.
-        drawEditor(state, !dialogOpen(state));
-        // Self Reference reads this frame; the export overlay is drawn later, in
-        // the progress callback, so the grey-out never enters the pipeline.
-        captureEditorFrame(state, state.frameContext.frame);
+        if (!scaledShot) {
+            // Widget ids are handed out in draw order, so they must be reset
+            // before the panels are drawn.
+            ui::beginFrame();
+            ClearBackground(palette::background());
+            // A dialog freezes the editor behind it; popups are handled inside.
+            drawEditor(state, !dialogOpen(state));
+            // Self Reference reads this frame; the export overlay is drawn
+            // later, in the progress callback, so the grey-out never enters the
+            // pipeline.
+            captureEditorFrame(state, state.frameContext.frame);
+        }
 
         if (capture) {
-            EndTextureMode();
+            if (!scaledShot) EndTextureMode();
         } else {
             EndDrawing();
         }
@@ -1426,7 +1556,12 @@ int runApp(int argc, char **argv) {
                 readback.release();
             }
             readback.shutdown();
-            UnloadRenderTexture(captureTarget);
+            if (scaledShot) {
+                // UiState owns the scaled target; it is unloaded with the app.
+                captureTarget = RenderTexture2D{};
+            } else {
+                UnloadRenderTexture(captureTarget);
+            }
             break;
         }
         const double now = GetTime();
@@ -1439,6 +1574,10 @@ int runApp(int argc, char **argv) {
     }
 
     state.clip.clear();
+    if (state.editorTarget.texture.id != 0) {
+        UnloadRenderTexture(state.editorTarget);
+        state.editorTarget = RenderTexture2D{};
+    }
     state.renderer.shutdown();
     if (state.root) {
         CguiDeleteNode(state.root);

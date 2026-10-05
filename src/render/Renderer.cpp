@@ -344,8 +344,10 @@ void Renderer::setDefaultFonts(std::string regular, std::string bold) {
 }
 
 void Renderer::refreshScreenCapture() {
-    const int width = GetScreenWidth();
-    const int height = GetScreenHeight();
+    refreshScreenCapture(GetScreenWidth(), GetScreenHeight());
+}
+
+void Renderer::refreshScreenCapture(int width, int height) {
     if (width <= 0 || height <= 0) return;
     if (!screenCapture_ || screenCapture_->width != width || screenCapture_->height != height) {
         if (screenCapture_ && screenCapture_->valid()) {

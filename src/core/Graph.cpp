@@ -744,4 +744,13 @@ int Graph::videoSinkNodeId() const { return firstSinkWithInput(*this, PortType::
 
 int Graph::audioSinkNodeId() const { return firstSinkWithInput(*this, PortType::Audio); }
 
+int Graph::renderCaptureScale() const {
+    int scale = 1;
+    for (const Node &node : nodes) {
+        if (!node.enabled || node.kind != "render.selfref") continue;
+        scale = std::max(scale, std::clamp(node.pint("hyper", 1), 1, 4));
+    }
+    return scale;
+}
+
 }  // namespace pf
