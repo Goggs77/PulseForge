@@ -38,7 +38,7 @@
     "panX": 424.2094116,
     "panY": -212.9068909,
     "zoom": 0.895917654,
-    "selectedNode": -1,
+    "selectedNode": 20,
     "playhead": 0
   },
   "blocks": [
@@ -67,7 +67,7 @@
       "id": 4,
       "kind": "render.spectrum",
       "title": "Spectrum",
-      "x": -348.7784729,
+      "x": -348.7784424,
       "y": 734.9388428,
       "enabled": true,
       "params": {
@@ -84,7 +84,7 @@
       "id": 5,
       "kind": "geom.primitives",
       "title": "Geometry",
-      "x": -91.97845459,
+      "x": -91.97842407,
       "y": 734.9388428,
       "enabled": true,
       "params": {
@@ -112,7 +112,7 @@
       "id": 9,
       "kind": "fx.postfx",
       "title": "Post FX",
-      "x": 421.621582,
+      "x": 421.6216125,
       "y": 734.9388428,
       "enabled": true,
       "params": {
@@ -203,20 +203,22 @@
       "params": {
         "members": "15,13,14,16,1,2,11,19",
         "padding": 26,
-        "spacing": 22
+        "spacing": 22,
+        "depthTolerance": 0
       }
     },
     {
       "id": 18,
       "kind": "sort.group",
       "title": "Video Chain",
-      "x": -379.9784851,
+      "x": -379.9784546,
       "y": 672.5388184,
       "enabled": true,
       "params": {
         "members": "5,9,10,4,20",
         "padding": 26,
-        "spacing": 22
+        "spacing": 22,
+        "depthTolerance": 0
       }
     },
     {
@@ -234,13 +236,13 @@
       "id": 20,
       "kind": "render.textbox",
       "title": "Textbox",
-      "x": 164.8215637,
+      "x": 164.8215942,
       "y": 734.9388428,
       "enabled": true,
       "params": {
         "text": "template",
-        "font": "",
-        "size": 0.1349999905,
+        "font": ".\\assets\\fonts\\Bodoni_Moda\\static\\BodoniModa_28pt-SemiBoldItalic.ttf",
+        "size": 0.174999997,
         "bold": false,
         "align": 0,
         "x": 0.3649999797,
@@ -250,7 +252,7 @@
         "foreground": "#FFFFFFFF",
         "foregroundOpacity": 1,
         "background": "#FB7DFFFF",
-        "backgroundOpacity": 0.5500000119
+        "backgroundOpacity": 0
       }
     }
   ],

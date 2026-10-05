@@ -1,0 +1,798 @@
+{
+  "application": "PulseForge",
+  "version": 1,
+  "name": "Demo project",
+  "video": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "useAudioDuration": true,
+    "duration": 30,
+    "trimStart": 0,
+    "trimEnd": 0
+  },
+  "output": {
+    "container": "mp4",
+    "videoCodec": "h264_nvenc",
+    "audioCodec": "aac",
+    "crf": 16,
+    "preset": "medium",
+    "audioBitrate": "512k",
+    "audioSampleRate": 48000,
+    "bitrateKbps": 0,
+    "pixelFormat": "yuv420p",
+    "fastStart": true
+  },
+  "media": {
+    "path": "../assets/audio/demo.mp3",
+    "duration": 48.75001042,
+    "sampleRate": 96000,
+    "channels": 2,
+    "codec": "pcm_f32le",
+    "bitRate": 6144000,
+    "transcodedAac": true,
+    "transcodedRate": 48000,
+    "fileSize": 37445548
+  },
+  "view": {
+    "panX": 539.4187012,
+    "panY": -90.69152069,
+    "zoom": 0.6746088266,
+    "selectedNode": -1,
+    "playhead": 0.7307291521
+  },
+  "blocks": [
+    {
+      "id": 1,
+      "kind": "src.audio",
+      "title": "Audio Source",
+      "x": -710.6055298,
+      "y": 385.0976257,
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "id": 2,
+      "kind": "dsp.analyze",
+      "title": "Spectrum Analyzer",
+      "x": 316.5945435,
+      "y": 317.897644,
+      "enabled": true,
+      "params": {
+        "gain": 1,
+        "gate": 0
+      }
+    },
+    {
+      "id": 4,
+      "kind": "render.spectrum",
+      "title": "Spectrum",
+      "x": 610.9245605,
+      "y": 765.0474854,
+      "enabled": true,
+      "params": {
+        "preset": 17,
+        "count": 96,
+        "radius": 0.2449999899,
+        "thickness": 24.5,
+        "x": 0.5,
+        "y": 0.5,
+        "rotation": 0,
+        "spin": 0,
+        "scaleMod": 0.5,
+        "rotationMod": 0,
+        "xMod": 0.25,
+        "yMod": 0,
+        "colorA": "#53B2FFFF",
+        "colorB": "#FF3FA4FF",
+        "alpha": 1,
+        "additive": true,
+        "scale": 1.450000048
+      }
+    },
+    {
+      "id": 9,
+      "kind": "fx.postfx",
+      "title": "Post FX",
+      "x": 610.9245605,
+      "y": 1017.047485,
+      "enabled": true,
+      "params": {
+        "bloom": 0.25,
+        "chromatic": 0.25,
+        "feedback": 0,
+        "vignette": 0.25,
+        "saturation": 0.9199999571,
+        "hue": 0.5999999642,
+        "grain": 0.1400000006,
+        "scanlines": 0.3999999762
+      }
+    },
+    {
+      "id": 10,
+      "kind": "out.video",
+      "title": "Video Output",
+      "x": 610.9245605,
+      "y": 664.2474976,
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "id": 11,
+      "kind": "out.audio",
+      "title": "Audio Output",
+      "x": 316.5945435,
+      "y": 217.0976257,
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "id": 13,
+      "kind": "dbg.meter",
+      "title": "VU / Digital Meter - Left",
+      "x": -197.0054932,
+      "y": 217.0976257,
+      "enabled": true,
+      "params": {
+        "mode": 0,
+        "ballistics": 0.5500000119
+      }
+    },
+    {
+      "id": 14,
+      "kind": "dbg.meter",
+      "title": "VU / Digital Meter - Right",
+      "x": -197.0054932,
+      "y": 406.6976318,
+      "enabled": true,
+      "params": {
+        "mode": 0,
+        "ballistics": 0.5500000119
+      }
+    },
+    {
+      "id": 15,
+      "kind": "dsp.adc",
+      "title": "ADC",
+      "x": -453.8055115,
+      "y": 217.0976257,
+      "enabled": true,
+      "params": {
+        "mode": 0,
+        "channels": 2
+      }
+    },
+    {
+      "id": 16,
+      "kind": "dsp.dac",
+      "title": "DAC",
+      "x": 59.79452515,
+      "y": 217.0976257,
+      "enabled": true,
+      "params": {
+        "interpolate": true,
+        "clamp": true,
+        "channels": 2
+      }
+    },
+    {
+      "id": 17,
+      "kind": "sort.group",
+      "title": "Audio Chain",
+      "x": -741.805542,
+      "y": 154.6976318,
+      "enabled": true,
+      "params": {
+        "members": "15,13,14,16,1,2,11,19",
+        "padding": 26,
+        "spacing": 22,
+        "depthTolerance": 0
+      }
+    },
+    {
+      "id": 18,
+      "kind": "sort.group",
+      "title": "Video Chain",
+      "x": 322.9244995,
+      "y": 601.8474731,
+      "enabled": true,
+      "params": {
+        "members": "9,10,4,20,23,22,24,35",
+        "padding": 26,
+        "spacing": 22,
+        "depthTolerance": 2
+      }
+    },
+    {
+      "id": 19,
+      "kind": "sort.sticky",
+      "title": "Sticky Note",
+      "x": -710.6055298,
+      "y": 217.0976257,
+      "enabled": true,
+      "params": {
+        "text": "An audio chain where you can modulate audio signal\n"
+      }
+    },
+    {
+      "id": 20,
+      "kind": "render.textbox",
+      "title": "Textbox",
+      "x": 610.9245605,
+      "y": 1290.647461,
+      "enabled": true,
+      "params": {
+        "text": "Showcase Goggs",
+        "font": ".\\assets\\fonts\\Bodoni_Moda\\static\\BodoniModa_28pt-SemiBoldItalic.ttf",
+        "size": 0.1199999973,
+        "bold": false,
+        "align": 0,
+        "x": 0.009999999776,
+        "y": 0.8549999595,
+        "w": 0.7299999595,
+        "h": 0.5,
+        "foreground": "#FFFFFFFF",
+        "foregroundOpacity": 0.4299999774,
+        "background": "#FB7DFFFF",
+        "backgroundOpacity": 0
+      }
+    },
+    {
+      "id": 22,
+      "kind": "render.selfref",
+      "title": "Self Reference",
+      "x": 354.1245117,
+      "y": 832.2474976,
+      "enabled": true,
+      "params": {
+        "hyper": 3
+      }
+    },
+    {
+      "id": 23,
+      "kind": "fx.blend",
+      "title": "Blend",
+      "x": 354.1245117,
+      "y": 1120.247559,
+      "enabled": true,
+      "params": {
+        "mode": 1,
+        "opacity": 0.3999999762
+      }
+    },
+    {
+      "id": 24,
+      "kind": "fx.transform",
+      "title": "Transform",
+      "x": 354.1245117,
+      "y": 933.0474854,
+      "enabled": true,
+      "params": {
+        "amount": 1,
+        "offsetX": 0,
+        "offsetY": 0
+      }
+    },
+    {
+      "id": 25,
+      "kind": "math.matrix",
+      "title": "Matrix",
+      "x": 59.07437134,
+      "y": 665.046875,
+      "enabled": true,
+      "params": {
+        "size": 1,
+        "matrix": 0
+      }
+    },
+    {
+      "id": 26,
+      "kind": "math.vec2",
+      "title": "Sx",
+      "x": -197.725647,
+      "y": 665.046875,
+      "enabled": true,
+      "params": {
+        "x": 1.774065018,
+        "y": 0
+      }
+    },
+    {
+      "id": 27,
+      "kind": "math.vec2",
+      "title": "Sy",
+      "x": -197.725647,
+      "y": 809.046875,
+      "enabled": true,
+      "params": {
+        "x": 0,
+        "y": 0.9983215332
+      }
+    },
+    {
+      "id": 28,
+      "kind": "sort.group",
+      "title": "Camera Move",
+      "x": -742.5256958,
+      "y": 602.6468506,
+      "enabled": true,
+      "params": {
+        "members": "26,27,25,29,30,31,32,34",
+        "padding": 26,
+        "spacing": 22,
+        "depthTolerance": 0
+      }
+    },
+    {
+      "id": 29,
+      "kind": "mod.automation",
+      "title": "Offset X",
+      "x": -711.3256836,
+      "y": 833.046875,
+      "enabled": true,
+      "params": {
+        "curve": [
+          {
+            "t": 0.0003175844613,
+            "v": 0.5042169094,
+            "e": 0
+          },
+          {
+            "t": 0.1385005563,
+            "v": 0.4663381577,
+            "e": 3
+          },
+          {
+            "t": 0.2306225449,
+            "v": 0.6153282523,
+            "e": 3
+          },
+          {
+            "t": 0.3386276364,
+            "v": 0.6809846163,
+            "e": 3
+          },
+          {
+            "t": 0.470457375,
+            "v": 0.6431058049,
+            "e": 3
+          },
+          {
+            "t": 0.6292883754,
+            "v": 0.4835740328,
+            "e": 3
+          },
+          {
+            "t": 0.7229986787,
+            "v": 0.3400754929,
+            "e": 3
+          },
+          {
+            "t": 0.8516517878,
+            "v": 0.3148229718,
+            "e": 3
+          },
+          {
+            "t": 0.9993646145,
+            "v": 0.3085098863,
+            "e": 3
+          }
+        ],
+        "bipolar": true,
+        "depth": 1,
+        "offset": 0,
+        "loop": false,
+        "loopLength": 1,
+        "smooth": true,
+        "smoothing": 0.6690000296,
+        "slice": false,
+        "start": 0,
+        "finish": 10,
+        "sliceColor": "#FF9D4DFF"
+      }
+    },
+    {
+      "id": 30,
+      "kind": "mod.automation",
+      "title": "Offset Y",
+      "x": -711.3256836,
+      "y": 1032.246826,
+      "enabled": true,
+      "params": {
+        "curve": [
+          {
+            "t": 0.008259135298,
+            "v": 0.5042169094,
+            "e": 0
+          },
+          {
+            "t": 0.06861492246,
+            "v": 0.6115401387,
+            "e": 3
+          },
+          {
+            "t": 0.1718550771,
+            "v": 0.6494189501,
+            "e": 3
+          },
+          {
+            "t": 0.2449173331,
+            "v": 0.6494189501,
+            "e": 3
+          },
+          {
+            "t": 0.3148029745,
+            "v": 0.6557320356,
+            "e": 3
+          },
+          {
+            "t": 0.4911054075,
+            "v": 0.4284593463,
+            "e": 3
+          },
+          {
+            "t": 0.6102286577,
+            "v": 0.5105300546,
+            "e": 3
+          },
+          {
+            "t": 0.6896441579,
+            "v": 0.4410856366,
+            "e": 3
+          },
+          {
+            "t": 0.7722362876,
+            "v": 0.6431058049,
+            "e": 3
+          },
+          {
+            "t": 0.9898347855,
+            "v": 0.6431058049,
+            "e": 0
+          }
+        ],
+        "bipolar": true,
+        "depth": 1,
+        "offset": 0,
+        "loop": false,
+        "loopLength": 1,
+        "smooth": true,
+        "smoothing": 0.4770000279,
+        "slice": false,
+        "start": 0,
+        "finish": 10,
+        "sliceColor": "#FF9D4DFF"
+      }
+    },
+    {
+      "id": 31,
+      "kind": "mod.automation",
+      "title": "Zooming Automation",
+      "x": -711.3256836,
+      "y": 1231.446777,
+      "enabled": true,
+      "params": {
+        "curve": [
+          {
+            "t": 0,
+            "v": 0,
+            "e": 0
+          },
+          {
+            "t": 0.09402787685,
+            "v": 0.9949488044,
+            "e": 3
+          },
+          {
+            "t": 0.317979604,
+            "v": 0.8072472215,
+            "e": 3
+          },
+          {
+            "t": 0.5101651549,
+            "v": 0.5042169094,
+            "e": 3
+          },
+          {
+            "t": 0.7579414845,
+            "v": 0.4663381577,
+            "e": 3
+          },
+          {
+            "t": 0.9866581559,
+            "v": 0.5862876177,
+            "e": 0
+          }
+        ],
+        "bipolar": false,
+        "depth": 1,
+        "offset": 0,
+        "loop": false,
+        "loopLength": 1,
+        "smooth": false,
+        "smoothing": 0.200000003,
+        "slice": false,
+        "start": 0,
+        "finish": 10,
+        "sliceColor": "#FF9D4DFF"
+      }
+    },
+    {
+      "id": 32,
+      "kind": "math.arithmetic",
+      "title": "Arithmetic",
+      "x": -454.5256653,
+      "y": 665.046875,
+      "enabled": true,
+      "params": {
+        "op": 2,
+        "bValue": 3.944084167,
+        "gain": 1,
+        "offset": 1
+      }
+    },
+    {
+      "id": 34,
+      "kind": "sort.sticky",
+      "title": "Sticky Note",
+      "x": -711.3256836,
+      "y": 665.046875,
+      "enabled": true,
+      "params": {
+        "text": "Hi!\nI control how the camera moves."
+      }
+    },
+    {
+      "id": 35,
+      "kind": "sort.sticky",
+      "title": "Sticky Note",
+      "x": 354.1245117,
+      "y": 664.2474976,
+      "enabled": true,
+      "params": {
+        "text": "I compose the video and myself!"
+      }
+    },
+    {
+      "id": 36,
+      "kind": "sort.sticky",
+      "title": "Sticky Note",
+      "x": 584.0130615,
+      "y": 455.2825928,
+      "enabled": true,
+      "params": {
+        "text": "Demo for PluseForge 0.0.3"
+      }
+    },
+    {
+      "id": 37,
+      "kind": "sort.group",
+      "title": "Beat",
+      "x": -359.2113342,
+      "y": 977.3438721,
+      "enabled": true,
+      "params": {
+        "members": "38,39,40,42",
+        "padding": 26,
+        "spacing": 22,
+        "depthTolerance": 1
+      }
+    },
+    {
+      "id": 38,
+      "kind": "time.pulse",
+      "title": "Beat Pulse",
+      "x": -328.011322,
+      "y": 1039.743896,
+      "enabled": true,
+      "params": {
+        "bpm": 88,
+        "division": 2,
+        "decay": 0.5,
+        "offset": 0
+      }
+    },
+    {
+      "id": 39,
+      "kind": "dbg.meter",
+      "title": "VU / Digital Meter",
+      "x": -328.011322,
+      "y": 1183.743896,
+      "enabled": true,
+      "params": {
+        "mode": 1,
+        "ballistics": 0.5500000119
+      }
+    },
+    {
+      "id": 40,
+      "kind": "math.arithmetic",
+      "title": "Arithmetic",
+      "x": -71.21130371,
+      "y": 1039.743896,
+      "enabled": true,
+      "params": {
+        "op": 2,
+        "bValue": 0.6909999847,
+        "gain": 1,
+        "offset": 0
+      }
+    },
+    {
+      "id": 42,
+      "kind": "mod.ringbuffer",
+      "title": "Ringbuffer",
+      "x": -71.21130371,
+      "y": 1162.143921,
+      "enabled": true,
+      "params": {
+        "size": 64,
+        "speed": 0.5
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": 2,
+      "fromPort": 0,
+      "to": 4,
+      "toPort": 0
+    },
+    {
+      "from": 1,
+      "fromPort": 0,
+      "to": 15,
+      "toPort": 0
+    },
+    {
+      "from": 15,
+      "fromPort": 1,
+      "to": 14,
+      "toPort": 0
+    },
+    {
+      "from": 15,
+      "fromPort": 0,
+      "to": 13,
+      "toPort": 0
+    },
+    {
+      "from": 13,
+      "fromPort": 0,
+      "to": 16,
+      "toPort": 0
+    },
+    {
+      "from": 14,
+      "fromPort": 0,
+      "to": 16,
+      "toPort": 1
+    },
+    {
+      "from": 16,
+      "fromPort": 0,
+      "to": 2,
+      "toPort": 0
+    },
+    {
+      "from": 16,
+      "fromPort": 0,
+      "to": 11,
+      "toPort": 0
+    },
+    {
+      "from": 20,
+      "fromPort": 0,
+      "to": 9,
+      "toPort": 0
+    },
+    {
+      "from": 4,
+      "fromPort": 0,
+      "to": 20,
+      "toPort": 0
+    },
+    {
+      "from": 9,
+      "fromPort": 0,
+      "to": 23,
+      "toPort": 1
+    },
+    {
+      "from": 23,
+      "fromPort": 0,
+      "to": 10,
+      "toPort": 0
+    },
+    {
+      "from": 22,
+      "fromPort": 0,
+      "to": 24,
+      "toPort": 0
+    },
+    {
+      "from": 24,
+      "fromPort": 0,
+      "to": 23,
+      "toPort": 0
+    },
+    {
+      "from": 25,
+      "fromPort": 0,
+      "to": 24,
+      "toPort": 1
+    },
+    {
+      "from": 26,
+      "fromPort": 0,
+      "to": 25,
+      "toPort": 0
+    },
+    {
+      "from": 27,
+      "fromPort": 0,
+      "to": 25,
+      "toPort": 1
+    },
+    {
+      "from": 29,
+      "fromPort": 0,
+      "to": 24,
+      "toPort": 3
+    },
+    {
+      "from": 30,
+      "fromPort": 0,
+      "to": 24,
+      "toPort": 4
+    },
+    {
+      "from": 31,
+      "fromPort": 0,
+      "to": 32,
+      "toPort": 0
+    },
+    {
+      "from": 32,
+      "fromPort": 0,
+      "to": 26,
+      "toPort": 0
+    },
+    {
+      "from": 32,
+      "fromPort": 0,
+      "to": 27,
+      "toPort": 1
+    },
+    {
+      "from": 38,
+      "fromPort": 0,
+      "to": 39,
+      "toPort": 0
+    },
+    {
+      "from": 39,
+      "fromPort": 0,
+      "to": 40,
+      "toPort": 0
+    },
+    {
+      "from": 40,
+      "fromPort": 0,
+      "to": 4,
+      "toPort": 1
+    },
+    {
+      "from": 39,
+      "fromPort": 0,
+      "to": 42,
+      "toPort": 0
+    },
+    {
+      "from": 42,
+      "fromPort": 1,
+      "to": 9,
+      "toPort": 3
+    }
+  ]
+}
