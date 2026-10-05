@@ -455,6 +455,17 @@ docs         rendering notes and the README overlay image
   shader fills a window-sized quad and flips about the window height, which
   mirrors or drops every box in a target of another size. `--shot` follows the
   factor too, which is how the pass can be inspected without an export.
+- Layout metrics come in three kinds, each with its helper in Theme.h: logical
+  (`ui::s`, GUI scale x render scale), the graph's world space (`ui::sWorld`, GUI
+  scale only - the canvas zoom carries the rest) and raw screen pixels a panel
+  was tuned with (`ui::pixelOffset` for offsets, `ui::pixelText` to undo the
+  render scale before a text helper applies it). Both pixel helpers are
+  identities at render scale 1, so the 1:1 editor never changes, but without
+  them a hyper resolution pass grows the logical rows while the raw spacing
+  stays put and the sections collide (the Inspector was drawn that way).
+  `visualFont`/`visualInset`/`visualHandle`/`visualStroke` scale their pixel
+  clamps with the render scale for the same reason - a clamped font would stop
+  growing while its block kept scaling.
 - Geometry (`geom.primitives`) owns primitives only and must not read
   `ctx.audio`/`ctx.analysis`. Spectrum and waveform shapes are
   `render.spectrum` effects; `Project::fromJson` converts old Geometry shapes

@@ -495,7 +495,8 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
         }
         ui::drawTextClipped(Rectangle{box.x + 10.0f * view.zoom, box.y,
                                       box.width - 20.0f * view.zoom, header},
-                            title, 12.5f * view.zoom, colours.ink, ui::Align::Left, true);
+                            title, ui::pixelText(12.5f * view.zoom), colours.ink,
+                            ui::Align::Left, true);
     }
 
     // ---- draw nodes -------------------------------------------------------
@@ -532,11 +533,11 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                                       0.06f, 6, t.accent);
         }
         ui::drawText(Rectangle{box.x + 8.0f * view.zoom, box.y, box.width - 16.0f, headerHeight},
-                     node.displayTitle().c_str(), 13.0f * view.zoom,
+                     node.displayTitle().c_str(), ui::pixelText(13.0f * view.zoom),
                      sorting ? colours.ink : ui::readableOn(accent), ui::Align::Left, true);
         if (!node.enabled) {
             ui::drawText(Rectangle{box.x, box.y, box.width - 6.0f * view.zoom, headerHeight},
-                         "off", 11.0f * view.zoom,
+                         "off", ui::pixelText(11.0f * view.zoom),
                          palette::withAlpha(sorting ? colours.ink : ui::readableOn(accent), 0.85f),
                          ui::Align::Right);
         }
@@ -553,7 +554,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                 ui::drawTextClipped(
                     Rectangle{position.x + 10.0f * view.zoom, position.y - portRowHeight() * 0.5f * view.zoom,
                               box.width * 0.55f, portRowHeight() * view.zoom},
-                    port.name.c_str(), 10.0f * view.zoom, t.text);
+                    port.name.c_str(), ui::pixelText(10.0f * view.zoom), t.text);
             }
         }
         // outputs (drawn from the bottom up so the first output is highest)
@@ -575,7 +576,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
                     Rectangle{position.x - 10.0f * view.zoom - box.width * 0.5f,
                               position.y - portRowHeight() * 0.5f * view.zoom, box.width * 0.5f,
                               portRowHeight() * view.zoom},
-                    port.name.c_str(), 10.0f * view.zoom, t.text,
+                    port.name.c_str(), ui::pixelText(10.0f * view.zoom), t.text,
                     ui::Align::Right);
             }
         }
@@ -600,7 +601,7 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
             const float badgeSize = std::min(18.0f * view.zoom, box.height * 0.35f);
             const Rectangle badgeRect{box.x, box.y + box.height * 0.30f, box.width,
                                       box.height * 0.36f};
-            ui::drawText(badgeRect, badge.c_str(), badgeSize,
+            ui::drawText(badgeRect, badge.c_str(), ui::pixelText(badgeSize),
                          palette::withAlpha(t.text, 0.95f), ui::Align::Center, true);
         }
         // Sorting blocks carry nothing to evaluate, so their footer stays empty
@@ -609,11 +610,11 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
             char info[96];
             if (!node.status.empty()) {
                 std::snprintf(info, sizeof(info), "%s", node.status.c_str());
-                ui::drawTextClipped(footer, info, 10.0f * view.zoom, t.danger);
+                ui::drawTextClipped(footer, info, ui::pixelText(10.0f * view.zoom), t.danger);
             } else {
                 std::snprintf(info, sizeof(info), "%s  %.2f ms", node.def->category.c_str(),
                               node.lastEvalMs);
-                ui::drawTextClipped(footer, info, 10.0f * view.zoom,
+                ui::drawTextClipped(footer, info, ui::pixelText(10.0f * view.zoom),
                                     palette::withAlpha(t.textDim, 0.9f));
             }
         }

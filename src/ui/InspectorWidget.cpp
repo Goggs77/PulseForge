@@ -21,6 +21,13 @@ float kGap() { return ui::s(4.0f); }
 float kLabelWidth() { return ui::s(118.0f); }
 float kCurveHeight() { return ui::s(132.0f); }
 
+// The panel's rows are logical (kRow/kGap) but its spacing was tuned with raw
+// screen pixels. px() keeps those exactly as they are in the 1:1 editor and
+// scales them for the export hyper resolution pass, which draws the same layout
+// with more pixels - without it the logical rows grew while the offsets did not
+// and the sections collided.
+float px(float pixels) { return ui::pixelOffset(pixels); }
+
 float labelWidthFor(Rectangle cursor) { return cursor.width < ui::s(300.0f) ? ui::s(92.0f) : kLabelWidth(); }
 
 // Clamps the scroll offset, handles the wheel and draws the scroll bar. Called
@@ -120,24 +127,24 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
             break;
 
         case ParamKind::Int: {
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(14.0f)},
                                 param.label.c_str(), 12.0f, t.textDim);
             int value = param.intValue();
-            if (ui::intField(Rectangle{cursor.x, cursor.y + 14.0f, cursor.width, kRow()},
+            if (ui::intField(Rectangle{cursor.x, cursor.y + px(14.0f), cursor.width, kRow()},
                              &value, static_cast<int>(param.minValue),
                              static_cast<int>(param.maxValue),
                              ui::widgetId(node.id, param.key.c_str()))) {
                 param.setInt(value);
                 state.project.dirty = true;
             }
-            cursor.y += kRow() + 18.0f;
+            cursor.y += kRow() + px(18.0f);
             break;
         }
 
         case ParamKind::Curve: {
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 16.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(16.0f)},
                                 param.label.c_str(), 12.0f, t.textDim);
-            cursor.y += 18.0f;
+            cursor.y += px(18.0f);
             const bool bipolar = node.pbool("bipolar", false);
             const double duration = state.project.effectiveDuration(state.clip.duration());
             double playhead01 =
@@ -154,7 +161,7 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
                                 ui::widgetId(node.id, param.key.c_str()))) {
                 state.project.dirty = true;
             }
-            cursor.y += kCurveHeight() + 6.0f;
+            cursor.y += kCurveHeight() + px(6.0f);
             break;
         }
 
@@ -162,9 +169,9 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
             // A grid of numeric boxes: the diagonal identity is visible at a
             // glance, which sliders never made clear.
             const int columns = std::clamp(node.pint("size", 1) + 2, 2, 4);
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 16.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(16.0f)},
                                 param.label.c_str(), 12.0f, t.textDim);
-            cursor.y += 18.0f;
+            cursor.y += px(18.0f);
             const float gap = ui::s(4.0f);
             const float cellWidth =
                 (cursor.width - gap * static_cast<float>(columns - 1)) / static_cast<float>(columns);
@@ -189,7 +196,7 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
         }
 
         default:
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(14.0f)},
                                 param.label.c_str(), 12.0f, t.textDim);
             // Logarithmic parameters are frequencies: the track follows the way
             // the ear (and the analysis) divides the spectrum, and the readout is
@@ -207,13 +214,13 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
                 displayed = std::clamp(effective, std::min(param.minValue, param.maxValue),
                                        std::max(param.minValue, param.maxValue));
             }
-            if (ui::slider(Rectangle{cursor.x, cursor.y + 14.0f, cursor.width, kRow()}, nullptr,
+            if (ui::slider(Rectangle{cursor.x, cursor.y + px(14.0f), cursor.width, kRow()}, nullptr,
                            &displayed, param.minValue, param.maxValue, param.step, valueFormat,
                            sliderId, param.logarithmic)) {
                 param.value = displayed;
                 state.project.dirty = true;
             }
-            cursor.y += kRow() + 18.0f;
+            cursor.y += kRow() + px(18.0f);
             break;
     }
 }
@@ -239,36 +246,36 @@ void drawInspector(UiState &state, Rectangle bounds) {
     const ui::Theme &t = ui::theme();
     ui::panel(bounds, "Inspector");
 
-    const Rectangle view{bounds.x + 1.0f, bounds.y + 26.0f, bounds.width - 2.0f,
-                         bounds.height - 27.0f};
+    const Rectangle view{bounds.x + px(1.0f), bounds.y + px(26.0f), bounds.width - px(2.0f),
+                         bounds.height - px(27.0f)};
     Node *node = state.selectedNode > 0 ? state.project.graph.find(state.selectedNode) : nullptr;
 
     ui::beginScroll(view);
-    Rectangle cursor{view.x + 10.0f, view.y + 8.0f - state.inspectorScroll, view.width - 34.0f,
+    Rectangle cursor{view.x + px(10.0f), view.y + px(8.0f) - state.inspectorScroll, view.width - px(34.0f),
                      kRow()};
 
     if (!node) {
         Project &p = state.project;
 
-        ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, 18.0f}, "Project");
-        cursor.y += 24.0f;
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 60.0f, kRow()}, "Name", 12.0f, t.textDim);
-        if (ui::textField(Rectangle{cursor.x + 60.0f, cursor.y, cursor.width - 60.0f, kRow()},
+        ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, px(18.0f)}, "Project");
+        cursor.y += px(24.0f);
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(60.0f), kRow()}, "Name", 12.0f, t.textDim);
+        if (ui::textField(Rectangle{cursor.x + px(60.0f), cursor.y, cursor.width - px(60.0f), kRow()},
                           &p.name, nullptr, 8101)) {
             p.dirty = true;
         }
         cursor.y += kRow() + kGap();
 
-        ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, 18.0f}, "Video");
-        cursor.y += 24.0f;
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 60.0f, kRow()}, "Width", 12.0f, t.textDim);
-        if (ui::intField(Rectangle{cursor.x + 60.0f, cursor.y, cursor.width - 60.0f, kRow()},
+        ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, px(18.0f)}, "Video");
+        cursor.y += px(24.0f);
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(60.0f), kRow()}, "Width", 12.0f, t.textDim);
+        if (ui::intField(Rectangle{cursor.x + px(60.0f), cursor.y, cursor.width - px(60.0f), kRow()},
                          &p.video.width, 16, 7680, 8102)) {
             p.dirty = true;
         }
         cursor.y += kRow() + kGap();
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 60.0f, kRow()}, "Height", 12.0f, t.textDim);
-        if (ui::intField(Rectangle{cursor.x + 60.0f, cursor.y, cursor.width - 60.0f, kRow()},
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(60.0f), kRow()}, "Height", 12.0f, t.textDim);
+        if (ui::intField(Rectangle{cursor.x + px(60.0f), cursor.y, cursor.width - px(60.0f), kRow()},
                          &p.video.height, 16, 4320, 8103)) {
             p.dirty = true;
         }
@@ -279,10 +286,10 @@ void drawInspector(UiState &state, Rectangle bounds) {
                                           "1080x1920"};
             static const int widths[] = {1280, 1920, 2560, 3840, 1080};
             static const int heights[] = {720, 1080, 1440, 2160, 1920};
-            const float presetWidth = (cursor.width - 4.0f * kGap()) / 5.0f;
+            const float presetWidth = (cursor.width - px(4.0f) * kGap()) / 5.0f;
             for (int i = 0; i < 5; ++i) {
                 const Rectangle r{cursor.x + static_cast<float>(i) * (presetWidth + kGap()),
-                                  cursor.y, presetWidth, 20.0f};
+                                  cursor.y, presetWidth, px(20.0f)};
                 if (ui::smallButton(r, names[i],
                                     p.video.width == widths[i] && p.video.height == heights[i])) {
                     p.video.width = widths[i];
@@ -290,12 +297,12 @@ void drawInspector(UiState &state, Rectangle bounds) {
                     p.dirty = true;
                 }
             }
-            cursor.y += 26.0f;
+            cursor.y += px(26.0f);
         }
 
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f},
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(14.0f)},
                             "Target frame rate", 12.0f, t.textDim);
-        cursor.y += 14.0f;
+        cursor.y += px(14.0f);
         {
             float fps = static_cast<float>(p.video.fps);
             if (ui::slider(Rectangle{cursor.x, cursor.y, cursor.width, kRow()}, "fps", &fps, 1.0f,
@@ -304,7 +311,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
                 p.dirty = true;
             }
         }
-        cursor.y += kRow() + 6.0f;
+        cursor.y += kRow() + px(6.0f);
 
         if (ui::checkbox(Rectangle{cursor.x, cursor.y, cursor.width, kRow()},
                          "Duration follows the audio", &p.video.useAudioDuration)) {
@@ -313,35 +320,35 @@ void drawInspector(UiState &state, Rectangle bounds) {
         cursor.y += kRow() + kGap();
         if (!p.video.useAudioDuration) {
             float duration = static_cast<float>(p.video.duration);
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(14.0f)},
                                 "Duration (s)", 12.0f, t.textDim);
-            cursor.y += 14.0f;
+            cursor.y += px(14.0f);
             if (ui::slider(Rectangle{cursor.x, cursor.y, cursor.width, kRow()}, nullptr, &duration,
                            0.5f, 900.0f, 0.1f, "%.1f", 8105)) {
                 p.video.duration = duration;
                 p.dirty = true;
             }
-            cursor.y += kRow() + 8.0f;
+            cursor.y += kRow() + px(8.0f);
         } else {
             float trim = static_cast<float>(p.video.trimStart);
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(14.0f)},
                                 "Trim start (s)", 12.0f, t.textDim);
-            cursor.y += 14.0f;
+            cursor.y += px(14.0f);
             if (ui::slider(Rectangle{cursor.x, cursor.y, cursor.width, kRow()}, nullptr, &trim, 0.0f,
                            static_cast<float>(std::max(1.0, state.clip.duration())), 0.01f,
                            "%.2f", 8106)) {
                 p.video.trimStart = trim;
                 p.dirty = true;
             }
-            cursor.y += kRow() + 8.0f;
+            cursor.y += kRow() + px(8.0f);
         }
 
-        ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, 18.0f}, "Media");
-        cursor.y += 24.0f;
+        ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, px(18.0f)}, "Media");
+        cursor.y += px(24.0f);
         ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, kRow()},
                             state.clip.valid() ? state.clip.path().c_str() : "no audio loaded",
                             11.0f, state.clip.valid() ? t.text : t.danger);
-        cursor.y += 20.0f;
+        cursor.y += px(20.0f);
         if (state.clip.valid()) {
             const int sourceKbps = static_cast<int>(p.audio.bitRate / 1000);
             std::string source = p.audio.codec.empty() ? "unknown" : audioCodecDisplayName(p.audio.codec);
@@ -352,17 +359,17 @@ void drawInspector(UiState &state, Rectangle bounds) {
                           state.clip.duration(), state.clip.channels(), state.clip.sampleRate(),
                           source.c_str(),
                           state.analysis ? static_cast<int>(state.analysis->frames.size()) : 0);
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 18.0f}, info, 10.5f,
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(18.0f)}, info, 10.5f,
                                 t.textDim);
         }
-        cursor.y += 22.0f;
-        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width * 0.5f - 2.0f, 26.0f},
+        cursor.y += px(22.0f);
+        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width * 0.5f - 2.0f, px(26.0f)},
                        "Load audio", true)) {
             openBrowser(state, "audio", "Open audio file",
                         ".wav,.mp3,.flac,.ogg,.m4a,.aac,.opus,.aiff", state.projectDirectory);
         }
-        if (ui::button(Rectangle{cursor.x + cursor.width * 0.5f + 2.0f, cursor.y,
-                                 cursor.width * 0.5f - 2.0f, 26.0f},
+        if (ui::button(Rectangle{cursor.x + cursor.width * 0.5f + px(2.0f), cursor.y,
+                                 cursor.width * 0.5f - px(2.0f), px(26.0f)},
                        "Re-analyse")) {
             if (state.clip.valid()) {
                 state.analysis = analyzeAudio(*state.clip.buffer(), AnalysisSettings{}, {},
@@ -370,20 +377,20 @@ void drawInspector(UiState &state, Rectangle bounds) {
                 setStatus(state, "Analysis recomputed");
             }
         }
-        cursor.y += 34.0f;
+        cursor.y += px(34.0f);
 
-        ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, 18.0f}, "Output");
-        cursor.y += 24.0f;
+        ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, px(18.0f)}, "Output");
+        cursor.y += px(24.0f);
         {
             const std::vector<std::string> containers = supportedContainers();
             int index = 0;
             for (size_t i = 0; i < containers.size(); ++i) {
                 if (containers[i] == p.output.container) index = static_cast<int>(i);
             }
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 78.0f, kRow()}, "Container", 12.0f,
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(78.0f), kRow()}, "Container", 12.0f,
                                 t.textDim);
             const int before = index;
-            ui::dropdown(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()}, &index,
+            ui::dropdown(Rectangle{cursor.x + px(78.0f), cursor.y, cursor.width - px(78.0f), kRow()}, &index,
                          containers, 8107);
             if (index != before) {
                 OutputSpec spec = outputSpecForContainer(containers[static_cast<size_t>(index)]);
@@ -395,7 +402,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
             }
             cursor.y += kRow() + kGap();
         }
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 78.0f, kRow()}, "Video", 12.0f, t.textDim);
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(78.0f), kRow()}, "Video", 12.0f, t.textDim);
         {
             // Encoders this build carries and the container can take; the
             // project's own choice stays visible even when it is unavailable so
@@ -418,7 +425,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
                 index = 0;
             }
             const int before = index;
-            ui::dropdown(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()}, &index,
+            ui::dropdown(Rectangle{cursor.x + px(78.0f), cursor.y, cursor.width - px(78.0f), kRow()}, &index,
                          labels, 8112);
             if (index != before && index >= 0 && index < static_cast<int>(ids.size())) {
                 p.output.videoCodec = ids[static_cast<size_t>(index)];
@@ -426,7 +433,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
             }
             cursor.y += kRow();
         }
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 78.0f, kRow()}, "Audio", 12.0f, t.textDim);
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(78.0f), kRow()}, "Audio", 12.0f, t.textDim);
         {
             // Same idea as the video row: only encoders this build has and the
             // container can mux, plus the project's own choice even when it is
@@ -449,7 +456,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
                 index = 0;
             }
             const int before = index;
-            ui::dropdown(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()}, &index,
+            ui::dropdown(Rectangle{cursor.x + px(78.0f), cursor.y, cursor.width - px(78.0f), kRow()}, &index,
                          labels, 8113);
             if (index != before && index >= 0 && index < static_cast<int>(ids.size())) {
                 p.output.audioCodec = ids[static_cast<size_t>(index)];
@@ -458,28 +465,28 @@ void drawInspector(UiState &state, Rectangle bounds) {
             cursor.y += kRow();
         }
         if (p.audio.transcodedAac && p.output.audioCodec == "aac") {
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(14.0f)},
                                 "imported audio was converted to AAC in memory", 10.5f,
                                 palette::withAlpha(t.textDim, 0.9f));
-            cursor.y += 16.0f;
+            cursor.y += px(16.0f);
         }
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 14.0f}, "Quality (CRF)",
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(14.0f)}, "Quality (CRF)",
                             12.0f, t.textDim);
-        cursor.y += 14.0f;
+        cursor.y += px(14.0f);
         if (ui::intSlider(Rectangle{cursor.x, cursor.y, cursor.width, kRow()}, nullptr, &p.output.crf,
                           0, 51, 8108)) {
             p.dirty = true;
         }
-        cursor.y += kRow() + 8.0f;
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 78.0f, kRow()}, "Preset", 12.0f, t.textDim);
-        if (ui::textField(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()},
+        cursor.y += kRow() + px(8.0f);
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(78.0f), kRow()}, "Preset", 12.0f, t.textDim);
+        if (ui::textField(Rectangle{cursor.x + px(78.0f), cursor.y, cursor.width - px(78.0f), kRow()},
                           &p.output.preset, nullptr, 8109)) {
             p.dirty = true;
         }
         cursor.y += kRow() + kGap();
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 78.0f, kRow()}, "Audio kbps", 12.0f,
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(78.0f), kRow()}, "Audio kbps", 12.0f,
                             t.textDim);
-        if (ui::textField(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()},
+        if (ui::textField(Rectangle{cursor.x + px(78.0f), cursor.y, cursor.width - px(78.0f), kRow()},
                           &p.output.audioBitrate, nullptr, 8110)) {
             p.dirty = true;
         }
@@ -495,52 +502,52 @@ void drawInspector(UiState &state, Rectangle bounds) {
                     index = static_cast<int>(i);
                 }
             }
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 78.0f, kRow()}, "Rate (Hz)", 12.0f,
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(78.0f), kRow()}, "Rate (Hz)", 12.0f,
                                 t.textDim);
             const int before = index;
-            ui::dropdown(Rectangle{cursor.x + 78.0f, cursor.y, cursor.width - 78.0f, kRow()}, &index,
+            ui::dropdown(Rectangle{cursor.x + px(78.0f), cursor.y, cursor.width - px(78.0f), kRow()}, &index,
                          rates, 8111);
             if (index != before) {
                 p.output.audioSampleRate = std::atoi(rates[static_cast<size_t>(index)].c_str());
                 p.dirty = true;
             }
-            cursor.y += kRow() + 8.0f;
+            cursor.y += kRow() + px(8.0f);
         }
 
-        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, 30.0f}, "Export video", true)) {
+        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, px(30.0f)}, "Export video", true)) {
             state.showExportDialog = true;
             updateExportExtension(state);
         }
-        cursor.y += 36.0f;
-        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, 26.0f}, "Save project as...")) {
+        cursor.y += px(36.0f);
+        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, px(26.0f)}, "Save project as...")) {
             openBrowser(state, "project-save", "Save project", ".pforge", state.projectDirectory);
         }
-        cursor.y += 32.0f;
+        cursor.y += px(32.0f);
         ui::endScroll();
         finishInspectorScroll(state, view, cursor.y);
         return;
     }
 
     // ---- selected block ---------------------------------------------------
-    ui::drawText(Rectangle{cursor.x, cursor.y, cursor.width, 20.0f}, node->def->label.c_str(),
+    ui::drawText(Rectangle{cursor.x, cursor.y, cursor.width, px(20.0f)}, node->def->label.c_str(),
                  15.0f, t.text, ui::Align::Left, true);
-    cursor.y += 22.0f;
+    cursor.y += px(22.0f);
     char subtitle[96];
     std::snprintf(subtitle, sizeof(subtitle), "%s  -  block %d", node->def->category.c_str(),
                   node->id);
-    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 16.0f}, subtitle, 11.0f,
+    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(16.0f)}, subtitle, 11.0f,
                         t.textDim);
-    cursor.y += 18.0f;
-    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 48.0f, kRow()}, "Title", 12.0f, t.textDim);
-    if (ui::textField(Rectangle{cursor.x + 48.0f, cursor.y, cursor.width - 48.0f, kRow()},
+    cursor.y += px(18.0f);
+    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, px(48.0f), kRow()}, "Title", 12.0f, t.textDim);
+    if (ui::textField(Rectangle{cursor.x + px(48.0f), cursor.y, cursor.width - px(48.0f), kRow()},
                       &node->title, nullptr, 8111)) {
         state.project.dirty = true;
     }
     cursor.y += kRow() + kGap();
     if (!node->status.empty()) {
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 16.0f}, node->status.c_str(),
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(16.0f)}, node->status.c_str(),
                             11.0f, t.danger);
-        cursor.y += 18.0f;
+        cursor.y += px(18.0f);
     }
 
     drawDescription(cursor, node->def->description);
@@ -552,9 +559,9 @@ void drawInspector(UiState &state, Rectangle bounds) {
             inputs += port.name;
         }
         if (!inputs.empty()) {
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 16.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(16.0f)},
                                 ("in:  " + inputs).c_str(), 10.5f, t.textDim);
-            cursor.y += 16.0f;
+            cursor.y += px(16.0f);
         }
         std::string outputs;
         for (const PortDesc &port : node->outputPorts()) {
@@ -562,32 +569,32 @@ void drawInspector(UiState &state, Rectangle bounds) {
             outputs += port.name;
         }
         if (!outputs.empty()) {
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 16.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(16.0f)},
                                 ("out: " + outputs).c_str(), 10.5f, t.textDim);
-            cursor.y += 16.0f;
+            cursor.y += px(16.0f);
         }
     }
 
-    cursor.y += 6.0f;
+    cursor.y += px(6.0f);
     std::string currentGroup;
     for (Param &param : node->params) {
         if (param.group != currentGroup) {
             currentGroup = param.group;
             if (!currentGroup.empty()) {
-                ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, 18.0f},
+                ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, px(18.0f)},
                                   currentGroup.c_str());
-                cursor.y += 24.0f;
+                cursor.y += px(24.0f);
             }
         }
         drawParam(state, *node, param, cursor);
     }
 
-    cursor.y += 4.0f;
+    cursor.y += px(4.0f);
     if (node->kind == "render.shader") {
         // The path is picked with the generic Browse button under the file
         // parameter; the ports follow that file, so they are rebuilt whenever
         // the path changes.
-        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, 26.0f}, "Reload shaders")) {
+        if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, px(26.0f)}, "Reload shaders")) {
             const int reloaded = state.renderer.shaders().reloadChanged();
             char message[64];
             std::snprintf(message, sizeof(message), "Reloaded %d shader(s)", reloaded);
@@ -595,7 +602,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
             refreshShaderPorts(state, *node, true);
         }
         refreshShaderPorts(state, *node);
-        cursor.y += 32.0f;
+        cursor.y += px(32.0f);
 
         // What the file asks for, so the port list is self-explanatory.
         if (!node->pstr("shader").empty()) {
@@ -604,18 +611,18 @@ void drawInspector(UiState &state, Rectangle bounds) {
                 if (!ports.empty()) ports += ", ";
                 ports += port.name;
             }
-            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 16.0f},
+            ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(16.0f)},
                                 ("inputs: " + ports).c_str(), 10.5f, t.textDim);
-            cursor.y += 18.0f;
+            cursor.y += px(18.0f);
         }
     }
-    if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, 26.0f}, "Delete block")) {
+    if (ui::button(Rectangle{cursor.x, cursor.y, cursor.width, px(26.0f)}, "Delete block")) {
         deleteSelectedNode(state);
         ui::endScroll();
         finishInspectorScroll(state, view, cursor.y);
         return;
     }
-    cursor.y += 32.0f;
+    cursor.y += px(32.0f);
     ui::endScroll();
     finishInspectorScroll(state, view, cursor.y);
 }

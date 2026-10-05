@@ -91,6 +91,22 @@ inline float textPixels(float size) {
     return size * theme().uiScale * theme().renderScale;
 }
 
+// The inverse, for a size that is already in screen pixels because it was derived
+// from the geometry it is drawn in (the canvas zoom, a block's own rect): the
+// render scale reached that geometry already, so it must not be applied a second
+// time - the text would grow again with the hyper resolution pass. At the normal
+// render scale this is the identity.
+inline float pixelText(float pixels) {
+    return theme().renderScale > 0.001f ? pixels / theme().renderScale : pixels;
+}
+
+// A measurement the layout was tuned in screen pixels (a fixed offset such as
+// "leave 14 px for the caption", used by panels that mix logical rows with raw
+// spacing). It carries no GUI scale - the 1:1 editor is untouched - but it does
+// follow the render scale, because a hyper resolution pass has to reproduce the
+// same layout with more pixels.
+inline float pixelOffset(float pixels) { return pixels * theme().renderScale; }
+
 // Ink colour that stays readable on top of `fill` (used for block headers and
 // filled buttons, whose colours come from the palette rather than the theme).
 Color readableOn(Color fill, float alpha = 1.0f);

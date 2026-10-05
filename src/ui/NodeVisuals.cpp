@@ -48,20 +48,28 @@ Color withAlpha(Color color, float alpha) { return palette::withAlpha(color, alp
 // clamps so text stays legible and handles stay grabbable at any canvas zoom.
 // Deriving them from the body (which is already scaled by the canvas zoom) keeps
 // every block internally consistent instead of mixing zoomed and fixed sizes.
+// The clamps are in screen pixels, so they follow the render scale of the pass
+// (the export hyper resolution draws the same block with more pixels) - without
+// it a clamped font would stop growing while its block kept scaling.
+float visualScale() { return std::max(1.0f, ui::theme().renderScale); }
+
 float visualInset(const Rectangle &body) {
-    return std::clamp(std::min(body.width, body.height) * 0.035f, 1.5f, 8.0f);
+    return std::clamp(std::min(body.width, body.height) * 0.035f, 1.5f * visualScale(),
+                      8.0f * visualScale());
 }
 
 float visualFont(const Rectangle &body, float ratio) {
-    return std::clamp(body.height * ratio, 7.0f, 19.0f);
+    return std::clamp(body.height * ratio, 7.0f * visualScale(), 19.0f * visualScale());
 }
 
 float visualHandle(const Rectangle &body, float ratio, float lo, float hi) {
-    return std::clamp(std::min(body.width, body.height) * ratio, lo, hi);
+    return std::clamp(std::min(body.width, body.height) * ratio, lo * visualScale(),
+                      hi * visualScale());
 }
 
 float visualStroke(const Rectangle &body, float ratio) {
-    return std::clamp(std::min(body.width, body.height) * ratio, 1.0f, 3.0f);
+    return std::clamp(std::min(body.width, body.height) * ratio, 1.0f * visualScale(),
+                      3.0f * visualScale());
 }
 
 // Filled strip built from a column array; one draw call for the whole shape.
@@ -127,8 +135,8 @@ void drawSpectrumVisual(UiState &state, const Node &node, Rectangle body, float 
     const float *row = analysis ? analysis->spectrumRow(state.frameContext.audioTime) : nullptr;
     const int bins = analysis ? analysis->spectrumBins : 0;
     if (!row || bins <= 0) {
-        ui::drawText(inner, "no analysis", visualFont(inner, 0.18f), withAlpha(t.textDim, 0.8f),
-                     ui::Align::Center);
+        ui::drawText(inner, "no analysis", ui::pixelText(visualFont(inner, 0.18f)),
+                     withAlpha(t.textDim, 0.8f), ui::Align::Center);
         return;
     }
 
@@ -182,8 +190,8 @@ void drawBandVisual(UiState &state, const Node &node, Rectangle body, float zoom
 
     const int capacity = node.historyA.empty() ? 0 : static_cast<int>(node.historyA.size());
     if (capacity <= 0) {
-        ui::drawText(inner, "waiting for audio", visualFont(inner, 0.18f), withAlpha(t.textDim, 0.8f),
-                     ui::Align::Center);
+        ui::drawText(inner, "waiting for audio", ui::pixelText(visualFont(inner, 0.18f)),
+                     withAlpha(t.textDim, 0.8f), ui::Align::Center);
         return;
     }
     static thread_local std::vector<float> input;
@@ -301,7 +309,7 @@ void drawWaveVisual(UiState &state, const Node &node, Rectangle body, float zoom
 
     const AudioPtr &audio = state.clip.buffer();
     if (!audio || audio->frameCount <= 0) {
-        ui::drawText(inner, "no audio loaded", visualFont(inner, 0.20f),
+        ui::drawText(inner, "no audio loaded", ui::pixelText(visualFont(inner, 0.20f)),
                      withAlpha(t.textDim, 0.8f), ui::Align::Center);
         return;
     }
@@ -383,7 +391,7 @@ void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoo
         // Value/time diagram: the same shape the Frequency Band block uses.
         const int capacity = static_cast<int>(node.historyA.size());
         if (capacity < 2) {
-            ui::drawText(inner, "waiting for a signal", visualFont(inner, 0.16f),
+            ui::drawText(inner, "waiting for a signal", ui::pixelText(visualFont(inner, 0.16f)),
                          withAlpha(t.textDim, 0.8f), ui::Align::Center);
             return;
         }
@@ -409,7 +417,8 @@ void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoo
                       static_cast<float>(dbfs));
         ui::drawTextClipped(Rectangle{inner.x + inset, inner.y, inner.width - inset * 2.0f,
                                       visualFont(inner, 0.16f) + 2.0f},
-                            text, visualFont(inner, 0.13f), withAlpha(t.text, 0.9f));
+                            text, ui::pixelText(visualFont(inner, 0.13f)),
+                            withAlpha(t.text, 0.9f));
         return;
     }
 
@@ -464,7 +473,7 @@ void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoo
     const float readoutHeight = visualFont(inner, 0.16f) + 2.0f;
     ui::drawTextClipped(Rectangle{inner.x + inset, inner.y + inner.height - readoutHeight,
                                   inner.width - inset * 2.0f, readoutHeight},
-                        text, visualFont(inner, 0.13f),
+                        text, ui::pixelText(visualFont(inner, 0.13f)),
                         dbfs > 0.0f ? t.danger : withAlpha(t.text, 0.92f));
 }
 
@@ -506,7 +515,7 @@ void drawGuardVisual(UiState &state, const Node &node, Rectangle body, float zoo
         }
         ui::drawText(Rectangle{cx - slot * 0.5f, lampY + radius + labelGap, slot,
                                visualFont(inner, 0.32f)},
-                     lamps[i].label, labelFont,
+                     lamps[i].label, ui::pixelText(labelFont),
                      withAlpha(level > 0.05f ? lamps[i].colour : t.textDim, 0.95f),
                      ui::Align::Center, level > 0.05f);
     }
@@ -527,8 +536,8 @@ void drawRingbufferVisual(UiState &state, const Node &node, Rectangle body, floa
 
     const int capacity = static_cast<int>(node.historyA.size());
     if (capacity < 2) {
-        ui::drawText(inner, "buffer empty", visualFont(inner, 0.25f), withAlpha(t.textDim, 0.8f),
-                     ui::Align::Center);
+        ui::drawText(inner, "buffer empty", ui::pixelText(visualFont(inner, 0.25f)),
+                     withAlpha(t.textDim, 0.8f), ui::Align::Center);
         return;
     }
     static thread_local std::vector<float> series;
@@ -656,11 +665,11 @@ void drawFilterVisual(UiState &state, const Node &node, Rectangle body, float zo
     char text[64];
     std::snprintf(text, sizeof(text), "%.2f Hz   Q %.2f", cutoff, q);
     ui::drawTextClipped(Rectangle{inner.x + 2.0f, inner.y, inner.width * 0.62f, textHeight}, text,
-                        visualFont(inner, 0.13f), withAlpha(t.text, 0.92f));
+                        ui::pixelText(visualFont(inner, 0.13f)), withAlpha(t.text, 0.92f));
     ui::drawTextClipped(Rectangle{inner.x + inner.width * 0.62f, inner.y,
                                   inner.width * 0.38f - 2.0f, textHeight},
-                        "drag pivot", visualFont(inner, 0.11f), withAlpha(t.textDim, 0.9f),
-                        ui::Align::Right);
+                        "drag pivot", ui::pixelText(visualFont(inner, 0.11f)),
+                        withAlpha(t.textDim, 0.9f), ui::Align::Right);
 }
 
 // Dynamics: a 4:3 value/time graph whose vertical axis runs from -60 dBFS
@@ -686,11 +695,13 @@ void drawDynamicsVisual(UiState &state, const Node &node, Rectangle body, float 
     char text[48];
     std::snprintf(text, sizeof(text), "DRY %.1f", reading("dryDb", -120.0));
     ui::drawTextClipped(Rectangle{inner.x + 2.0f, inner.y, inner.width * 0.5f - 3.0f, textHeight},
-                        text, visualFont(inner, 0.11f), withAlpha(t.textDim, 0.95f));
+                        text, ui::pixelText(visualFont(inner, 0.11f)),
+                        withAlpha(t.textDim, 0.95f));
     std::snprintf(text, sizeof(text), "WET %.1f", reading("wetDb", -120.0));
     ui::drawTextClipped(Rectangle{inner.x + inner.width * 0.5f, inner.y,
                                   inner.width * 0.5f - 2.0f, textHeight},
-                        text, visualFont(inner, 0.11f), withAlpha(t.accent, 0.95f),
+                        text, ui::pixelText(visualFont(inner, 0.11f)),
+                        withAlpha(t.accent, 0.95f),
                         ui::Align::Right);
 
     // 4:3 plot, fitted to both the block width and the leftover height.
@@ -729,7 +740,8 @@ void drawDynamicsVisual(UiState &state, const Node &node, Rectangle body, float 
             std::clamp(y - labelHeight * 0.5f, plot.y + 1.0f,
                        plot.y + plot.height - labelHeight - 1.0f);
         ui::drawTextClipped(Rectangle{plot.x + 2.0f, labelY + 1.0f, plot.width * 0.30f, labelHeight * 1.59f},
-                            label, gridFont * 0.64f, withAlpha(t.textDim, 0.75f)); // move text down for visability
+                            label, ui::pixelText(gridFont * 0.64f),
+                            withAlpha(t.textDim, 0.75f)); // move text down for visability
     }
 
     float thresholdDb = node.pfloat("threshold", -18.0f);
@@ -745,12 +757,13 @@ void drawDynamicsVisual(UiState &state, const Node &node, Rectangle body, float 
                   node.pint("mode", 0) == 1 ? "EXP" : "COMP", reading("gainReductionDb", 0.0));
     ui::drawTextClipped(Rectangle{plot.x + plot.width * 0.40f, plot.y + 1.0f,
                                   plot.width * 0.60f - 3.0f, gridFont + 2.0f},
-                        text, gridFont, withAlpha(modeColor, 0.95f), ui::Align::Right);
+                        text, ui::pixelText(gridFont), withAlpha(modeColor, 0.95f),
+                        ui::Align::Right);
 
     const int capacity = static_cast<int>(node.historyA.size());
     if (capacity < 2) {
-        ui::drawText(plot, "waiting for audio", visualFont(plot, 0.14f), withAlpha(t.textDim, 0.8f),
-                     ui::Align::Center);
+        ui::drawText(plot, "waiting for audio", ui::pixelText(visualFont(plot, 0.14f)),
+                     withAlpha(t.textDim, 0.8f), ui::Align::Center);
         return;
     }
     static thread_local std::vector<float> drySeries;
@@ -788,13 +801,14 @@ void drawNoteVisual(UiState &state, const Node &node, Rectangle body, float zoom
     const float size = std::max(7.0f, kNoteFont * zoom);
     const SortingColours colours = sortingColours();
     if (text.empty()) {
-        ui::drawTextWrapped(inner, kNotePlaceholder, size, withAlpha(colours.ink, 0.65f),
-                            kNoteLineHeight * zoom);
+        ui::drawTextWrapped(inner, kNotePlaceholder, ui::pixelText(size),
+                            withAlpha(colours.ink, 0.65f), ui::sWorld(kNoteLineHeight * zoom));
         return;
     }
     // Sorting blocks use the theme's strongest ink: the point of a note is that
     // it can be read, not that it matches the block colours.
-    ui::drawTextWrapped(inner, text.c_str(), size, colours.ink, kNoteLineHeight * zoom);
+    ui::drawTextWrapped(inner, text.c_str(), ui::pixelText(size), colours.ink,
+                        ui::sWorld(kNoteLineHeight * zoom));
 }
 
 }  // namespace
@@ -820,8 +834,11 @@ float nodeVisualHeight(const Node &node) {
         const size_t hash = std::hash<std::string>{}(shown);
         const auto found = cache.find(node.id);
         if (found != cache.end() && found->second.first == hash) return found->second.second;
-        const float measured =
-            ui::textWrappedHeight(shown, kNoteFont, ui::s(kNoteTextWidth), kNoteLineHeight);
+        // The height is in world units, so the measurement has to match the
+        // world-space font and width (ui::sWorld) rather than the render scale.
+        const float measured = ui::textWrappedHeight(shown, ui::pixelText(kNoteFont),
+                                                     ui::sWorld(kNoteTextWidth),
+                                                     ui::sWorld(kNoteLineHeight));
         const float height = std::clamp(measured + kNotePadding * 2.0f, 56.0f, 420.0f);
         cache[node.id] = {hash, height};
         return height;
