@@ -86,6 +86,41 @@ bool writePictureBmp(const std::string &path, int width, int height) {
     return out.good();
 }
 
+// A solid-colour 24-bit BMP. The Blend check feeds a white and a black one, so
+// the sampled centre proves which input the opacity let through.
+bool writeSolidBmp(const std::string &path, int width, int height, unsigned char r,
+                   unsigned char g, unsigned char b) {
+    std::ofstream out(path.c_str(), std::ios::binary);
+    if (!out.good()) return false;
+    const int stride = (width * 3 + 3) & ~3;
+    const unsigned int imageBytes = static_cast<unsigned int>(stride) * height;
+    out.write("BM", 2);
+    writeLE32(out, 54u + imageBytes);
+    writeLE32(out, 0u);
+    writeLE32(out, 54u);
+    writeLE32(out, 40u);
+    writeLE32(out, static_cast<unsigned int>(width));
+    writeLE32(out, static_cast<unsigned int>(height));
+    writeLE16(out, 1);
+    writeLE16(out, 24);
+    writeLE32(out, 0u);
+    writeLE32(out, imageBytes);
+    writeLE32(out, 2835u);
+    writeLE32(out, 2835u);
+    writeLE32(out, 0u);
+    writeLE32(out, 0u);
+    std::vector<unsigned char> row(static_cast<size_t>(stride), 0);
+    for (int x = 0; x < width; ++x) {
+        row[static_cast<size_t>(x) * 3 + 0] = b;
+        row[static_cast<size_t>(x) * 3 + 1] = g;
+        row[static_cast<size_t>(x) * 3 + 2] = r;
+    }
+    for (int y = 0; y < height; ++y) {
+        out.write(reinterpret_cast<const char *>(row.data()), stride);
+    }
+    return out.good();
+}
+
 bool generateTestWav(const std::string &path, double seconds, int sampleRate) {
     const int frames = static_cast<int>(seconds * sampleRate);
     std::vector<float> samples(static_cast<size_t>(frames), 0.0f);
@@ -1465,6 +1500,130 @@ int main(int argc, char **argv) {
                     } else {
                         std::printf("  render   : Picture decodes upright, Textbox draws over its "
                                     "layer, animated gif advances\n");
+                    }
+                }
+
+                // Blend: mode 0 cross fades A towards B by Opacity, and a
+                // Scalar patched into the Opacity port takes over from the
+                // Inspector value (the slider follows what the block used).
+                if (result == 0) {
+                    const std::string whitePath = "selftest_blend_a.bmp";
+                    const std::string blackPath = "selftest_blend_b.bmp";
+                    bool ok = writeSolidBmp(whitePath, 24, 24, 255, 255, 255) &&
+                              writeSolidBmp(blackPath, 24, 24, 0, 0, 0);
+                    std::string what;
+                    Graph blendGraph;
+                    int blendId = 0;
+                    if (ok) {
+                        const int whiteId = blendGraph.addNode("render.picture", 0, 0)->id;
+                        const int blackId = blendGraph.addNode("render.picture", 200, 0)->id;
+                        blendId = blendGraph.addNode("fx.blend", 400, 0)->id;
+                        const int outputId = blendGraph.addNode("out.video", 600, 0)->id;
+                        Node *white = blendGraph.find(whiteId);
+                        Node *black = blendGraph.find(blackId);
+                        Node *blend = blendGraph.find(blendId);
+                        if (!white || !black || !blend) {
+                            ok = false;
+                            what = "the Blend block is not registered";
+                        } else {
+                            white->setText("file", whitePath);
+                            black->setText("file", blackPath);
+                            white->setInt("mode", 0);   // Raw: the file's own pixels
+                            black->setInt("mode", 0);
+                            blend->setInt("mode", 0);   // Cross fade: A -> B
+                            blend->setFloat("opacity", 0.0f);
+                            std::string why;
+                            ok = blendGraph.connect(whiteId, 0, blendId, 0, &why) &&
+                                 blendGraph.connect(blackId, 0, blendId, 1, &why) &&
+                                 blendGraph.connect(blendId, 0, outputId, 0, &why);
+                            if (!ok) what = why;
+                        }
+                    }
+                    const auto blendCentre = [&](double *published) {
+                        EvalContext ctx;
+                        ctx.width = 160;
+                        ctx.height = 90;
+                        ctx.fps = 30.0f;
+                        ctx.duration = 1.0;
+                        ctx.time = 0.0;
+                        ctx.frame = 0;
+                        ctx.audioTime = 0.0;
+                        std::string renderError;
+                        if (!renderer.renderFrame(blendGraph, ctx, &renderError)) {
+                            return Vector3{-1.0f, -1.0f, -1.0f};
+                        }
+                        const Node *node = blendGraph.find(blendId);
+                        if (!node || node->outputs.empty() || !node->outputs[0].image ||
+                            !node->outputs[0].image->valid()) {
+                            return Vector3{-1.0f, -1.0f, -1.0f};
+                        }
+                        if (published) {
+                            float effective = -1.0f;
+                            *published = node->effectiveParam("opacity", &effective)
+                                              ? static_cast<double>(effective)
+                                              : -1.0;
+                        }
+                        Image pixels =
+                            LoadImageFromTexture(node->outputs[0].image->texture.texture);
+                        const int x = pixels.width / 2;
+                        const int y = static_cast<int>(pixels.height * 0.45f);
+                        const unsigned char *pixel =
+                            static_cast<const unsigned char *>(pixels.data) +
+                            (static_cast<size_t>(y) * pixels.width + x) * 4;
+                        const Vector3 value{static_cast<float>(pixel[0]),
+                                            static_cast<float>(pixel[1]),
+                                            static_cast<float>(pixel[2])};
+                        UnloadImage(pixels);
+                        return value;
+                    };
+                    if (ok) {
+                        // Opacity 0: A (white) fills the frame.
+                        const Vector3 atZero = blendCentre(nullptr);
+                        if (atZero.x < 0.0f) {
+                            ok = false;
+                            what = "the blend frame did not render";
+                        } else if (atZero.x < 180.0f) {
+                            ok = false;
+                            what = "cross fade at opacity 0 is not A";
+                        }
+                    }
+                    if (ok) {
+                        // A Scalar on the Opacity port drives it to 1: B (black)
+                        // lands, even though the Inspector still says 0.
+                        const int sourceId = blendGraph.addNode("math.constant", 400.0f, 140.0f)->id;
+                        Node *source = blendGraph.find(sourceId);
+                        Node *blend = blendGraph.find(blendId);
+                        std::string why;
+                        if (!source || !blend) {
+                            ok = false;
+                            what = "the Blend block is not registered";
+                        } else {
+                            source->setFloat("value", 1.0f);
+                            ok = blendGraph.connect(sourceId, 0, blendId, 2, &why);
+                            if (!ok) what = "could not wire the opacity port: " + why;
+                        }
+                    }
+                    if (ok) {
+                        double published = -1.0;
+                        const Vector3 atOne = blendCentre(&published);
+                        if (atOne.x < 0.0f) {
+                            ok = false;
+                            what = "the blend frame did not render";
+                        } else if (atOne.x > 60.0f) {
+                            ok = false;
+                            what = "a connected Opacity port did not override the slider";
+                        } else if (std::fabs(published - 1.0) > 0.01) {
+                            ok = false;
+                            what = "the opacity slider did not follow the port";
+                        }
+                    }
+                    std::remove(whitePath.c_str());
+                    std::remove(blackPath.c_str());
+                    if (!ok) {
+                        result = fail("Blend block: " + what);
+                    } else {
+                        std::printf("  render   : Blend cross fades and its Opacity port takes "
+                                    "over the slider\n");
                     }
                 }
 

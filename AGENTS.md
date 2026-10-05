@@ -89,7 +89,9 @@ retuning BPM x division does not break it - and the filter check asserts the
 response plot follows the audio rate inside an ADC -> DAC region and the frame
 rate outside one. The Automation curve check asserts the drag bounds a key is
 clamped to (the neighbouring key times, 0/1 at the ends, never an inverted
-range). When NVENC is usable it also renders a real GPU export.
+range). The Blend check cross fades a white and a black Picture and asserts that
+a patched Opacity port overrides the Inspector value. When NVENC is usable it
+also renders a real GPU export.
 
 It writes `selftest_output.mp4`, `selftest_project.pforge`,
 `selftest_legacy.pforge`, `selftest_legacy_audio.pforge`,
@@ -163,12 +165,12 @@ docs         rendering notes and the README overlay image
   The convention for the value is: rates/frequencies multiply by `2^input`
   (octaves), levels multiply by `(1 + input)` and offsets add the input.
 - Ports that *are* the value rather than a modulation of it (Lerp's
-  A/B/Factor, Clamp's In/Min/Max, Transform's Amount and pre-offset) follow the
-  other convention: a connected Scalar port replaces the matching Inspector
-  value and `publishEffective` makes the slider follow it, while an unconnected
-  port falls back to the Inspector. `scalarOrParam` in `Registry.cpp` is the
-  helper; keep both directions working so a block is usable with or without
-  patch cables.
+  A/B/Factor, Clamp's In/Min/Max, Transform's Amount and pre-offset, Blend's
+  Opacity) follow the other convention: a connected Scalar port replaces the
+  matching Inspector value and `publishEffective` makes the slider follow it,
+  while an unconnected port falls back to the Inspector. `scalarOrParam` in
+  `Registry.cpp` is the helper; keep both directions working so a block is
+  usable with or without patch cables.
 - A block that modulates a parameter **publishes the value it actually used**
   through `Node::publishEffective(key, value)`. The inspector slider and the
   in-block previews follow it (`Node::effectiveParam`) so an LFO visibly moves

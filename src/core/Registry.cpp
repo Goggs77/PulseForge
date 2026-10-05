@@ -1790,9 +1790,13 @@ void evalBlend(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::
     if (!ctx.renderer || !ctx.shaders) return;
     Shader *shader = ctx.shaders->builtin("blend");
     if (!shader) return;
+    // A connected Opacity port replaces the Inspector value, like Transform's
+    // Amount; the shader clamps it to 0..1 as well.
+    const float opacity = std::clamp(scalarOrParam(node, in, 2, "opacity", 1.0f), 0.0f, 1.0f);
+    node.publishEffective("opacity", opacity);
     float user[8] = {0};
     user[0] = static_cast<float>(node.pint("mode", 1));
-    user[1] = node.pfloat("opacity", 1.0f);
+    user[1] = opacity;
     ImageBufferPtr target = ctx.renderer->acquire(ctx.width, ctx.height);
     if (!target) return;
     ctx.renderer->beginTarget(target, true, Color{0, 0, 0, 255});
@@ -3010,8 +3014,11 @@ void Registry::registerBuiltins() {
         def.kind = "fx.blend";
         def.category = "Render";
         def.label = "Blend";
-        def.description = "Composites two images with the selected blend mode.";
-        def.inputs = {PortDesc{"A", PortType::Image}, PortDesc{"B", PortType::Image}};
+        def.description =
+            "Composites two images with the selected blend mode. Opacity is how much of B is "
+            "mixed in and can be modulated.";
+        def.inputs = {PortDesc{"A", PortType::Image}, PortDesc{"B", PortType::Image},
+                      PortDesc{"Opacity", PortType::Scalar, "unconnected: Opacity value"}};
         def.outputs = {PortDesc{"Image", PortType::Image}};
         def.params = {
             makeEnumParam("mode", "Mode",
