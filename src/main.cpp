@@ -15,7 +15,7 @@
 #endif
 
 int main(int argc, char **argv) {
-    printf("---------------------------------------Pulse Forge v0.0.2---------------------------------------\n");
+    printf("---------------------------------------Pulse Forge v0.0.3---------------------------------------\n");
     printf("A programmable, lightweight, fast, audio-reactive video synthesiser, licensed under BSD 3-Clause\n");
     printf("Built %s\n", PF_BUILD_STAMP);
     printf("------------------------------------------------------------------------------------------------\n");
