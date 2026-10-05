@@ -417,7 +417,7 @@ float textWidth(const char *text, float size, bool bold) {
     if (!text || !*text) return 0.0f;
     const Font &f = theme().font(size, bold);
     const float base = f.baseSize > 0 ? static_cast<float>(f.baseSize) : 10.0f;
-    const float scaled = size * theme().uiScale;
+    const float scaled = textPixels(size);
     return MeasureTextEx(f, text, scaled, scaled / base).x;
 }
 
@@ -477,7 +477,7 @@ std::vector<std::string> wrapLines(const std::string &text, float size, float ma
 
 float resolvedLineHeight(float size, float lineHeight) {
     if (lineHeight > 0.0f) return lineHeight;
-    return size * theme().uiScale * 1.42f;
+    return textPixels(size) * 1.42f;
 }
 
 }  // namespace
@@ -506,7 +506,7 @@ void drawText(Rectangle bounds, const char *text, float size, Color color, Align
     if (!text || !*text) return;
     const Font &f = theme().font(size, bold);
     const float base = f.baseSize > 0 ? static_cast<float>(f.baseSize) : 10.0f;
-    const float scaled = size * theme().uiScale;
+    const float scaled = textPixels(size);
     const float spacing = scaled / base;
     const Vector2 measure = MeasureTextEx(f, text, scaled, spacing);
     Vector2 position{bounds.x, bounds.y + (bounds.height - measure.y) * 0.5f};
@@ -1016,7 +1016,7 @@ bool textArea(Rectangle r, std::string *value, const char *placeholder, int stab
     const bool isHovered = interactive && hovered(r);
     const bool editing = gEdit.active() && gEdit.id == id;
     const float size = 12.5f;
-    const float lineHeight = size * t.uiScale * 1.35f;
+    const float lineHeight = textPixels(size) * 1.35f;
     const float inset = s(6.0f);
     const float barWidth = s(7.0f);
     const Rectangle inner{r.x + inset, r.y + inset,

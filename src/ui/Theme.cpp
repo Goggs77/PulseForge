@@ -85,6 +85,24 @@ void applyColors(const CguiCrystallineThemeData *data) {
     gTheme.controlBorder = palette::border();
 }
 
+// Latin-1 plus the typographic symbols the UI uses, so characters such as x, /,
+// minus, <=, >=, pi and arrows render instead of falling back.
+// LoadFontEx takes a mutable pointer, so the shared list is handed out mutable.
+std::vector<int> &glyphCodepoints() {
+    static std::vector<int> codepoints = [] {
+        std::vector<int> list;
+        for (int c = 32; c <= 126; ++c) list.push_back(c);
+        for (int c = 160; c <= 255; ++c) list.push_back(c);
+        const int extras[] = {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+                              0x2026, 0x2032, 0x2033, 0x2212, 0x221A, 0x221E, 0x2260,
+                              0x2264, 0x2265, 0x03C0, 0x03A3, 0x2192, 0x2190, 0x2191,
+                              0x2193, 0x25B6, 0x25A0};
+        for (int c : extras) list.push_back(c);
+        return list;
+    }();
+    return codepoints;
+}
+
 }  // namespace
 Color readableOn(Color fill, float alpha) {
     const float luminance =
@@ -127,21 +145,10 @@ void init(bool dark) {
     const char *bold = "resource/fonts/Inter/static/Inter_24pt-SemiBold.ttf";
     gTheme.regularFontPath = regular;
     gTheme.boldFontPath = bold;
-    // Latin-1 plus the typographic symbols the UI uses, so characters such as
-    // x, /, minus, <=, >=, pi and arrows render instead of falling back.
-    static std::vector<int> codepoints;
-    if (codepoints.empty()) {
-        for (int c = 32; c <= 126; ++c) codepoints.push_back(c);
-        for (int c = 160; c <= 255; ++c) codepoints.push_back(c);
-        const int extras[] = {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
-                              0x2026, 0x2032, 0x2033, 0x2212, 0x221A, 0x221E, 0x2260,
-                              0x2264, 0x2265, 0x03C0, 0x03A3, 0x2192, 0x2190, 0x2191,
-                              0x2193, 0x25B6, 0x25A0};
-        for (int c : extras) codepoints.push_back(c);
-    }
+    std::vector<int> &codepoints = glyphCodepoints();
     static const float kSizes[Theme::kAtlasCount] = {12.0f, 15.0f, 18.0f,
-                                                    22.0f, 27.0f, 34.0f, 44.0f};
-    for (int i = 0; i < Theme::kAtlasCount; ++i) {
+                                                     22.0f, 27.0f, 34.0f, 44.0f, 54.0f, 68.0f, 88.0f};
+    for (int i = 0; i < Theme::kBaseAtlasCount; ++i) {
         gTheme.atlasSizes[i] = kSizes[i];
         if (FileExists(regular)) {
             gTheme.regularAtlas[i] = LoadFontEx(regular, static_cast<int>(kSizes[i]),
@@ -166,12 +173,42 @@ void init(bool dark) {
     gInitialised = true;
 }
 
+void loadLargeFonts() {
+    if (!gInitialised) return;
+    std::vector<int> &codepoints = glyphCodepoints();
+    for (int i = Theme::kBaseAtlasCount; i < Theme::kAtlasCount; ++i) {
+        const int size = static_cast<int>(gTheme.atlasSizes[i]);
+        if (gTheme.regularAtlas[i].texture.id == 0 &&
+            FileExists(gTheme.regularFontPath.c_str())) {
+            gTheme.regularAtlas[i] =
+                LoadFontEx(gTheme.regularFontPath.c_str(), size, codepoints.data(),
+                           static_cast<int>(codepoints.size()));
+            if (gTheme.regularAtlas[i].texture.id != 0) {
+                SetTextureFilter(gTheme.regularAtlas[i].texture, TEXTURE_FILTER_BILINEAR);
+            }
+        }
+        if (gTheme.boldAtlas[i].texture.id == 0 && FileExists(gTheme.boldFontPath.c_str())) {
+            gTheme.boldAtlas[i] =
+                LoadFontEx(gTheme.boldFontPath.c_str(), size, codepoints.data(),
+                           static_cast<int>(codepoints.size()));
+            if (gTheme.boldAtlas[i].texture.id != 0) {
+                SetTextureFilter(gTheme.boldAtlas[i].texture, TEXTURE_FILTER_BILINEAR);
+            }
+        }
+    }
+}
+
 const Font &Theme::font(float size, bool bold) const {
     const Font *table = bold ? boldAtlas : regularAtlas;
+    // The atlas has to match the pixel size the glyphs are drawn at, or the
+    // rasterisation is scaled up (which is what made text look soft). The drawn
+    // size is size * uiScale * renderScale.
+    const float drawn = textPixels(size);
     for (int i = 0; i < Theme::kAtlasCount; ++i) {
-        if (atlasSizes[i] + 0.5f >= size && table[i].texture.id != 0) return table[i];
+        if (atlasSizes[i] + 0.5f >= drawn && table[i].texture.id != 0) return table[i];
     }
-    // Larger than the biggest atlas (deep canvas zoom): use it anyway.
+    // Larger than the biggest atlas (deep canvas zoom, a huge GUI scale): use it
+    // anyway.
     for (int i = Theme::kAtlasCount - 1; i >= 0; --i) {
         if (table[i].texture.id != 0) return table[i];
     }
