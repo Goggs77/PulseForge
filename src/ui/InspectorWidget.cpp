@@ -353,7 +353,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
             const int sourceKbps = static_cast<int>(p.audio.bitRate / 1000);
             std::string source = p.audio.codec.empty() ? "unknown" : audioCodecDisplayName(p.audio.codec);
             if (sourceKbps > 0) source += " " + std::to_string(sourceKbps) + " kbps";
-            if (p.audio.transcodedAac) source += " (converted to AAC in memory)";
+            if (p.audio.transcodedAac) source += " (converted to AAC on export)";
             char info[256];
             std::snprintf(info, sizeof(info), "%.2f s  %d ch  %d Hz  %s  %d analysis frames",
                           state.clip.duration(), state.clip.channels(), state.clip.sampleRate(),
@@ -466,7 +466,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
         }
         if (p.audio.transcodedAac && p.output.audioCodec == "aac") {
             ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, px(14.0f)},
-                                "imported audio was converted to AAC in memory", 10.5f,
+                                "imported audio is converted to AAC on export", 10.5f,
                                 palette::withAlpha(t.textDim, 0.9f));
             cursor.y += px(16.0f);
         }

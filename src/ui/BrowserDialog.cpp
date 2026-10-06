@@ -58,8 +58,10 @@ bool exportDowngradesAudio(const UiState &state) {
     // A silent Audio Output has no track to compare the imported bitrate with.
     if (Exporter::audioRoute(project) == AudioRoute::Silent) return false;
     const double totalDuration = project.effectiveDuration(project.audio.duration);
+    // The conversion is prepared on the first export, so the intent (a saved
+    // project field) is what says whether the converted stream will be copied.
     const bool copiesConvertedStream =
-        state.clip.hasTranscodedAudio() && project.output.audioCodec == "aac" &&
+        project.audio.transcodedAac && project.output.audioCodec == "aac" &&
         containerAcceptsAac(project.output.container) &&
         project.audio.duration + 0.05 >= totalDuration &&
         (project.output.audioSampleRate <= 0 || project.audio.transcodedRate <= 0 ||
@@ -408,7 +410,7 @@ void drawExportDialog(UiState &state) {
         audioDesc = "[";
         audioDesc += project.audio.codec.empty() ? "unknown" : project.audio.codec;
         if (sourceKbps > 0) audioDesc += " " + std::to_string(sourceKbps) + " kbps";
-        if (project.audio.transcodedAac) audioDesc += ", converted to AAC in memory";
+        if (project.audio.transcodedAac) audioDesc += ", converted to AAC on export";
         audioDesc += "]  ->  export ";
         audioDesc += audioCodecDisplayName(project.output.audioCodec);
         if (!project.output.audioBitrate.empty() &&

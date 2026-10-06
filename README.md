@@ -40,7 +40,10 @@ The app is still in early stages, so expect minor bugs and glitches.
   flac, opus stays libopus in containers that carry it...). When this ffmpeg
   build has no encoder for the source, the decoded audio is converted to AAC
   **in memory** at the best bitrate the format carries and that stream is copied
-  out during export, so nothing is encoded twice.
+  out during export, so nothing is encoded twice. The conversion itself is
+  deferred to the first export that can mux the result: decoding and analysing an
+  imported clip takes a fraction of a second, the AAC encode takes seconds, so
+  neither importing nor opening a project pays for it.
 - **Visualized Programmable pipeline.** A flow graph of blocks with typed ports.
   Connections are type-checked and cycles are rejected.
 - **GPU rendering.** Blocks render through OpenGL 3.3 render targets. Shader

@@ -326,8 +326,11 @@ void setStatus(UiState &state, const std::string &message, bool error) {
 
 namespace {
 
-// Applies the match to the project and, when required, transcodes the decoded
-// clip to AAC in memory. Returns a short description for the status line.
+// Applies the match to the project: the encoder and bitrate follow the imported
+// media. A conversion that the container cannot take is only *planned* here -
+// prepareEmbeddedAudio runs it at the first export that can mux the result - so
+// opening or importing a project never pays for it. Returns a short description
+// for the status line.
 std::string applyImportedAudio(UiState &state, bool allowTranscode) {
     Project &project = state.project;
     if (project.audio.codec.empty() && !state.clip.valid()) return std::string();
@@ -349,33 +352,50 @@ std::string applyImportedAudio(UiState &state, bool allowTranscode) {
         !audioCodecIsLossless(project.output.audioCodec)) {
         note += " " + project.output.audioBitrate;
     }
-    if (match.transcodeToAac && allowTranscode && state.clip.valid() &&
-        !state.clip.hasTranscodedAudio()) {
-        const AudioPtr &buffer = state.clip.buffer();
-        std::vector<unsigned char> bytes;
-        std::string error;
-        const double started = GetTime();
-        const int outputRate =
-            project.output.audioSampleRate > 0 ? project.output.audioSampleRate
-                                               : buffer->sampleRate;
-        if (ffmpeg::encodeAacInMemory(buffer->samples.data(), buffer->frameCount, buffer->channels,
-                                      buffer->sampleRate, outputRate, match.bitrateKbps, &bytes,
-                                      &error)) {
-            state.clip.setTranscodedAudio(std::move(bytes));
-            project.audio.transcodedAac = true;
-            project.audio.transcodedRate = outputRate;
-            char suffix[64];
-            std::snprintf(suffix, sizeof(suffix), " (converted in memory, %.1fs)",
-                          GetTime() - started);
-            note += suffix;
-        } else {
-            note += " (AAC conversion failed)";
-            setStatus(state, "Could not convert the audio to AAC: " + error, true);
-        }
-    } else if (project.audio.transcodedAac) {
-        note += " (in memory)";
+    if (allowTranscode) {
+        state.clip.clearTranscodedAudio();
+        // The conversion itself is deferred to the export (prepareEmbeddedAudio):
+        // it costs seconds on a long file - far more than decoding and analysing
+        // it - and neither browsing nor playback needs the converted stream.
+        project.audio.transcodedAac = match.transcodeToAac;
+        project.audio.transcodedRate = 0;
+    }
+    if (project.audio.transcodedAac) {
+        note += " (converted to AAC on export)";
     }
     return note;
+}
+
+// The exporter can mux a converted AAC stream instead of re-encoding the source,
+// but only while the stream covers the video at the project's rate. Converting a
+// long file takes seconds, so it happens here - on the first export that can use
+// the result - rather than on every project open.
+void prepareEmbeddedAudio(UiState &state) {
+    Project &project = state.project;
+    if (!project.audio.transcodedAac || state.clip.hasTranscodedAudio()) return;
+    if (!state.clip.valid() || project.output.audioCodec != "aac" ||
+        !containerAcceptsAac(project.output.container)) {
+        return;  // the export re-encodes the source instead
+    }
+    const double total = project.effectiveDuration(project.audio.duration);
+    if (project.audio.duration + 0.05 < total) return;
+    const int rate = project.output.audioSampleRate;
+    if (rate > 0 && project.audio.transcodedRate > 0 && rate != project.audio.transcodedRate) {
+        return;
+    }
+    const AudioPtr &buffer = state.clip.buffer();
+    const int outputRate = rate > 0 ? rate : buffer->sampleRate;
+    std::vector<unsigned char> bytes;
+    std::string error;
+    if (!ffmpeg::encodeAacInMemory(buffer->samples.data(), buffer->frameCount, buffer->channels,
+                                   buffer->sampleRate, outputRate,
+                                   parseAudioBitrateKbps(project.output.audioBitrate), &bytes,
+                                   &error)) {
+        setStatus(state, "Could not convert the audio to AAC: " + error, true);
+        return;
+    }
+    state.clip.setTranscodedAudio(std::move(bytes));
+    project.audio.transcodedRate = outputRate;
 }
 
 // Cheap identity of the Audio Output wiring, used to notice a rewire while the
@@ -837,9 +857,9 @@ void loadProjectFile(UiState &state, const std::string &path) {
                 }
                 state.project.audio.peak = peak;
             }
-            // The saved output settings are the user's, so they are kept; only
-            // the in-memory AAC conversion the project was saved with has to be
-            // reproduced.
+            // The saved output settings are the user's, so they are kept; the
+            // AAC conversion the project was saved with is only planned here and
+            // runs at the first export (prepareEmbeddedAudio).
             if (state.project.audio.transcodedAac) applyImportedAudio(state, true);
         } else {
             setStatus(state, "Project loaded, but the audio is missing: " + audioError, true);
@@ -872,6 +892,7 @@ void startExport(UiState &state, const std::string &path) {
     request.outputPath = path;
     request.overwrite = true;
     std::string error;
+    prepareEmbeddedAudio(state);
     const std::vector<unsigned char> *embedded =
         state.clip.hasTranscodedAudio() ? &state.clip.transcodedAudio() : nullptr;
     const bool ok = Exporter::run(state.renderer, state.project, request, state.clip.buffer(),
@@ -1158,8 +1179,52 @@ void renderPreviewFrame(UiState &state) {
     }
 }
 
+// One frame of the export modal: the editor frozen and dimmed with the progress
+// panel on top. Also drawn once before the loop while the deferred audio
+// conversion runs, so that wait shows a message instead of a frozen window.
+void drawExportFrame(UiState &state, bool captureMirror, int videoFrame) {
+    // The preview pane follows the export frame by frame, so the editor - and a
+    // Self Reference capture of it - shows the pipeline live.
+    if (state.renderer.outputTarget()) state.previewImage = state.renderer.outputTarget();
+    BeginDrawing();
+    ui::beginFrame();
+    ui::setModal(true);
+    // Refreshes the chrome hit test with the modal flag set, so every button
+    // paints its disabled state while the export runs.
+    updateChromeLayout(state);
+    ClearBackground(palette::background());
+    // The editor stays visible but frozen, dimmed by the overlay below, so the
+    // chrome buttons grey out like everything else.
+    drawEditor(state, false);
+    // Self Reference must see the pipeline, not the exporter's grey-out: grab
+    // the frame before the dim rectangle and the progress panel.
+    if (captureMirror) captureEditorForFrame(state, videoFrame);
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.55f));
+    const Rectangle box{(GetScreenWidth() - 560.0f) * 0.5f,
+                        (GetScreenHeight() - 150.0f) * 0.5f, 560.0f, 150.0f};
+    ui::panel(box, "Exporting");
+    ui::progressBar(Rectangle{box.x + 20.0f, box.y + 50.0f, box.width - 40.0f, 22.0f},
+                    state.exportProgress, nullptr);
+    ui::drawText(Rectangle{box.x + 20.0f, box.y + 80.0f, box.width - 40.0f, 20.0f},
+                 state.exportStatus.c_str(), 13.0f, ui::theme().text, ui::Align::Center);
+    ui::drawText(Rectangle{box.x + 20.0f, box.y + 104.0f, box.width - 40.0f, 18.0f},
+                 "press Escape to cancel", 11.0f, ui::theme().textDim, ui::Align::Center);
+    EndDrawing();
+}
+
 void performExport(UiState &state) {
     if (!state.exporting) return;
+
+    // The in-memory AAC conversion is deferred from project open to the first
+    // export that can mux the result (prepareEmbeddedAudio). It takes seconds on
+    // a long file, so the modal is drawn once with a "preparing" status rather
+    // than leaving the window frozen before the loop starts.
+    if (state.project.audio.transcodedAac && !state.clip.hasTranscodedAudio()) {
+        state.exportProgress = 0.0f;
+        state.exportStatus = "preparing the audio (AAC conversion)...";
+        drawExportFrame(state, false, 0);
+        prepareEmbeddedAudio(state);
+    }
 
     // Dedicated modal loop: the renderer must stay on this thread, so progress
     // is drawn from the frame callback.
@@ -1218,33 +1283,7 @@ void performExport(UiState &state) {
             }
             lastDraw = now;
 
-            // The preview pane follows the export frame by frame, so the editor
-            // - and a Self Reference capture of it - shows the pipeline live.
-            if (state.renderer.outputTarget()) state.previewImage = state.renderer.outputTarget();
-            BeginDrawing();
-            ui::beginFrame();
-            ui::setModal(true);
-            // Refreshes the chrome hit test with the modal flag set, so every
-            // button paints its disabled state while the export runs.
-            updateChromeLayout(state);
-            ClearBackground(palette::background());
-            // The editor stays visible but frozen, dimmed by the overlay below,
-            // so the chrome buttons grey out like everything else.
-            drawEditor(state, false);
-            // Self Reference must see the pipeline, not the exporter's grey-out:
-            // grab the frame before the dim rectangle and the progress panel.
-            captureEditorForFrame(state, progress.frame);
-            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.55f));
-            const Rectangle box{(GetScreenWidth() - 560.0f) * 0.5f,
-                                (GetScreenHeight() - 150.0f) * 0.5f, 560.0f, 150.0f};
-            ui::panel(box, "Exporting");
-            ui::progressBar(Rectangle{box.x + 20.0f, box.y + 50.0f, box.width - 40.0f, 22.0f},
-                            state.exportProgress, nullptr);
-            ui::drawText(Rectangle{box.x + 20.0f, box.y + 80.0f, box.width - 40.0f, 20.0f},
-                         state.exportStatus.c_str(), 13.0f, ui::theme().text, ui::Align::Center);
-            ui::drawText(Rectangle{box.x + 20.0f, box.y + 104.0f, box.width - 40.0f, 18.0f},
-                         "press Escape to cancel", 11.0f, ui::theme().textDim, ui::Align::Center);
-            EndDrawing();
+            drawExportFrame(state, true, progress.frame);
         },
         [&]() {
             if (WindowShouldClose() || IsKeyPressed(KEY_ESCAPE)) {

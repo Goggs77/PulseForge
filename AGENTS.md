@@ -296,7 +296,13 @@ docs         rendering notes and the README overlay image
   (`core/Project.cpp`) matches the export codec and bitrate to the source; PCM
   sources become FLAC inside Matroska (players otherwise output silence), and a
   source with no matching encoder is converted to AAC **in memory** and copied on
-  export.
+  export. That conversion is deferred (`prepareEmbeddedAudio`, App.cpp): it is
+  planned on import/open and encoded on the first export whose container can mux
+  it, because it costs seconds on a long file - measured at 6-7 s for the 48 s
+  demo clip, against ~0.4 s for decode + analysis + peak - and neither browsing
+  nor playback needs it. `project.audio.transcodedAac` is the saved *intent*;
+  `AudioClip::hasTranscodedAudio()` is the bytes, which may not exist yet, so
+  checks that only need the plan (the export quality reminder) use the flag.
 - Export always goes through `Exporter::buildCommand`. Quality options are
   per-family (`-crf` for x264/x265/SVT-AV1, `-cq` for NVENC, `-global_quality`
   for Quick Sync, `-qp_i/-qp_p` for AMF). `-af apad` plus `-shortest` keeps a
