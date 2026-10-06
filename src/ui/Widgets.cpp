@@ -104,8 +104,21 @@ bool pointIn(Rectangle r, Vector2 p) {
     return p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height;
 }
 
+// Panels that are busy (async audio loading) block the mouse inside their rect:
+// the widgets there keep drawing - normally, without a hover state - but cannot
+// be hovered or clicked. The app sets the regions every frame.
+std::vector<Rectangle> gBlockedRegions;
+
+bool regionBlocked(Rectangle region) {
+    for (const Rectangle &blocked : gBlockedRegions) {
+        if (CheckCollisionRecs(region, blocked)) return true;
+    }
+    return false;
+}
+
 bool mouseClickedIn(Rectangle r) {
-    return pointIn(r, GetMousePosition()) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    return !regionBlocked(r) && pointIn(r, GetMousePosition()) &&
+           IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
 Color screenTint(Color base, bool isHovered, bool isHeld) {
@@ -371,6 +384,7 @@ std::string editableNumber(const std::string &display) {
 void beginFrame() {
     gNextId = 1;
     gCaretBlink = GetTime();
+    gBlockedRegions.clear();
 }
 
 int nextId() { return gNextId++; }
@@ -532,7 +546,11 @@ void drawTextClipped(Rectangle bounds, const char *text, float size, Color color
     drawText(bounds, value.c_str(), size, color, align, bold);
 }
 
-bool hovered(Rectangle r) { return pointIn(r, GetMousePosition()); }
+bool hovered(Rectangle r) { return !regionBlocked(r) && pointIn(r, GetMousePosition()); }
+
+void blockRegion(Rectangle region) {
+    if (region.width > 0.0f && region.height > 0.0f) gBlockedRegions.push_back(region);
+}
 
 // ---------------------------------------------------------------------------
 // Containers

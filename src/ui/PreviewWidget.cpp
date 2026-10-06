@@ -104,6 +104,15 @@ void drawPreview(UiState &state, Rectangle bounds) {
     ui::drawTextClipped(Rectangle{imageArea.x + ui::s(8.0f), imageArea.y + imageArea.height - ui::s(18.0f),
                                   imageArea.width - ui::s(16.0f), ui::s(16.0f)},
                         stats, 10.0f, palette::withAlpha(t.textDim, 0.95f));
+
+    // A clip that is still being decoded owns the panel: it is greyed out and its
+    // transport ignores the mouse (the app blocks the rect for that).
+    if (state.audioLoading) {
+        DrawRectangleRounded(bounds, ui::roundness(bounds, ui::s(9.0f)), 6,
+                             palette::withAlpha(BLACK, 0.5f));
+        ui::drawText(bounds, "Loading audio...", 13.0f, palette::withAlpha(WHITE, 0.9f),
+                     ui::Align::Center);
+    }
 }
 
 }  // namespace pf

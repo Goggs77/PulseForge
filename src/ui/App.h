@@ -1,8 +1,10 @@
 // Editor state shared by the panels, plus the application entry point.
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -58,6 +60,10 @@ struct CanvasState {
 struct Preferences {
     bool defaultDarkTheme = true;
     float guiScale = 1.25f;
+    // Decode and analyse imported audio on a worker thread, so opening a project
+    // or dropping a file does not block the editor; the timeline and the preview
+    // stay greyed out until the clip is ready.
+    bool asyncAudioLoad = true;
 };
 
 void loadPreferences(Preferences &preferences, const std::string &path);
@@ -105,6 +111,42 @@ struct UiState {
     // into the renderer's capture. Kept between frames and rebuilt when the size
     // changes; unused (and so never created) while the factor is 1.
     RenderTexture2D editorTarget{};
+
+    // Background audio loading ("Async audio loading" preference). The graph is
+    // live immediately; the worker only produces the decoded clip, its analysis
+    // and the derived values, and the main thread adopts them once `finished` is
+    // set (see pollAudioLoad in App.cpp). `audioLoading` greys the timeline and
+    // the preview out while it runs.
+    struct AudioLoadTask {
+        std::thread worker;
+        std::atomic<bool> finished{false};
+        AudioPtr buffer;
+        AnalysisPtr analysis;
+        std::vector<float> overviewMin;
+        std::vector<float> overviewMax;
+        float peak = 0.0f;
+        std::string path;
+        std::string error;
+        // Runs on the main thread once the clip has been adopted.
+        std::function<void(UiState &)> onDone;
+
+        // Clears the task for reuse; the caller joins `worker` first (an atomic
+        // is not movable, so the task cannot be reassigned wholesale).
+        void reset() {
+            worker = std::thread{};
+            finished.store(false, std::memory_order_relaxed);
+            buffer.reset();
+            analysis.reset();
+            overviewMin.clear();
+            overviewMax.clear();
+            peak = 0.0f;
+            path.clear();
+            error.clear();
+            onDone = nullptr;
+        }
+    };
+    AudioLoadTask audioLoad;
+    bool audioLoading = false;
 
     // layout
     Rectangle topBarRect{};

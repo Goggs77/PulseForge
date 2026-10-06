@@ -14,6 +14,12 @@ public:
 
     // Decodes anything ffmpeg can read into interleaved float samples.
     bool load(const std::string &path, int sampleRate, std::string *error);
+    // Adopts a clip that was decoded, analysed and measured on a worker thread
+    // (the async audio loading path): the state load() leaves behind, without
+    // the decode. The overview vectors are the buckets buildOverview would have
+    // produced for that buffer.
+    void adopt(const std::string &path, const AudioPtr &buffer,
+               std::vector<float> overviewMin, std::vector<float> overviewMax);
     void clear();
     bool valid() const { return buffer_ && buffer_->frameCount > 0; }
 
@@ -35,6 +41,10 @@ public:
 
     // Min/max overview used by the timeline widget.
     void buildOverview(int buckets = 4096);
+    // The same buckets for any buffer, so a background loader can measure the
+    // timeline overview without touching the clip.
+    static void computeOverview(const AudioBuffer &buffer, int buckets,
+                                std::vector<float> *overviewMin, std::vector<float> *overviewMax);
     int overviewBuckets() const { return static_cast<int>(overviewMin_.size()); }
     float overviewMin(int index) const;
     float overviewMax(int index) const;

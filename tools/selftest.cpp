@@ -2128,6 +2128,33 @@ int main(int argc, char **argv) {
                     }
                 }
 
+                // Async audio loading hands its clip over through
+                // AudioClip::adopt: the overview the worker measured has to
+                // survive that, and the clip has to report the buffer like a
+                // decoded one.
+                if (result == 0) {
+                    auto buffer = std::make_shared<AudioBuffer>();
+                    buffer->channels = 2;
+                    buffer->sampleRate = 48000;
+                    buffer->samples = {0.0f, 0.25f, -0.5f, 0.75f, 0.0f, -0.25f, 0.5f, -0.75f};
+                    buffer->frameCount = 4;
+                    std::vector<float> overviewMin, overviewMax;
+                    AudioClip::computeOverview(*buffer, 2, &overviewMin, &overviewMax);
+                    AudioClip adopted;
+                    adopted.adopt("worker.wav", buffer, overviewMin, overviewMax);
+                    const bool adoptedOk =
+                        adopted.valid() && adopted.channels() == 2 &&
+                        adopted.sampleRate() == 48000 &&
+                        std::fabs(adopted.duration() - 4.0 / 48000.0) < 1e-9 &&
+                        adopted.overviewBuckets() == 2 && adopted.overviewMin(0) <= 0.0f &&
+                        adopted.overviewMax(0) >= 0.0f;
+                    if (!adoptedOk) {
+                        result = fail("async audio loading: adopting a worker clip failed");
+                    } else {
+                        std::printf("  audio    : a worker clip adopts its buffer and overview\n");
+                    }
+                }
+
                 // Debug and modulation blocks: passthrough metering, non-finite
                 // guarding, the ring buffer and the modulation biquad.
                 if (result == 0) {

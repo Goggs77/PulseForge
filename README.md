@@ -65,7 +65,8 @@ The app is still in early stages, so expect minor bugs and glitches.
   I guess realtime for this kind of quality is absurd,
   but you can remove this for experiments.
 - **Preferences.** A preferences dialog holds the startup theme and the GUI
-  scaling factor, next to the project's own information and metadata.
+  scaling factor, the async audio loading switch, next to the project's own
+  information and metadata.
 
 ## Requirements
 
@@ -180,6 +181,10 @@ The **Prefs** button (or `Ctrl+,`) opens a dialog with:
 - **GUI scaling** - 0.75x to 2x. Every widget metric, panel size and label is
   multiplied by it, which is also the knob for making the text larger or
   smaller.
+- **Async audio loading** - on by default. Decoding, analysing and measuring an
+  imported clip happens on a worker thread, so the graph appears immediately and
+  the timeline and the preview stay greyed out ("Loading audio...") until the
+  clip is ready. Turn it off to load inline instead.
 - **Project information and metadata** - project name, target resolution,
   target frame rate, duration (following the audio or fixed), output container,
   codec pair, quality (CRF), audio bitrate, output sample rate (48 kHz by

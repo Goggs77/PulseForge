@@ -27,6 +27,7 @@ void loadPreferences(Preferences &preferences, const std::string &path) {
     if (!json::parse(buffer.str(), root, nullptr)) return;
     preferences.defaultDarkTheme = root["defaultDarkTheme"].asBool(true);
     preferences.guiScale = std::clamp(root["guiScale"].asFloat(1.25f), 0.75f, 2.0f);
+    preferences.asyncAudioLoad = root["asyncAudioLoad"].asBool(true);
 }
 
 bool savePreferences(const Preferences &preferences, const std::string &path) {
@@ -34,6 +35,7 @@ bool savePreferences(const Preferences &preferences, const std::string &path) {
     root.set("application", "PulseForge");
     root.set("defaultDarkTheme", preferences.defaultDarkTheme);
     root.set("guiScale", preferences.guiScale);
+    root.set("asyncAudioLoad", preferences.asyncAudioLoad);
     std::ofstream file(path.c_str(), std::ios::binary);
     if (!file.good()) return false;
     file << json::write(root, 2);
@@ -551,6 +553,20 @@ void drawPreferencesDialog(UiState &state) {
         ui::theme().uiScale = 1.25f;
     }
     cursor.y += row + ui::s(14.0f);
+
+    // ---- audio ------------------------------------------------------------
+    ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(18.0f)}, "Audio");
+    cursor.y += ui::s(24.0f);
+    if (ui::checkbox(Rectangle{cursor.x, cursor.y, cursor.width, row}, "Async audio loading",
+                     &state.preferences.asyncAudioLoad)) {
+        savePreferences(state.preferences, state.preferencesPath);
+    }
+    cursor.y += row + ui::s(2.0f);
+    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(16.0f)},
+                        "Decode and analyse imported audio on a worker thread; the timeline and "
+                        "the preview grey out until it is ready.",
+                        10.5f, palette::withAlpha(t.textDim, 0.9f));
+    cursor.y += ui::s(22.0f);
 
     // ---- project information and metadata --------------------------------
     Project &p = state.project;

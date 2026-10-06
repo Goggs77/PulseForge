@@ -137,6 +137,25 @@ bool AudioClip::load(const std::string &path, int sampleRate, std::string *error
     return true;
 }
 
+void AudioClip::adopt(const std::string &path, const AudioPtr &buffer,
+                      std::vector<float> overviewMin, std::vector<float> overviewMax) {
+    // Same teardown as load(): the streams are bound to the previous buffer.
+    stopLiveStream();
+    stopPreview();
+    destroyStream();
+    playback_.reset();
+    playbackOverride_ = false;
+    transcodedAac_.clear();
+    position_ = 0.0;
+    startPosition_ = 0.0;
+    feedFrame_ = 0;
+    startFeedFrame_ = 0;
+    buffer_ = buffer;
+    path_ = path;
+    overviewMin_ = std::move(overviewMin);
+    overviewMax_ = std::move(overviewMax);
+}
+
 void AudioClip::clear() {
     stopLiveStream();
     stopPreview();
@@ -153,21 +172,30 @@ void AudioClip::clear() {
 void AudioClip::buildOverview(int buckets) {
     overviewMin_.clear();
     overviewMax_.clear();
-    if (!valid() || buckets <= 0) return;
-    buckets = std::min(buckets, static_cast<int>(buffer_->frameCount));
-    overviewMin_.assign(static_cast<size_t>(buckets), 0.0f);
-    overviewMax_.assign(static_cast<size_t>(buckets), 0.0f);
-    const double perBucket = static_cast<double>(buffer_->frameCount) / buckets;
+    if (!valid()) return;
+    computeOverview(*buffer_, buckets, &overviewMin_, &overviewMax_);
+}
+
+void AudioClip::computeOverview(const AudioBuffer &buffer, int buckets,
+                                std::vector<float> *overviewMin, std::vector<float> *overviewMax) {
+    if (!overviewMin || !overviewMax) return;
+    overviewMin->clear();
+    overviewMax->clear();
+    if (buffer.frameCount <= 0 || buckets <= 0) return;
+    buckets = std::min(buckets, static_cast<int>(buffer.frameCount));
+    overviewMin->assign(static_cast<size_t>(buckets), 0.0f);
+    overviewMax->assign(static_cast<size_t>(buckets), 0.0f);
+    const double perBucket = static_cast<double>(buffer.frameCount) / buckets;
     for (int b = 0; b < buckets; ++b) {
         const long long from = static_cast<long long>(b * perBucket);
-        const long long to = std::min<long long>(buffer_->frameCount,
+        const long long to = std::min<long long>(buffer.frameCount,
                                                  static_cast<long long>((b + 1) * perBucket) + 1);
         float lo = 0.0f, hi = 0.0f;
         if (to > from) {
             lo = 1e9f;
             hi = -1e9f;
             for (long long i = from; i < to; ++i) {
-                const float v = buffer_->monoAt(static_cast<double>(i));
+                const float v = buffer.monoAt(static_cast<double>(i));
                 lo = std::min(lo, v);
                 hi = std::max(hi, v);
             }
@@ -175,8 +203,8 @@ void AudioClip::buildOverview(int buckets) {
         if (lo > hi) {
             lo = hi = 0.0f;
         }
-        overviewMin_[static_cast<size_t>(b)] = lo;
-        overviewMax_[static_cast<size_t>(b)] = hi;
+        (*overviewMin)[static_cast<size_t>(b)] = lo;
+        (*overviewMax)[static_cast<size_t>(b)] = hi;
     }
 }
 

@@ -573,6 +573,11 @@ void updateExportExtension(UiState &state) {
 }
 
 void startPlayback(UiState &state) {
+    if (state.audioLoading) {
+        setStatus(state, "The audio is still loading - try again in a moment", true);
+        state.playing = false;
+        return;
+    }
     std::string error;
     if (!prepareMonitorAudio(state, &error)) {
         state.playing = false;
@@ -615,6 +620,108 @@ void newProject(UiState &state) {
     setStatus(state, "New project created");
 }
 
+// ---- async audio loading ---------------------------------------------------
+
+// Decodes a clip and derives everything the editor needs from it. Runs on the
+// audio worker thread (or inline when the preference is off), touching only the
+// task it is given, so no editor state is shared between threads.
+void decodeAudioTask(UiState::AudioLoadTask &task, const std::string &path, int sampleRate) {
+    std::vector<float> samples;
+    int channels = 0;
+    if (!ffmpeg::decodeAudioFloat(path, sampleRate, &channels, &samples, &task.error)) return;
+    auto buffer = std::make_shared<AudioBuffer>();
+    buffer->channels = std::max(1, channels);
+    buffer->sampleRate = sampleRate;
+    buffer->samples = std::move(samples);
+    buffer->frameCount =
+        static_cast<long long>(buffer->samples.size()) / std::max(1, buffer->channels);
+    task.analysis = analyzeAudio(*buffer, AnalysisSettings{}, {}, buffer);
+    // Peak of the decoded clip: the passthrough ADC -> DAC check needs it to
+    // know whether the DAC's clamp could change a sample.
+    float peak = 0.0f;
+    for (const float sample : buffer->samples) peak = std::max(peak, std::fabs(sample));
+    task.peak = peak;
+    AudioClip::computeOverview(*buffer, 4096, &task.overviewMin, &task.overviewMax);
+    task.path = path;
+    task.buffer = std::move(buffer);
+}
+
+// Joins the worker (if one is running) and drops whatever it produced.
+void abandonAudioLoad(UiState &state) {
+    if (state.audioLoad.worker.joinable()) state.audioLoad.worker.join();
+    state.audioLoad.reset();
+    state.audioLoading = false;
+}
+
+// Moves a finished task into the editor. The clip takes ownership of the buffer;
+// the caller resets the task afterwards.
+bool adoptAudioLoad(UiState &state, UiState::AudioLoadTask &task, std::string *error) {
+    if (!task.error.empty()) {
+        if (error) *error = task.error;
+        return false;
+    }
+    state.clip.adopt(task.path, task.buffer, std::move(task.overviewMin),
+                     std::move(task.overviewMax));
+    state.analysis = task.analysis;
+    state.project.audio.peak = task.peak;
+    return true;
+}
+
+// Adopts a finished worker on the main thread and runs the completion step.
+// Called once per frame; the timeline and the preview stay greyed out until it
+// has something to show.
+void pollAudioLoad(UiState &state) {
+    if (!state.audioLoading) return;
+    UiState::AudioLoadTask &task = state.audioLoad;
+    if (task.worker.joinable() && !task.finished.load(std::memory_order_acquire)) return;
+    if (task.worker.joinable()) task.worker.join();
+    std::string error;
+    const bool ok = adoptAudioLoad(state, task, &error);
+    std::function<void(UiState &)> onDone = std::move(task.onDone);
+    task.reset();
+    state.audioLoading = false;
+    if (!ok) {
+        state.clip.clear();
+        state.analysis.reset();
+        setStatus(state, "Could not load the audio: " + error, true);
+        showMessage(state, "Could not load audio", error, true);
+        return;
+    }
+    if (onDone) onDone(state);
+}
+
+// Starts a load: on the worker thread when "Async audio loading" is on, inline
+// otherwise. A load still in flight is finished and dropped first, so two quick
+// drops cannot race for the clip.
+void startAudioLoad(UiState &state, const std::string &path, int sampleRate,
+                    std::function<void(UiState &)> onDone) {
+    abandonAudioLoad(state);
+    if (!state.preferences.asyncAudioLoad) {
+        decodeAudioTask(state.audioLoad, path, sampleRate);
+        std::string error;
+        if (!adoptAudioLoad(state, state.audioLoad, &error)) {
+            state.audioLoad.reset();
+            state.clip.clear();
+            state.analysis.reset();
+            setStatus(state, "Could not load the audio: " + error, true);
+            showMessage(state, "Could not load audio", error, true);
+            return;
+        }
+        state.audioLoad.reset();
+        if (onDone) onDone(state);
+        return;
+    }
+    // The worker only writes into its task; `finished` is stored with release
+    // semantics so pollAudioLoad sees everything that came before it.
+    UiState::AudioLoadTask *task = &state.audioLoad;
+    task->onDone = std::move(onDone);
+    state.audioLoading = true;
+    task->worker = std::thread([task, path, sampleRate]() {
+        decodeAudioTask(*task, path, sampleRate);
+        task->finished.store(true, std::memory_order_release);
+    });
+}
+
 void loadAudioFile(UiState &state, const std::string &path) {
     // Guard rails: material this large cannot be analysed and previewed in real
     // time, so it is rejected up front with an explanation.
@@ -653,43 +760,36 @@ void loadAudioFile(UiState &state, const std::string &path) {
     // output rate is fixed by the project (48 kHz by default).
     const int decodeRate = std::clamp(probe.ok && probe.sampleRate > 0 ? probe.sampleRate : 48000,
                                       8000, kMaxSampleRate);
-    std::string error;
-    if (!state.clip.load(path, decodeRate, &error)) {
-        showMessage(state, "Could not load audio", error, true);
-        return;
-    }
     state.playing = false;
     resetMonitor(state);
     state.project.audio.path = path;
-    state.project.audio.duration = state.clip.duration();
-    state.project.audio.sampleRate = state.clip.sampleRate();
-    state.project.audio.channels = state.clip.channels();
     state.project.audio.codec = probe.codec;
     state.project.audio.bitRate = probe.bitRate;
     state.project.audio.transcodedAac = false;
     state.project.audio.fileSize = static_cast<long long>(fileSize);
-    // Peak of the decoded clip: the passthrough ADC -> DAC check needs it to
-    // know whether the DAC's clamp could change a sample.
-    state.project.audio.peak = 0.0f;
-    if (const AudioPtr &buffer = state.clip.buffer()) {
-        float peak = 0.0f;
-        for (const float sample : buffer->samples) peak = std::max(peak, std::fabs(sample));
-        state.project.audio.peak = peak;
-    }
-
-    state.clip.buildOverview();
-    state.analysis = analyzeAudio(*state.clip.buffer(), AnalysisSettings{}, {}, state.clip.buffer());
-    // Follow the imported media: same codec family and bitrate when this ffmpeg
-    // build can carry it, otherwise a one-off AAC conversion held in memory.
-    const std::string audioNote = applyImportedAudio(state, true);
-    state.playhead = 0.0;
-    state.project.dirty = true;
-    char message[320];
-    std::snprintf(message, sizeof(message), "Loaded %.2f s of audio (%d Hz, %d analysis frames)%s%s",
-                  state.clip.duration(), state.clip.sampleRate(),
-                  state.analysis ? static_cast<int>(state.analysis->frames.size()) : 0,
-                  audioNote.empty() ? "" : "  -  export audio ", audioNote.c_str());
-    setStatus(state, message);
+    setStatus(state, "Loading " + std::filesystem::path(path).filename().string() + "...");
+    // The decode, the analysis and the derived values run on the audio worker
+    // when "Async audio loading" is on; the timeline and the preview grey out
+    // until pollAudioLoad adopts the clip and this completion step runs.
+    startAudioLoad(state, path, decodeRate, [](UiState &s) {
+        s.project.audio.duration = s.clip.duration();
+        s.project.audio.sampleRate = s.clip.sampleRate();
+        s.project.audio.channels = s.clip.channels();
+        // Follow the imported media: same codec family and bitrate when this
+        // ffmpeg build can carry it, otherwise an AAC conversion the first export
+        // that can mux it runs (prepareEmbeddedAudio).
+        const std::string audioNote = applyImportedAudio(s, true);
+        s.playhead = 0.0;
+        s.project.dirty = true;
+        resetMonitor(s);
+        char message[320];
+        std::snprintf(message, sizeof(message),
+                      "Loaded %.2f s of audio (%d Hz, %d analysis frames)%s%s", s.clip.duration(),
+                      s.clip.sampleRate(),
+                      s.analysis ? static_cast<int>(s.analysis->frames.size()) : 0,
+                      audioNote.empty() ? "" : "  -  export audio ", audioNote.c_str());
+        setStatus(s, message);
+    });
 }
 
 void selectNode(UiState &state, int nodeId) {
@@ -774,6 +874,12 @@ void drawEditor(UiState &state, bool interactive) {
     // Two modal layers: the editor behind is frozen and ignores the mouse, while
     // the dialog drawn on top stays interactive on its own account.
     ui::setModal(!interactive);
+    // A clip still being decoded owns the timeline and the preview: their
+    // widgets keep drawing but ignore the mouse until it is ready.
+    if (state.audioLoading) {
+        ui::blockRegion(state.timelineRect);
+        ui::blockRegion(state.previewRect);
+    }
     drawPalette(state, state.paletteRect);
     drawGraphCanvas(state, state.canvasRect);
     drawTimeline(state, state.timelineRect);
@@ -840,30 +946,23 @@ void loadProjectFile(UiState &state, const std::string &path) {
     state.projectDirectory = Project::directoryOf(path);
     state.selectedNode = state.project.view.selectedNode;
     if (!state.project.audio.path.empty()) {
-        std::string audioError;
         // Projects remember the media's own rate; fall back to the documented
         // default for projects saved before the field existed.
         const int mediaRate =
             state.project.audio.sampleRate > 0 ? state.project.audio.sampleRate : 48000;
-        if (state.clip.load(state.project.audio.path, mediaRate, &audioError)) {
-            state.analysis =
-                analyzeAudio(*state.clip.buffer(), AnalysisSettings{}, {}, state.clip.buffer());
+        // The graph is live immediately; the clip (decode, analysis, peak and
+        // timeline overview) arrives through the loader, which greys the timeline
+        // and the preview out while it runs.
+        const std::string status = path;
+        startAudioLoad(state, state.project.audio.path, mediaRate, [status](UiState &s) {
             // The peak is derived, so a freshly opened project measures it again.
-            state.project.audio.peak = 0.0f;
-            if (const AudioPtr &buffer = state.clip.buffer()) {
-                float peak = 0.0f;
-                for (const float sample : buffer->samples) {
-                    peak = std::max(peak, std::fabs(sample));
-                }
-                state.project.audio.peak = peak;
-            }
             // The saved output settings are the user's, so they are kept; the
             // AAC conversion the project was saved with is only planned here and
             // runs at the first export (prepareEmbeddedAudio).
-            if (state.project.audio.transcodedAac) applyImportedAudio(state, true);
-        } else {
-            setStatus(state, "Project loaded, but the audio is missing: " + audioError, true);
-        }
+            if (s.project.audio.transcodedAac) applyImportedAudio(s, true);
+            resetMonitor(s);
+            setStatus(s, "Opened " + status);
+        });
     } else {
         state.clip.clear();
         state.analysis.reset();
@@ -872,7 +971,9 @@ void loadProjectFile(UiState &state, const std::string &path) {
     resetMonitor(state);
     state.playhead = std::clamp(state.project.view.playhead, 0.0, 1e9);
     updateExportExtension(state);  // follow the container stored in the project
-    setStatus(state, "Opened " + path);
+    // The audio load finishes later and replaces this with "Opened ...".
+    setStatus(state, state.audioLoading ? "Opened " + path + "  -  loading audio..."
+                                       : "Opened " + path);
 }
 
 void saveProjectFile(UiState &state, const std::string &path) {
@@ -1214,6 +1315,13 @@ void drawExportFrame(UiState &state, bool captureMirror, int videoFrame) {
 
 void performExport(UiState &state) {
     if (!state.exporting) return;
+    if (state.audioLoading) {
+        // Exporting now would render the graph against the previous (or an
+        // empty) clip; wait for the loader instead.
+        state.exporting = false;
+        setStatus(state, "The audio is still loading - try the export again in a moment", true);
+        return;
+    }
 
     // The in-memory AAC conversion is deferred from project open to the first
     // export that can mux the result (prepareEmbeddedAudio). It takes seconds on
@@ -1470,6 +1578,9 @@ int runApp(int argc, char **argv) {
         }
 
         // ---- transport -------------------------------------------------
+        // A clip that arrived on the worker thread is adopted here, on the frame
+        // the loader finished, so the rest of the frame already sees it.
+        pollAudioLoad(state);
         const double duration = state.project.effectiveDuration(state.clip.duration());
         state.clip.updatePreview();
         if (state.playing) {
@@ -1612,6 +1723,8 @@ int runApp(int argc, char **argv) {
         if (state.exporting) performExport(state);
     }
 
+    // Joins a worker that is still decoding (its result is dropped).
+    abandonAudioLoad(state);
     state.clip.clear();
     if (state.editorTarget.texture.id != 0) {
         UnloadRenderTexture(state.editorTarget);

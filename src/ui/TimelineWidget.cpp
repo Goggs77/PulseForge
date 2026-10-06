@@ -292,6 +292,15 @@ void drawTimeline(UiState &state, Rectangle bounds) {
         state.playhead = xToTime(GetMouseX());
         state.clip.seek(state.playhead + trimStart);
     }
+
+    // A clip that is still being decoded owns the panel: it is greyed out and
+    // its widgets ignore the mouse (the app blocks the rect for that).
+    if (state.audioLoading) {
+        DrawRectangleRounded(bounds, ui::roundness(bounds, ui::s(9.0f)), 6,
+                             palette::withAlpha(BLACK, 0.5f));
+        ui::drawText(bounds, "Loading audio...", 13.0f, palette::withAlpha(WHITE, 0.9f),
+                     ui::Align::Center);
+    }
 }
 
 }  // namespace pf

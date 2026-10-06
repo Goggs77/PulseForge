@@ -303,6 +303,17 @@ docs         rendering notes and the README overlay image
   nor playback needs it. `project.audio.transcodedAac` is the saved *intent*;
   `AudioClip::hasTranscodedAudio()` is the bytes, which may not exist yet, so
   checks that only need the plan (the export quality reminder) use the flag.
+- **Async audio loading** (Preferences, default on) moves decode + analysis +
+  peak + timeline overview onto a worker thread (`UiState::AudioLoadTask`,
+  `startAudioLoad`/`pollAudioLoad` in App.cpp). The worker touches only its task
+  and publishes with `finished.store(release)`; the main thread joins it in
+  `pollAudioLoad`, hands the buffer to `AudioClip::adopt` and then runs the
+  completion step (`onDone`) - project-open and import each pass their own. While
+  a load is in flight `UiState::audioLoading` greys the timeline and the preview
+  (`ui::blockRegion` makes their widgets ignore the mouse, and the panels draw a
+  "Loading audio..." overlay); play and export refuse to start. The loader never
+  runs during an export, and the project's own path (`.pforge`) still installs
+  the graph immediately - only the clip waits.
 - Export always goes through `Exporter::buildCommand`. Quality options are
   per-family (`-crf` for x264/x265/SVT-AV1, `-cq` for NVENC, `-global_quality`
   for Quick Sync, `-qp_i/-qp_p` for AMF). `-af apad` plus `-shortest` keeps a

@@ -61,6 +61,10 @@ float drawTextWrapped(Rectangle bounds, const char *text, float size, Color colo
                       float lineHeight = 0.0f, bool bold = false);
 
 bool hovered(Rectangle r);
+// Panels that are busy (async audio loading) block the mouse inside their rect,
+// so the widgets there draw normally but cannot be hovered or clicked. Regions
+// are set every frame and cleared by beginFrame().
+void blockRegion(Rectangle region);
 void panel(Rectangle r, const char *title = nullptr);
 void sectionHeader(Rectangle r, const char *title);
 
