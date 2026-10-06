@@ -31,23 +31,23 @@
     "codec": "pcm_f32le",
     "bitRate": 6144000,
     "transcodedAac": true,
-    "transcodedRate": 48000,
+    "transcodedRate": 0,
     "fileSize": 37445548
   },
   "view": {
     "panX": 539.4187012,
     "panY": -90.69152069,
     "zoom": 0.6746088266,
-    "selectedNode": -1,
-    "playhead": 0.7307291521
+    "selectedNode": 36,
+    "playhead": 48.27014023
   },
   "blocks": [
     {
       "id": 1,
       "kind": "src.audio",
       "title": "Audio Source",
-      "x": -710.6055298,
-      "y": 385.0976257,
+      "x": -709.305542,
+      "y": 397.8226318,
       "enabled": true,
       "params": {}
     },
@@ -55,8 +55,8 @@
       "id": 2,
       "kind": "dsp.analyze",
       "title": "Spectrum Analyzer",
-      "x": 316.5945435,
-      "y": 317.897644,
+      "x": 360.694458,
+      "y": 324.6976318,
       "enabled": true,
       "params": {
         "gain": 1,
@@ -67,8 +67,8 @@
       "id": 4,
       "kind": "render.spectrum",
       "title": "Spectrum",
-      "x": 610.9245605,
-      "y": 765.0474854,
+      "x": 668.8770752,
+      "y": 770.3651123,
       "enabled": true,
       "params": {
         "preset": 17,
@@ -94,8 +94,8 @@
       "id": 9,
       "kind": "fx.postfx",
       "title": "Post FX",
-      "x": 610.9245605,
-      "y": 1017.047485,
+      "x": 668.8770752,
+      "y": 1032.865112,
       "enabled": true,
       "params": {
         "bloom": 0.25,
@@ -112,8 +112,8 @@
       "id": 10,
       "kind": "out.video",
       "title": "Video Output",
-      "x": 610.9245605,
-      "y": 664.2474976,
+      "x": 668.8770752,
+      "y": 665.3651123,
       "enabled": true,
       "params": {}
     },
@@ -121,8 +121,8 @@
       "id": 11,
       "kind": "out.audio",
       "title": "Audio Output",
-      "x": 316.5945435,
-      "y": 217.0976257,
+      "x": 360.694458,
+      "y": 219.6976318,
       "enabled": true,
       "params": {}
     },
@@ -130,8 +130,8 @@
       "id": 13,
       "kind": "dbg.meter",
       "title": "VU / Digital Meter - Left",
-      "x": -197.0054932,
-      "y": 217.0976257,
+      "x": -174.305542,
+      "y": 219.6976318,
       "enabled": true,
       "params": {
         "mode": 0,
@@ -142,8 +142,8 @@
       "id": 14,
       "kind": "dbg.meter",
       "title": "VU / Digital Meter - Right",
-      "x": -197.0054932,
-      "y": 406.6976318,
+      "x": -174.305542,
+      "y": 417.1976318,
       "enabled": true,
       "params": {
         "mode": 0,
@@ -154,8 +154,8 @@
       "id": 15,
       "kind": "dsp.adc",
       "title": "ADC",
-      "x": -453.8055115,
-      "y": 217.0976257,
+      "x": -441.805542,
+      "y": 219.6976318,
       "enabled": true,
       "params": {
         "mode": 0,
@@ -166,8 +166,8 @@
       "id": 16,
       "kind": "dsp.dac",
       "title": "DAC",
-      "x": 59.79452515,
-      "y": 217.0976257,
+      "x": 93.19445801,
+      "y": 219.6976318,
       "enabled": true,
       "params": {
         "interpolate": true,
@@ -193,8 +193,8 @@
       "id": 18,
       "kind": "sort.group",
       "title": "Video Chain",
-      "x": 322.9244995,
-      "y": 601.8474731,
+      "x": 368.8770447,
+      "y": 600.3651123,
       "enabled": true,
       "params": {
         "members": "9,10,4,20,23,22,24,35",
@@ -207,8 +207,8 @@
       "id": 19,
       "kind": "sort.sticky",
       "title": "Sticky Note",
-      "x": -710.6055298,
-      "y": 217.0976257,
+      "x": -709.305542,
+      "y": 219.6976318,
       "enabled": true,
       "params": {
         "text": "An audio chain where you can modulate audio signal\n"
@@ -218,8 +218,8 @@
       "id": 20,
       "kind": "render.textbox",
       "title": "Textbox",
-      "x": 610.9245605,
-      "y": 1290.647461,
+      "x": 668.8770752,
+      "y": 1317.865112,
       "enabled": true,
       "params": {
         "text": "Showcase Goggs",
@@ -241,8 +241,8 @@
       "id": 22,
       "kind": "render.selfref",
       "title": "Self Reference",
-      "x": 354.1245117,
-      "y": 832.2474976,
+      "x": 401.3770447,
+      "y": 840.3651123,
       "enabled": true,
       "params": {
         "hyper": 3
@@ -252,8 +252,8 @@
       "id": 23,
       "kind": "fx.blend",
       "title": "Blend",
-      "x": 354.1245117,
-      "y": 1120.247559,
+      "x": 401.3770447,
+      "y": 1140.365112,
       "enabled": true,
       "params": {
         "mode": 1,
@@ -264,8 +264,8 @@
       "id": 24,
       "kind": "fx.transform",
       "title": "Transform",
-      "x": 354.1245117,
-      "y": 933.0474854,
+      "x": 401.3770447,
+      "y": 945.3651123,
       "enabled": true,
       "params": {
         "amount": 1,
@@ -277,8 +277,8 @@
       "id": 25,
       "kind": "math.matrix",
       "title": "Matrix",
-      "x": 59.07437134,
-      "y": 665.046875,
+      "x": 92.4743042,
+      "y": 667.6468506,
       "enabled": true,
       "params": {
         "size": 1,
@@ -289,8 +289,8 @@
       "id": 26,
       "kind": "math.vec2",
       "title": "Sx",
-      "x": -197.725647,
-      "y": 665.046875,
+      "x": -175.0256958,
+      "y": 667.6468506,
       "enabled": true,
       "params": {
         "x": 1.774065018,
@@ -301,8 +301,8 @@
       "id": 27,
       "kind": "math.vec2",
       "title": "Sy",
-      "x": -197.725647,
-      "y": 809.046875,
+      "x": -175.0256958,
+      "y": 817.6468506,
       "enabled": true,
       "params": {
         "x": 0,
@@ -327,8 +327,8 @@
       "id": 29,
       "kind": "mod.automation",
       "title": "Offset X",
-      "x": -711.3256836,
-      "y": 833.046875,
+      "x": -710.0256958,
+      "y": 845.7718506,
       "enabled": true,
       "params": {
         "curve": [
@@ -395,8 +395,8 @@
       "id": 30,
       "kind": "mod.automation",
       "title": "Offset Y",
-      "x": -711.3256836,
-      "y": 1032.246826,
+      "x": -710.0256958,
+      "y": 1053.271851,
       "enabled": true,
       "params": {
         "curve": [
@@ -468,8 +468,8 @@
       "id": 31,
       "kind": "mod.automation",
       "title": "Zooming Automation",
-      "x": -711.3256836,
-      "y": 1231.446777,
+      "x": -710.0256958,
+      "y": 1260.771851,
       "enabled": true,
       "params": {
         "curve": [
@@ -521,8 +521,8 @@
       "id": 32,
       "kind": "math.arithmetic",
       "title": "Arithmetic",
-      "x": -454.5256653,
-      "y": 665.046875,
+      "x": -442.5256958,
+      "y": 667.6468506,
       "enabled": true,
       "params": {
         "op": 2,
@@ -535,8 +535,8 @@
       "id": 34,
       "kind": "sort.sticky",
       "title": "Sticky Note",
-      "x": -711.3256836,
-      "y": 665.046875,
+      "x": -710.0256958,
+      "y": 667.6468506,
       "enabled": true,
       "params": {
         "text": "Hi!\nI control how the camera moves."
@@ -546,8 +546,8 @@
       "id": 35,
       "kind": "sort.sticky",
       "title": "Sticky Note",
-      "x": 354.1245117,
-      "y": 664.2474976,
+      "x": 401.3770447,
+      "y": 665.3651123,
       "enabled": true,
       "params": {
         "text": "I compose the video and myself!"
@@ -557,8 +557,8 @@
       "id": 36,
       "kind": "sort.sticky",
       "title": "Sticky Note",
-      "x": 584.0130615,
-      "y": 455.2825928,
+      "x": 638.8596802,
+      "y": 446.3885498,
       "enabled": true,
       "params": {
         "text": "Demo for PluseForge 0.0.3"
@@ -582,8 +582,8 @@
       "id": 38,
       "kind": "time.pulse",
       "title": "Beat Pulse",
-      "x": -328.011322,
-      "y": 1039.743896,
+      "x": -326.7113342,
+      "y": 1042.343872,
       "enabled": true,
       "params": {
         "bpm": 88,
@@ -596,8 +596,8 @@
       "id": 39,
       "kind": "dbg.meter",
       "title": "VU / Digital Meter",
-      "x": -328.011322,
-      "y": 1183.743896,
+      "x": -326.7113342,
+      "y": 1192.343872,
       "enabled": true,
       "params": {
         "mode": 1,
@@ -608,8 +608,8 @@
       "id": 40,
       "kind": "math.arithmetic",
       "title": "Arithmetic",
-      "x": -71.21130371,
-      "y": 1039.743896,
+      "x": -59.21133423,
+      "y": 1042.343872,
       "enabled": true,
       "params": {
         "op": 2,
@@ -622,8 +622,8 @@
       "id": 42,
       "kind": "mod.ringbuffer",
       "title": "Ringbuffer",
-      "x": -71.21130371,
-      "y": 1162.143921,
+      "x": -59.21133423,
+      "y": 1169.843872,
       "enabled": true,
       "params": {
         "size": 64,
