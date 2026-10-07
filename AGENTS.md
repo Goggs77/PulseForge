@@ -42,6 +42,41 @@ cmake --build I:\Goggs\Works\c++\PulseForge\build --parallel 8
   are a few known, accepted ones (an unused helper in `Registry.cpp`/`Project.cpp`
   and the vendored `jar_mod.h`).
 
+### Profiling
+
+The app carries compile-time profiling probes whose depth is a build argument, so
+a release build keeps none of them:
+
+```powershell
+cmake -S . -B build_prof -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DPF_PROFILE_LEVEL=3
+```
+
+- `0` (default) - nothing at all: the probes expand to `((void)0)` and
+  `src/core/Profile.cpp` compiles to an empty object, so no timers, strings or
+  symbols survive into the binary.
+- `1` - frame phases: layout, transport, pipeline render, live audio, UI draw and
+  swap, printed every five seconds and once at the end next to the renderer's own
+  numbers.
+- `2` - + the per-panel breakdown of the UI draw (palette, canvas, timeline,
+  preview, inspector, top bar, status bar, chrome, dialogs).
+- `3` - + a ranking of the blocks by evaluation time.
+
+The probes are the macros in `src/core/Profile.h` - `PF_PROFILE_PHASE`,
+`PF_PROFILE_PANEL`, `PF_PROFILE_NODE`, `PF_PROFILE_FRAME` - so adding one to a
+scope costs nothing at level 0. A profiling build also honours
+`PF_PROFILE_SECONDS=<s>` (stop and print the summary) and `PF_PROFILE_AUTOPLAY=1`
+(play straight away), which between them run a session unattended. Reports divide
+by *frames*, not by samples: a phase can be probed more than once per frame (the
+live audio work sits on both sides of the pipeline render).
+
+What that measurement showed on the development machine (i5-10400F / GTX 1660 Ti,
+2K window, `templates/demo.pforge`): a 7.7 ms frame in which the UI draw is
+7.3 ms and the pipeline render only 0.25 ms - and inside the UI draw, two
+`ffmpeg::available()` calls in `drawTopBar` cost 1.77 ms *each* (the function
+searches the PATH on every call) while the ~55 CrystalGUI button boxes cost
+2.2 ms (each box element draws a full-window SDF quad). Do not put
+`ffmpeg::available()`-style probing on a per-frame path.
+
 ## Tests and verification
 
 Run the self test after every change; it is the single source of truth for

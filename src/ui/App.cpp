@@ -9,6 +9,7 @@
 #include <string>
 
 #include "core/Registry.h"
+#include "core/Profile.h"
 #include "dsp/Analysis.h"
 #include "export/Exporter.h"
 #include "export/FFmpeg.h"
@@ -880,17 +881,40 @@ void drawEditor(UiState &state, bool interactive) {
         ui::blockRegion(state.timelineRect);
         ui::blockRegion(state.previewRect);
     }
-    drawPalette(state, state.paletteRect);
-    drawGraphCanvas(state, state.canvasRect);
-    drawTimeline(state, state.timelineRect);
-    drawPreview(state, state.previewRect);
-    drawInspector(state, state.inspectorRect);
-    drawTopBar(state, state.topBarRect);
-    drawStatusBar(state, state.statusRect);
+    {
+        PF_PROFILE_PANEL(palette, Palette);
+        drawPalette(state, state.paletteRect);
+    }
+    {
+        PF_PROFILE_PANEL(canvas, Canvas);
+        drawGraphCanvas(state, state.canvasRect);
+    }
+    {
+        PF_PROFILE_PANEL(timeline, Timeline);
+        drawTimeline(state, state.timelineRect);
+    }
+    {
+        PF_PROFILE_PANEL(preview, Preview);
+        drawPreview(state, state.previewRect);
+    }
+    {
+        PF_PROFILE_PANEL(inspector, Inspector);
+        drawInspector(state, state.inspectorRect);
+    }
+    {
+        PF_PROFILE_PANEL(topbar, TopBar);
+        drawTopBar(state, state.topBarRect);
+    }
+    {
+        PF_PROFILE_PANEL(status, StatusBar);
+        drawStatusBar(state, state.statusRect);
+    }
 
     // The CrystalGUI chrome goes before the modal dim overlays so dialogs dim
     // the buttons exactly like the rest of the editor.
-    if (state.root) {
+    {
+        PF_PROFILE_PANEL(chrome, Chrome);
+        if (state.root) {
         if (interactive) CguiUpdate(state.root);
         if (gScaledChrome) {
             // The scaled pass draws the boxes itself (see the helper above).
@@ -909,17 +933,21 @@ void drawEditor(UiState &state, bool interactive) {
         }
         drawChromeLabels(state);
         drawPaletteLabels(state, state.paletteRect);
+        }
     }
     // Popups are a modal of their own and are drawn whatever else is happening.
-    ui::drawPopups();
+    {
+        PF_PROFILE_PANEL(dialogs, Dialogs);
+        ui::drawPopups();
 
-    ui::setModal(false);
-    drawPreferencesDialog(state);
-    drawExportDialog(state);
-    drawBrowser(state);
-    drawHelpOverlay(state);
-    drawMessageBox(state);
-    updateWindowTitle(state);
+        ui::setModal(false);
+        drawPreferencesDialog(state);
+        drawExportDialog(state);
+        drawBrowser(state);
+        drawHelpOverlay(state);
+        drawMessageBox(state);
+        updateWindowTitle(state);
+    }
 }
 
 bool modalActive(const UiState &state) {
@@ -1419,6 +1447,19 @@ void performExport(UiState &state) {
 
 }  // namespace
 
+#if PF_PROFILE_ENABLED
+// The one-line context a profiling report appends: the renderer's own numbers
+// plus the UI frame rate, so a phase that is actually the GPU or the display
+// is not mistaken for CPU work.
+std::string profileContext(UiState &state) {
+    char text[220];
+    std::snprintf(text, sizeof(text), "renderer %.2f ms  %d passes  %d/%d targets  ui %.0f fps",
+                  state.lastRenderMs, state.shaderPasses, state.pooledTargets,
+                  state.renderer.stats().peakTargets, state.lastUiFps);
+    return text;
+}
+#endif
+
 int runApp(int argc, char **argv) {
     // Optional offscreen capture used for automated verification:
     //   PulseForge --shot out.png [--size 2400x1350] [audio.wav]
@@ -1540,8 +1581,34 @@ int runApp(int argc, char **argv) {
     double lastFrameTime = GetTime();
     const double startupTime = lastFrameTime;
     int frameCounter = 0;
+#if PF_PROFILE_ENABLED
+    // Unattended profiling: PF_PROFILE_SECONDS bounds the run, PF_PROFILE_AUTOPLAY
+    // starts playback so the audio path is included.
+    const char *profileSecondsEnv = std::getenv("PF_PROFILE_SECONDS");
+    const double profileSeconds = profileSecondsEnv ? std::atof(profileSecondsEnv) : 0.0;
+    double profileNextPrint = startupTime + 5.0;
+    // An empty variable counts as unset (and "0" as off), so a session that
+    // clears the variable by accident does not silently start playing.
+    const char *autoplayEnv = std::getenv("PF_PROFILE_AUTOPLAY");
+    bool autoplayPending = autoplayEnv && *autoplayEnv && std::atoi(autoplayEnv) != 0;
+#endif
     while (!WindowShouldClose()) {
         ++frameCounter;
+#if PF_PROFILE_ENABLED
+        // The clip may still be arriving on the worker thread, so wait for it
+        // instead of failing the guard in startPlayback once at startup.
+        if (autoplayPending && state.clip.valid() && !state.audioLoading && !state.playing) {
+            autoplayPending = false;
+            startPlayback(state);
+        }
+#endif
+#if PF_PROFILE_ENABLED
+        if (profileSeconds > 0.0 && GetTime() > startupTime + profileSeconds) {
+            pf::profile::report(profileSeconds, true, profileContext(state));
+            break;
+        }
+#endif
+        PF_PROFILE_PHASE(frame, Frame);
         // Exporting takes over the frame: it renders its own dimmed editor view
         // with the progress panel, so it is handled before anything else.
         if (state.exporting) {
@@ -1554,6 +1621,7 @@ int runApp(int argc, char **argv) {
         // every frame; the CrystalGUI chrome is rebuilt whenever the size
         // actually changes because its geometry is baked in screen coordinates.
         {
+            PF_PROFILE_PHASE(layout, Layout);
             const float windowWidthNow = static_cast<float>(GetScreenWidth());
             const float windowHeightNow = static_cast<float>(GetScreenHeight());
             computeLayout(state, windowWidthNow, windowHeightNow);
@@ -1568,7 +1636,9 @@ int runApp(int argc, char **argv) {
             updateChromeLayout(state);
         }
 
+
         // ---- drag and drop ---------------------------------------------
+
         if (IsFileDropped()) {
             FilePathList dropped = LoadDroppedFiles();
             for (unsigned int i = 0; i < dropped.count; ++i) {
@@ -1580,6 +1650,8 @@ int runApp(int argc, char **argv) {
         // ---- transport -------------------------------------------------
         // A clip that arrived on the worker thread is adopted here, on the frame
         // the loader finished, so the rest of the frame already sees it.
+        {
+        PF_PROFILE_PHASE(transport, Transport);
         pollAudioLoad(state);
         const double duration = state.project.effectiveDuration(state.clip.duration());
         state.clip.updatePreview();
@@ -1620,26 +1692,40 @@ int runApp(int argc, char **argv) {
         } else if (state.clip.previewPlaying()) {
             state.playhead = std::max(0.0, state.clip.previewPosition() - state.project.video.trimStart);
         }
+        }
 
         // Render any audio frames the display skipped before the current frame,
         // so the live stream stays continuous on a slow display or a hitch.
-        if (state.playing && state.clip.liveStreamActive()) {
-            const double fps = std::max(1.0, state.project.video.fps);
-            catchUpLiveAudio(
-                state, static_cast<int>(std::floor(
-                           std::max(0.0, state.playhead) * fps + 1e-6)));
+        {
+            PF_PROFILE_PHASE(liveCatchUp, LiveAudio);
+            if (state.playing && state.clip.liveStreamActive()) {
+                const double fps = std::max(1.0, state.project.video.fps);
+                catchUpLiveAudio(
+                    state, static_cast<int>(std::floor(
+                               std::max(0.0, state.playhead) * fps + 1e-6)));
+            }
         }
 
         // ---- render the pipeline ---------------------------------------
-        renderPreviewFrame(state);
+
+
+        {
+            PF_PROFILE_PHASE(render, Render);
+            renderPreviewFrame(state);
+            // Level 3: remember each block's evaluation time for the ranking.
+            for (const Node &profiled : state.project.graph.nodes) PF_PROFILE_NODE(profiled);
+        }
 
         // ---- live graph audio ------------------------------------------
         // The region evaluated above just produced this video frame's samples;
         // stream them so the sound follows the video clock frame by frame.
-        if (state.playing && state.clip.liveStreamActive()) {
-            pushLiveAudioWindow(state);
-            state.liveAudioFrame =
-                std::max(state.liveAudioFrame, state.frameContext.frame + 1);
+        {
+            PF_PROFILE_PHASE(live, LiveAudio);
+            if (state.playing && state.clip.liveStreamActive()) {
+                pushLiveAudioWindow(state);
+                state.liveAudioFrame =
+                    std::max(state.liveAudioFrame, state.frameContext.frame + 1);
+            }
         }
 
         // ---- draw -------------------------------------------------------
@@ -1650,31 +1736,39 @@ int runApp(int argc, char **argv) {
         // same pass can be inspected (and screenshotted) at the bigger size.
         const int shotScale = capture ? state.project.graph.renderCaptureScale() : 1;
         const bool scaledShot = capture && shotScale > 1 && captureEditorScaled(state, shotScale);
-        if (capture) {
-            captureTarget = scaledShot ? state.editorTarget
-                                       : LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
-            if (!scaledShot) BeginTextureMode(captureTarget);
-        } else {
-            BeginDrawing();
-        }
-        if (!scaledShot) {
-            // Widget ids are handed out in draw order, so they must be reset
-            // before the panels are drawn.
-            ui::beginFrame();
-            ClearBackground(palette::background());
-            // A dialog freezes the editor behind it; popups are handled inside.
-            drawEditor(state, !dialogOpen(state));
-            // Self Reference reads this frame; the export overlay is drawn
-            // later, in the progress callback, so the grey-out never enters the
-            // pipeline.
-            captureEditorFrame(state, state.frameContext.frame);
+
+        {
+            PF_PROFILE_PHASE(ui, UiDraw);
+            if (capture) {
+                captureTarget = scaledShot ? state.editorTarget
+                                           : LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
+                if (!scaledShot) BeginTextureMode(captureTarget);
+            } else {
+                BeginDrawing();
+            }
+            if (!scaledShot) {
+                // Widget ids are handed out in draw order, so they must be reset
+                // before the panels are drawn.
+                ui::beginFrame();
+                ClearBackground(palette::background());
+                // A dialog freezes the editor behind it; popups are handled inside.
+                drawEditor(state, !dialogOpen(state));
+                // Self Reference reads this frame; the export overlay is drawn
+                // later, in the progress callback, so the grey-out never enters
+                // the pipeline.
+                captureEditorFrame(state, state.frameContext.frame);
+            }
         }
 
-        if (capture) {
-            if (!scaledShot) EndTextureMode();
-        } else {
-            EndDrawing();
+        {
+            PF_PROFILE_PHASE(swap, Swap);
+            if (capture) {
+                if (!scaledShot) EndTextureMode();
+            } else {
+                EndDrawing();
+            }
         }
+
 
         if (capture) {
             // Read back the off-screen frame and flip it into top-down order
@@ -1718,6 +1812,14 @@ int runApp(int argc, char **argv) {
         const double delta = now - lastFrameTime;
         lastFrameTime = now;
         if (delta > 0.0) state.lastUiFps = state.lastUiFps * 0.9 + (1.0 / delta) * 0.1;
+        PF_PROFILE_FRAME();
+
+#if PF_PROFILE_ENABLED
+        if (profileSeconds > 0.0 && now >= profileNextPrint) {
+            profileNextPrint = now + 5.0;
+            pf::profile::report(5.0, false, profileContext(state));
+        }
+#endif
 
         // ---- deferred work ---------------------------------------------
         if (state.exporting) performExport(state);

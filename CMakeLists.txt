@@ -19,6 +19,19 @@ endif ()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# ---------------------------------------------------------------------------
+# Profiling instrumentation (see src/core/Profile.h)
+# ---------------------------------------------------------------------------
+# 0 = none (release builds: no probes, no strings, no code), 1 = frame phases,
+# 2 = + the per-editor-panel breakdown, 3 = + the per-block ranking. A profiling
+# build also honours PF_PROFILE_SECONDS / PF_PROFILE_AUTOPLAY so a session can
+# run unattended. Configure a separate tree, e.g.
+#   cmake -S . -B build_prof -DPF_PROFILE_LEVEL=3 [other options]
+set(PF_PROFILE_LEVEL "0" CACHE STRING "Profiling depth: 0 none, 1 frame phases, 2 + panels, 3 + blocks")
+if (NOT PF_PROFILE_LEVEL MATCHES "^[0-3]$")
+    message(FATAL_ERROR "PF_PROFILE_LEVEL must be 0, 1, 2 or 3 (got '${PF_PROFILE_LEVEL}')")
+endif ()
+
 # Static link of raylib + CrystalGUI into a single executable avoids shipping
 # DLLs next to the binary; DLL builds are still possible with -DBUILD_SHARED_LIBS=ON
 if (NOT DEFINED BUILD_SHARED_LIBS)
@@ -69,6 +82,7 @@ add_library(pulseforge_core STATIC
     src/core/Sorting.cpp
     src/core/TextEdit.cpp
     src/core/Registry.cpp
+    src/core/Profile.cpp
     src/dsp/AudioClip.cpp
     src/dsp/Fft.cpp
     src/dsp/Analysis.cpp
@@ -92,6 +106,7 @@ target_include_directories(pulseforge_core PRIVATE
 target_compile_definitions(pulseforge_core PUBLIC
     PF_FFMPEG_DEFAULT="${PF_FFMPEG_EXE}"
     PF_FFPROBE_DEFAULT="${PF_FFPROBE_EXE}"
+    PF_PROFILE_LEVEL=${PF_PROFILE_LEVEL}
 )
 
 if (MSVC)
