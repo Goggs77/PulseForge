@@ -1540,6 +1540,9 @@ int runApp(int argc, char **argv) {
     state.projectDirectory = GetWorkingDirectory();
     state.preferencesPath = state.projectDirectory + "/pulseforge_preferences.json";
     loadPreferences(state.preferences, state.preferencesPath);
+    // Immediate-mode redraws every frame, so the cap is what decides how much of
+    // the machine the editor may use; 0 means uncapped.
+    SetTargetFPS(state.preferences.editorFpsCap);
     ui::theme().uiScale = state.preferences.guiScale;
     ui::setDarkTheme(state.preferences.defaultDarkTheme);
     state.project.resetToDefault(&state.renderer.shaders());

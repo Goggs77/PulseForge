@@ -65,8 +65,8 @@ The app is still in early stages, so expect minor bugs and glitches.
   I guess realtime for this kind of quality is absurd,
   but you can remove this for experiments.
 - **Preferences.** A preferences dialog holds the startup theme and the GUI
-  scaling factor, the async audio loading switch, next to the project's own
-  information and metadata.
+  scaling factor, the async audio loading switch and the editor frame cap, next to
+  the project's own information and metadata.
 
 ## Requirements
 
@@ -185,6 +185,9 @@ The **Prefs** button (or `Ctrl+,`) opens a dialog with:
   imported clip happens on a worker thread, so the graph appears immediately and
   the timeline and the preview stay greyed out ("Loading audio...") until the
   clip is ready. Turn it off to load inline instead.
+- **Editor frame cap** - 0 to 240 fps, 60 by default. The editor redraws itself
+  every frame (it is immediate mode), so this is the knob that decides how much
+  CPU and GPU it may spend; 0 lets it run as fast as its work allows.
 - **Project information and metadata** - project name, target resolution,
   target frame rate, duration (following the audio or fixed), output container,
   codec pair, quality (CRF), audio bitrate, output sample rate (48 kHz by

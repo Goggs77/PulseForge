@@ -64,6 +64,10 @@ struct Preferences {
     // or dropping a file does not block the editor; the timeline and the preview
     // stay greyed out until the clip is ready.
     bool asyncAudioLoad = true;
+    // Editor frame rate cap in frames per second; 0 draws as fast as the work
+    // allows. The editor redraws everything every frame (immediate mode), so this
+    // is the knob that decides how much CPU and GPU it may spend.
+    int editorFpsCap = 60;
 };
 
 void loadPreferences(Preferences &preferences, const std::string &path);

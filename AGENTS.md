@@ -69,13 +69,19 @@ scope costs nothing at level 0. A profiling build also honours
 by *frames*, not by samples: a phase can be probed more than once per frame (the
 live audio work sits on both sides of the pipeline render).
 
-What that measurement showed on the development machine (i5-10400F / GTX 1660 Ti,
-2K window, `templates/demo.pforge`): a 7.7 ms frame in which the UI draw is
-7.3 ms and the pipeline render only 0.25 ms - and inside the UI draw, two
-`ffmpeg::available()` calls in `drawTopBar` cost 1.77 ms *each* (the function
-searches the PATH on every call) while the ~55 CrystalGUI button boxes cost
-2.2 ms (each box element draws a full-window SDF quad). Do not put
-`ffmpeg::available()`-style probing on a per-frame path.
+What the first sessions showed (i5-10400F / GTX 1660 Ti, 2K window,
+`templates/demo.pforge`): a 7.7 ms frame in which the UI draw was 7.3 ms and the
+pipeline render only 0.25 ms. Inside the UI draw, two `ffmpeg::available()` calls
+in `drawTopBar` cost 1.77 ms *each* (the function walked the PATH on every call;
+the search is cached now, 2.95 -> 0.02 ms) and the ~55 CrystalGUI button boxes
+cost 2.2 ms (each box element drew a full-window SDF quad; the app draws the boxes
+itself now, 2.2 -> 0.5 ms). What is left to optimize: the canvas redraw (~1.9 ms
+for 33 visible nodes, so it grows with the graph and wants invalidation-based
+caching) and, while playing, the audio-rate region (~2.7 ms/frame - its sample
+loop still resolves each node with a linear `Graph::find` and copies the whole
+`EvalContext` per sample). Do not put `ffmpeg::available()`-style probing or
+non-batchable per-item shader passes on a per-frame path; the editor frame cap in
+Preferences limits the damage otherwise.
 
 ## Tests and verification
 
