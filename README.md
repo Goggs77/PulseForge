@@ -397,6 +397,14 @@ happened to sit:
   them, and the member list heals itself: a deleted block, a nested group or an
   id already claimed by another group is dropped from the `Members` text.
 
+Overlapping blocks layer by their id - the block added later draws on top, and
+that includes its in-block visual (a spectrum, a meter, a curve) and its footer:
+they are clipped behind any block that layers above them instead of always
+painting over every other block's body. A Group's frame is a container, so it
+draws just below its lowest-numbered member: it stays behind everything it owns,
+and two overlapping groups layer by their members' ids rather than by the ids of
+the groups themselves.
+
 ## Writing shaders
 
 The **Shader** block points at a `.glsl` file (the file picker in the inspector

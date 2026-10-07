@@ -105,9 +105,24 @@ passes on a per-frame path.
   and every link, plus the hovered port and the drag state (both decide cached
   details: the cable highlight and the group drop target). The live layer (block
   visuals, footers, hover tooltip, drag preview, panel header) is drawn every
-  frame on top. Add anything drawn in the control layer to that key, or it will go
-  stale; a render-scaled pass (the hyper-resolution export) skips the cache
-  because the target is a different size.
+  frame above the cached blit. Add anything drawn in the control layer to that
+  key, or it will go stale; a render-scaled pass (the hyper-resolution export)
+  skips the cache because the target is a different size.
+- The canvas layers by `nodeLayerKey` (GraphCanvasWidget.cpp), not by the order
+  of `Graph::nodes`: a block's key is its own id (the block added later draws on
+  top), and a group frame's key is half a step below its lowest member, so the
+  frame stays behind everything it owns while two overlapping groups layer by
+  their members' ids. `canvasLayerOrder` is shared by the control layer, the
+  live pass and `groupAtPoint` (which is also the drag's drop target), so what is
+  drawn on top is what a click finds. Because the cached control layer is
+  blitted as one image under the live pass, a block's visual and footer would
+  always paint over every other block; the live pass therefore repaints the
+  frames of the blocks above it over the overlap (`drawNodeFrame`, the same
+  routine the control layer uses), scissored to the intersection. Group frames
+  are skipped there: they are translucent containers, and repainting them would
+  double their tint. Measured cost of the extra intersection scan on
+  `templates/demo.pforge`: canvas 0.60 -> 0.67 ms, and it only redraws when
+  blocks actually overlap.
 
 ## Tests and verification
 

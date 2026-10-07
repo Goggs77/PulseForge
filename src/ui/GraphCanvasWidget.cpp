@@ -138,6 +138,38 @@ std::vector<int> groupMembersOf(const Node &group) {
     return parseGroupMembers(group.pstr("members"));
 }
 
+// Layer key of one canvas element. A block layers by its own id, which is the
+// rule the user sees as "a block added later draws on top". A group frame is
+// not a block: it sits half a step below its lowest member, so it stays behind
+// everything it owns while two overlapping groups still layer by their
+// members' ids instead of by the groups' own ids. Ties are impossible - a
+// block belongs to at most one group, so no two frames share a lowest member.
+long long nodeLayerKey(const Graph &graph, const Node &node) {
+    if (!isGroupNode(node)) return static_cast<long long>(node.id) * 2;
+    int lowest = 0;
+    for (const int id : groupMembersOf(node)) {
+        const Node *member = graph.find(id);
+        if (!member || isGroupNode(*member)) continue;
+        if (lowest == 0 || id < lowest) lowest = id;
+    }
+    return static_cast<long long>(lowest > 0 ? lowest : node.id) * 2 - 1;
+}
+
+// Ascending layer order: earlier entries draw first, later ones on top. Used by
+// the cached control layer, the live pass (which repaints the frames above a
+// block's content) and the group hit test, so they all agree.
+void canvasLayerOrder(const Graph &graph, std::vector<const Node *> &order) {
+    std::vector<std::pair<long long, const Node *>> entries;
+    entries.reserve(graph.nodes.size());
+    for (const Node &node : graph.nodes) entries.emplace_back(nodeLayerKey(graph, node), &node);
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const std::pair<long long, const Node *> &a,
+                        const std::pair<long long, const Node *> &b) { return a.first < b.first; });
+    order.clear();
+    order.reserve(entries.size());
+    for (const auto &entry : entries) order.push_back(entry.second);
+}
+
 // The group's arranged slots: members, their depths and the layer bands the
 // Depth tolerance parameter merges.
 std::vector<GroupSlot> groupSlots(const Graph &graph, const Node &group) {
@@ -225,8 +257,11 @@ void syncGroups(Graph &graph, int draggingNode) {
 
 // The group under a world-space point, ignoring one block (the dragged one).
 int groupAtPoint(const Graph &graph, Vector2 point, int excludeId) {
-    for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
-        const Node &node = *it;
+    // The top-most frame wins, which is the layer order the canvas draws in.
+    std::vector<const Node *> order;
+    canvasLayerOrder(graph, order);
+    for (auto it = order.rbegin(); it != order.rend(); ++it) {
+        const Node &node = **it;
         if (!isGroupNode(node) || node.id == excludeId) continue;
         if (CheckCollisionPointRec(point, groupFrame(graph, node))) return node.id;
     }
@@ -391,6 +426,142 @@ uint64_t canvasControlKey(const UiState &state, Rectangle bounds) {
 
 // ---- control layer (cached) ------------------------------------------------
 
+// One group's frame: the translucent card drawn behind its members. Shared by
+// the cached control layer and the live pass, which repaints the frames that
+// layer above a block's live content.
+void drawGroupFrame(UiState &state, const Node &group, const CanvasView &canvas, int dropTarget) {
+    const Graph &graph = *canvas.graph;
+    const ViewState &view = *canvas.view;
+    const Rectangle viewport = canvas.viewport;
+    const ui::Theme &t = ui::theme();
+    const Rectangle world = nodeBounds(graph, group);
+    const Vector2 origin = canvas.toScreen(Vector2{world.x, world.y});
+    const Rectangle box{origin.x, origin.y, world.width * view.zoom, world.height * view.zoom};
+    if (box.x > viewport.x + viewport.width || box.x + box.width < viewport.x ||
+        box.y > viewport.y + viewport.height || box.y + box.height < viewport.y) {
+        return;
+    }
+    const SortingColours colours = sortingColours(group.enabled ? 1.0f : 0.55f);
+    const float header = std::min(box.height, groupHeaderHeight() * view.zoom);
+    const bool selected = group.id == state.selectedNode;
+    const bool highlighted = dropTarget == group.id;
+    DrawRectangleRounded(box, 0.03f, 6, colours.body);
+    DrawRectangleRounded(Rectangle{box.x, box.y, box.width, header}, 0.06f, 6, colours.header);
+    DrawRectangleRoundedLines(box, 0.03f, 6,
+                              highlighted ? t.accent : (selected ? t.accent : colours.border));
+    if (highlighted) {
+        DrawRectangleRoundedLines(Rectangle{box.x - 2.0f, box.y - 2.0f, box.width + 4.0f,
+                                            box.height + 4.0f},
+                                  0.03f, 6, palette::withAlpha(t.accent, 0.65f));
+    }
+    std::vector<int> members = groupMembersOf(group);
+    size_t live = 0;
+    for (const int id : members) {
+        if (graph.find(id)) ++live;
+    }
+    char title[160];
+    if (live > 0) {
+        std::snprintf(title, sizeof(title), "%s  -  %zu blocks", group.displayTitle().c_str(),
+                      live);
+    } else {
+        std::snprintf(title, sizeof(title), "%s  -  drop blocks inside",
+                      group.displayTitle().c_str());
+    }
+    ui::drawTextClipped(
+        Rectangle{box.x + 10.0f * view.zoom, box.y, box.width - 20.0f * view.zoom, header}, title,
+        ui::pixelText(12.5f * view.zoom), colours.ink, ui::Align::Left, true);
+}
+
+// One block's frame: body, header, title, border, ports, labels and badge.
+void drawNodeFrame(UiState &state, const Node &node, const CanvasView &canvas) {
+    const Graph &graph = *canvas.graph;
+    const ViewState &view = *canvas.view;
+    const Rectangle viewport = canvas.viewport;
+    const ui::Theme &t = ui::theme();
+    const Rectangle world = nodeBounds(graph, node);
+    const Vector2 origin = canvas.toScreen(Vector2{world.x, world.y});
+    const Rectangle box{origin.x, origin.y, world.width * view.zoom, world.height * view.zoom};
+    if (box.x > viewport.x + viewport.width || box.x + box.width < viewport.x ||
+        box.y > viewport.y + viewport.height || box.y + box.height < viewport.y) {
+        return;
+    }
+    const bool selected = node.id == state.selectedNode;
+    const bool sorting = isSortingNode(node);
+    const SortingColours colours =
+        sortingColours(node.enabled ? 1.0f : 0.55f, node.kind == "sort.sticky");
+    const Color accent = sorting ? colours.ink : kindAccent(node.def->category);
+    DrawRectangleRounded(box, 0.06f, 6,
+                         sorting ? colours.body
+                                 : palette::withAlpha(t.panelRaised, node.enabled ? 0.96f : 0.6f));
+    const float headerHeight = box.height * headerFraction(node);
+    DrawRectangleRounded(Rectangle{box.x, box.y, box.width, headerHeight}, 0.12f, 6,
+                         sorting ? colours.header
+                                 : palette::withAlpha(accent, node.enabled ? 0.85f : 0.4f));
+    DrawRectangleRoundedLines(box, 0.06f, 6,
+                              selected ? t.accent
+                                       : (sorting ? colours.border
+                                                  : palette::withAlpha(t.border, 0.95f)));
+    if (selected) {
+        DrawRectangleRoundedLines(Rectangle{box.x - 2.0f, box.y - 2.0f, box.width + 4.0f,
+                                            box.height + 4.0f},
+                                  0.06f, 6, t.accent);
+    }
+    ui::drawText(Rectangle{box.x + 8.0f * view.zoom, box.y, box.width - 16.0f, headerHeight},
+                 node.displayTitle().c_str(), ui::pixelText(13.0f * view.zoom),
+                 sorting ? colours.ink : ui::readableOn(accent), ui::Align::Left, true);
+    if (!node.enabled) {
+        ui::drawText(Rectangle{box.x, box.y, box.width - 6.0f * view.zoom, headerHeight}, "off",
+                     ui::pixelText(11.0f * view.zoom),
+                     palette::withAlpha(sorting ? colours.ink : ui::readableOn(accent), 0.85f),
+                     ui::Align::Right);
+    }
+    for (size_t i = 0; i < node.inputPorts().size(); ++i) {
+        const PortDesc &port = node.inputPorts()[i];
+        const Vector2 position = inputPortPosition(box, node, static_cast<int>(i));
+        const bool connected = graph.findInputLink(node.id, static_cast<int>(i)) != nullptr;
+        DrawCircleV(position, portRadius(box),
+                    connected ? portTypeColor(port.type) : palette::modulate(t.panelAlt, 0.9f));
+        DrawCircleLinesV(position, portRadius(box), portTypeColor(port.type));
+        if (view.zoom > 0.55f) {
+            ui::drawTextClipped(
+                Rectangle{position.x + 10.0f * view.zoom,
+                          position.y - portRowHeight() * 0.5f * view.zoom, box.width * 0.55f,
+                          portRowHeight() * view.zoom},
+                port.name.c_str(), ui::pixelText(10.0f * view.zoom), t.text);
+        }
+    }
+    for (size_t i = 0; i < node.outputPorts().size(); ++i) {
+        const PortDesc &port = node.outputPorts()[i];
+        const Vector2 position = outputPortPosition(box, node, static_cast<int>(i));
+        const bool connected = [&]() {
+            for (const Link &link : graph.links) {
+                if (link.fromNode == node.id && link.fromPort == static_cast<int>(i)) {
+                    return true;
+                }
+            }
+            return false;
+        }();
+        DrawCircleV(position, portRadius(box),
+                    connected ? portTypeColor(port.type) : palette::modulate(t.panelAlt, 0.9f));
+        DrawCircleLinesV(position, portRadius(box), portTypeColor(port.type));
+        if (view.zoom > 0.55f) {
+            ui::drawTextClipped(
+                Rectangle{position.x - 10.0f * view.zoom - box.width * 0.5f,
+                          position.y - portRowHeight() * 0.5f * view.zoom, box.width * 0.5f,
+                          portRowHeight() * view.zoom},
+                port.name.c_str(), ui::pixelText(10.0f * view.zoom), t.text, ui::Align::Right);
+        }
+    }
+    const std::string badge = visualFraction(node) > 0.0f ? std::string() : nodeBadge(node);
+    if (!badge.empty() && view.zoom > 0.5f) {
+        const float badgeSize = std::min(18.0f * view.zoom, box.height * 0.35f);
+        const Rectangle badgeRect{box.x, box.y + box.height * 0.30f, box.width,
+                                  box.height * 0.36f};
+        ui::drawText(badgeRect, badge.c_str(), ui::pixelText(badgeSize),
+                     palette::withAlpha(t.text, 0.95f), ui::Align::Center, true);
+    }
+}
+
 // Everything that only changes with the view, the theme or the graph: the links
 // and each block's frame, header, title, ports, port labels and badge. Drawn
 // into the cache target once, then blitted until the key changes.
@@ -398,8 +569,6 @@ void drawCanvasControlLayer(UiState &state, Rectangle bounds) {
     const CanvasView canvas = makeCanvasView(state, bounds);
     const Graph &graph = *canvas.graph;
     const ViewState &view = *canvas.view;
-    const Rectangle viewport = canvas.viewport;
-    const ui::Theme &t = ui::theme();
 
     for (const Link &link : graph.links) {
         const Node *from = graph.find(link.fromNode);
@@ -430,7 +599,10 @@ void drawCanvasControlLayer(UiState &state, Rectangle bounds) {
                    highlight ? 3.0f : 2.0f);
     }
 
-    // ---- groups (behind their members) -------------------------------------
+    // ---- frames, in layer order --------------------------------------------
+    // A group frame is not a block: it draws just below its lowest member, so
+    // it stays behind everything it owns while two overlapping groups layer by
+    // their members' ids instead of by the groups' own ids.
     // The highlight that shows where a dragged block would land follows the drag
     // state, which is part of the cache key.
     int dropTarget = 0;
@@ -443,133 +615,13 @@ void drawCanvasControlLayer(UiState &state, Rectangle bounds) {
             dropTarget = groupAtPoint(graph, centre, dragged->id);
         }
     }
-    for (const Node &group : graph.nodes) {
-        if (!isGroupNode(group)) continue;
-        const Rectangle world = nodeBounds(graph, group);
-        const Vector2 origin = canvas.toScreen(Vector2{world.x, world.y});
-        const Rectangle box{origin.x, origin.y, world.width * view.zoom,
-                            world.height * view.zoom};
-        if (box.x > viewport.x + viewport.width || box.x + box.width < viewport.x ||
-            box.y > viewport.y + viewport.height || box.y + box.height < viewport.y) {
-            continue;
-        }
-        const SortingColours colours = sortingColours(group.enabled ? 1.0f : 0.55f);
-        const float header = std::min(box.height, groupHeaderHeight() * view.zoom);
-        const bool selected = group.id == state.selectedNode;
-        const bool highlighted = dropTarget == group.id;
-        DrawRectangleRounded(box, 0.03f, 6, colours.body);
-        DrawRectangleRounded(Rectangle{box.x, box.y, box.width, header}, 0.06f, 6,
-                             colours.header);
-        DrawRectangleRoundedLines(box, 0.03f, 6,
-                                  highlighted ? t.accent : (selected ? t.accent : colours.border));
-        if (highlighted) {
-            DrawRectangleRoundedLines(Rectangle{box.x - 2.0f, box.y - 2.0f, box.width + 4.0f,
-                                                box.height + 4.0f},
-                                      0.03f, 6, palette::withAlpha(t.accent, 0.65f));
-        }
-        std::vector<int> members = groupMembersOf(group);
-        size_t live = 0;
-        for (const int id : members) {
-            if (graph.find(id)) ++live;
-        }
-        char title[160];
-        if (live > 0) {
-            std::snprintf(title, sizeof(title), "%s  -  %zu blocks",
-                          group.displayTitle().c_str(), live);
+    std::vector<const Node *> order;
+    canvasLayerOrder(graph, order);
+    for (const Node *node : order) {
+        if (isGroupNode(*node)) {
+            drawGroupFrame(state, *node, canvas, dropTarget);
         } else {
-            std::snprintf(title, sizeof(title), "%s  -  drop blocks inside",
-                          group.displayTitle().c_str());
-        }
-        ui::drawTextClipped(Rectangle{box.x + 10.0f * view.zoom, box.y,
-                                      box.width - 20.0f * view.zoom, header},
-                            title, ui::pixelText(12.5f * view.zoom), colours.ink, ui::Align::Left,
-                            true);
-    }
-
-    for (const Node &node : graph.nodes) {
-        if (isGroupNode(node)) continue;
-        const Rectangle world = nodeBounds(graph, node);
-        const Vector2 origin = canvas.toScreen(Vector2{world.x, world.y});
-        const Rectangle box{origin.x, origin.y, world.width * view.zoom, world.height * view.zoom};
-        if (box.x > viewport.x + viewport.width || box.x + box.width < viewport.x ||
-            box.y > viewport.y + viewport.height || box.y + box.height < viewport.y) {
-            continue;
-        }
-        const bool selected = node.id == state.selectedNode;
-        const bool sorting = isSortingNode(node);
-        const SortingColours colours =
-            sortingColours(node.enabled ? 1.0f : 0.55f, node.kind == "sort.sticky");
-        const Color accent = sorting ? colours.ink : kindAccent(node.def->category);
-        DrawRectangleRounded(box, 0.06f, 6,
-                             sorting ? colours.body
-                                     : palette::withAlpha(t.panelRaised,
-                                                          node.enabled ? 0.96f : 0.6f));
-        const float headerHeight = box.height * headerFraction(node);
-        DrawRectangleRounded(Rectangle{box.x, box.y, box.width, headerHeight}, 0.12f, 6,
-                             sorting ? colours.header
-                                     : palette::withAlpha(accent, node.enabled ? 0.85f : 0.4f));
-        DrawRectangleRoundedLines(box, 0.06f, 6,
-                                  selected ? t.accent
-                                           : (sorting ? colours.border
-                                                      : palette::withAlpha(t.border, 0.95f)));
-        if (selected) {
-            DrawRectangleRoundedLines(Rectangle{box.x - 2.0f, box.y - 2.0f, box.width + 4.0f,
-                                                box.height + 4.0f},
-                                      0.06f, 6, t.accent);
-        }
-        ui::drawText(Rectangle{box.x + 8.0f * view.zoom, box.y, box.width - 16.0f, headerHeight},
-                     node.displayTitle().c_str(), ui::pixelText(13.0f * view.zoom),
-                     sorting ? colours.ink : ui::readableOn(accent), ui::Align::Left, true);
-        if (!node.enabled) {
-            ui::drawText(Rectangle{box.x, box.y, box.width - 6.0f * view.zoom, headerHeight},
-                         "off", ui::pixelText(11.0f * view.zoom),
-                         palette::withAlpha(sorting ? colours.ink : ui::readableOn(accent), 0.85f),
-                         ui::Align::Right);
-        }
-        for (size_t i = 0; i < node.inputPorts().size(); ++i) {
-            const PortDesc &port = node.inputPorts()[i];
-            const Vector2 position = inputPortPosition(box, node, static_cast<int>(i));
-            const bool connected = graph.findInputLink(node.id, static_cast<int>(i)) != nullptr;
-            DrawCircleV(position, portRadius(box),
-                        connected ? portTypeColor(port.type) : palette::modulate(t.panelAlt, 0.9f));
-            DrawCircleLinesV(position, portRadius(box), portTypeColor(port.type));
-            if (view.zoom > 0.55f) {
-                ui::drawTextClipped(
-                    Rectangle{position.x + 10.0f * view.zoom,
-                              position.y - portRowHeight() * 0.5f * view.zoom, box.width * 0.55f,
-                              portRowHeight() * view.zoom},
-                    port.name.c_str(), ui::pixelText(10.0f * view.zoom), t.text);
-            }
-        }
-        for (size_t i = 0; i < node.outputPorts().size(); ++i) {
-            const PortDesc &port = node.outputPorts()[i];
-            const Vector2 position = outputPortPosition(box, node, static_cast<int>(i));
-            const bool connected = [&]() {
-                for (const Link &link : graph.links) {
-                    if (link.fromNode == node.id && link.fromPort == static_cast<int>(i)) {
-                        return true;
-                    }
-                }
-                return false;
-            }();
-            DrawCircleV(position, portRadius(box),
-                        connected ? portTypeColor(port.type) : palette::modulate(t.panelAlt, 0.9f));
-            DrawCircleLinesV(position, portRadius(box), portTypeColor(port.type));
-            if (view.zoom > 0.55f) {
-                ui::drawTextClipped(
-                    Rectangle{position.x - 10.0f * view.zoom - box.width * 0.5f,
-                              position.y - portRowHeight() * 0.5f * view.zoom, box.width * 0.5f,
-                              portRowHeight() * view.zoom},
-                    port.name.c_str(), ui::pixelText(10.0f * view.zoom), t.text, ui::Align::Right);
-            }
-        }
-        const std::string badge = visualFraction(node) > 0.0f ? std::string() : nodeBadge(node);
-        if (!badge.empty() && view.zoom > 0.5f) {
-            const float badgeSize = std::min(18.0f * view.zoom, box.height * 0.35f);
-            const Rectangle badgeRect{box.x, box.y + box.height * 0.30f, box.width,
-                                      box.height * 0.36f};
-            ui::drawText(badgeRect, badge.c_str(), ui::pixelText(badgeSize),
-                         palette::withAlpha(t.text, 0.95f), ui::Align::Center, true);
+            drawNodeFrame(state, *node, canvas);
         }
     }
 }
@@ -581,7 +633,10 @@ void drawCanvasLiveLayer(UiState &state, Rectangle bounds) {
     const ViewState &view = *canvas.view;
     const Rectangle viewport = canvas.viewport;
     const ui::Theme &t = ui::theme();
-    for (Node &node : graph.nodes) {
+    std::vector<const Node *> order;
+    canvasLayerOrder(graph, order);
+    for (size_t index = 0; index < order.size(); ++index) {
+        const Node &node = *order[index];
         if (isGroupNode(node)) continue;
         const Rectangle world = nodeBounds(graph, node);
         const Vector2 origin = canvas.toScreen(Vector2{world.x, world.y});
@@ -590,28 +645,72 @@ void drawCanvasLiveLayer(UiState &state, Rectangle bounds) {
             box.y > viewport.y + viewport.height || box.y + box.height < viewport.y) {
             continue;
         }
+        // Everything this block paints live: its visual band and its footer.
+        float liveTop = box.y + box.height;
+        float liveBottom = box.y;
         if (visualFraction(node) > 0.0f) {
-            drawNodeVisual(state, node, visualRect(node, box), viewport, view.zoom);
+            const Rectangle visual = visualRect(node, box);
+            drawNodeVisual(state, node, visual, viewport, view.zoom);
             // drawNodeVisual scissorstamps its own body and ends the scissor when
             // it is done, so the canvas clip has to be re-established or the next
             // block would be free to draw over other panels.
             BeginScissorMode(static_cast<int>(viewport.x), static_cast<int>(viewport.y),
                              static_cast<int>(viewport.width),
                              static_cast<int>(viewport.height));
+            liveTop = std::min(liveTop, visual.y);
+            liveBottom = std::max(liveBottom, visual.y + visual.height);
         }
-        if (isSortingNode(node)) continue;  // nothing to evaluate, so no footer
-        const float footerHeight = box.height * footerFraction(node);
-        const Rectangle footer{box.x + 6.0f * view.zoom, box.y + box.height - footerHeight,
-                               box.width - 12.0f * view.zoom, footerHeight};
-        char info[96];
-        if (!node.status.empty()) {
-            std::snprintf(info, sizeof(info), "%s", node.status.c_str());
-            ui::drawTextClipped(footer, info, ui::pixelText(10.0f * view.zoom), t.danger);
-        } else {
-            std::snprintf(info, sizeof(info), "%s  %.2f ms", node.def->category.c_str(),
-                          node.lastEvalMs);
-            ui::drawTextClipped(footer, info, ui::pixelText(10.0f * view.zoom),
-                                palette::withAlpha(t.textDim, 0.9f));
+        // Sorting blocks carry nothing to evaluate, so their footer stays empty.
+        if (!isSortingNode(node)) {
+            const float footerHeight = box.height * footerFraction(node);
+            const Rectangle footer{box.x + 6.0f * view.zoom, box.y + box.height - footerHeight,
+                                   box.width - 12.0f * view.zoom, footerHeight};
+            char info[96];
+            if (!node.status.empty()) {
+                std::snprintf(info, sizeof(info), "%s", node.status.c_str());
+                ui::drawTextClipped(footer, info, ui::pixelText(10.0f * view.zoom), t.danger);
+            } else {
+                std::snprintf(info, sizeof(info), "%s  %.2f ms", node.def->category.c_str(),
+                              node.lastEvalMs);
+                ui::drawTextClipped(footer, info, ui::pixelText(10.0f * view.zoom),
+                                    palette::withAlpha(t.textDim, 0.9f));
+            }
+            liveTop = std::min(liveTop, footer.y);
+            liveBottom = std::max(liveBottom, footer.y + footerHeight);
+        }
+        // The cached control layer was blitted underneath this pass, so a block
+        // that layers above this one would otherwise stay under its live
+        // content. Repaint those frames over the overlap, in layer order, so a
+        // spectrum or a meter obeys the same "higher id on top" rule as the
+        // blocks themselves. Group frames are translucent containers and stay
+        // under live content, which is also what keeps their tint single.
+        const Rectangle live{box.x, liveTop, box.width, liveBottom - liveTop};
+        for (size_t above = index + 1; above < order.size(); ++above) {
+            const Node &other = *order[above];
+            if (isGroupNode(other)) continue;
+            const Rectangle otherWorld = nodeBounds(graph, other);
+            const Vector2 otherOrigin =
+                canvas.toScreen(Vector2{otherWorld.x, otherWorld.y});
+            const Rectangle otherBox{otherOrigin.x, otherOrigin.y, otherWorld.width * view.zoom,
+                                     otherWorld.height * view.zoom};
+            const float x0 = std::max(live.x, otherBox.x);
+            const float y0 = std::max(live.y, otherBox.y);
+            const float x1 = std::min(live.x + live.width, otherBox.x + otherBox.width);
+            const float y1 = std::min(live.y + live.height, otherBox.y + otherBox.height);
+            if (x1 <= x0 || y1 <= y0) continue;
+            const float clippedX0 = std::max(x0, viewport.x);
+            const float clippedY0 = std::max(y0, viewport.y);
+            const float clippedX1 = std::min(x1, viewport.x + viewport.width);
+            const float clippedY1 = std::min(y1, viewport.y + viewport.height);
+            if (clippedX1 <= clippedX0 || clippedY1 <= clippedY0) continue;
+            BeginScissorMode(static_cast<int>(clippedX0), static_cast<int>(clippedY0),
+                             static_cast<int>(clippedX1 - clippedX0),
+                             static_cast<int>(clippedY1 - clippedY0));
+            drawNodeFrame(state, other, canvas);
+            EndScissorMode();
+            BeginScissorMode(static_cast<int>(viewport.x), static_cast<int>(viewport.y),
+                             static_cast<int>(viewport.width),
+                             static_cast<int>(viewport.height));
         }
     }
 }
