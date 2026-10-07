@@ -119,8 +119,15 @@ std::string ffmpeg::ffprobePath() {
 }
 
 bool ffmpeg::available() {
-    return !searchOnPath("ffmpeg.exe").empty() || fileExists(ffmpegPath()) ||
-           ffmpegPath().find(':') != std::string::npos;
+    // Cached: searching the PATH costs ~1.8 ms on this machine (SearchPathA walks
+    // every entry), and the top bar asks for it twice per frame - which was 45% of
+    // a frame. ffmpegPath() caches its own answer the same way, so a binary that
+    // appears later in the session is not picked up either way; restart to see it.
+    static const bool ready = [] {
+        return !searchOnPath("ffmpeg.exe").empty() || fileExists(ffmpegPath()) ||
+               ffmpegPath().find(':') != std::string::npos;
+    }();
+    return ready;
 }
 
 namespace {
