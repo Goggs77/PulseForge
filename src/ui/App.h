@@ -115,6 +115,13 @@ struct UiState {
     // into the renderer's capture. Kept between frames and rebuilt when the size
     // changes; unused (and so never created) while the factor is 1.
     RenderTexture2D editorTarget{};
+    // Cached control layer of the graph canvas (block frames, ports, labels and
+    // links). Immediate mode would redraw ~1.4 ms of identical geometry every
+    // frame; the key is a hash of everything that layer depends on, so it is
+    // only redrawn when the view, the theme or the graph actually changes. The
+    // live parts (block visuals, footers, hover, drag) stay per-frame.
+    RenderTexture2D canvasCache{};
+    uint64_t canvasCacheKey = 0;
 
     // Background audio loading ("Async audio loading" preference). The graph is
     // live immediately; the worker only produces the decoded clip, its analysis

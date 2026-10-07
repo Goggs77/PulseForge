@@ -1819,6 +1819,10 @@ int runApp(int argc, char **argv) {
         UnloadRenderTexture(state.editorTarget);
         state.editorTarget = RenderTexture2D{};
     }
+    if (state.canvasCache.texture.id != 0) {
+        UnloadRenderTexture(state.canvasCache);
+        state.canvasCache = RenderTexture2D{};
+    }
     state.renderer.shutdown();
     if (state.root) {
         CguiDeleteNode(state.root);

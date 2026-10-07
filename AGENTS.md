@@ -69,19 +69,45 @@ scope costs nothing at level 0. A profiling build also honours
 by *frames*, not by samples: a phase can be probed more than once per frame (the
 live audio work sits on both sides of the pipeline render).
 
-What the first sessions showed (i5-10400F / GTX 1660 Ti, 2K window,
-`templates/demo.pforge`): a 7.7 ms frame in which the UI draw was 7.3 ms and the
-pipeline render only 0.25 ms. Inside the UI draw, two `ffmpeg::available()` calls
-in `drawTopBar` cost 1.77 ms *each* (the function walked the PATH on every call;
-the search is cached now, 2.95 -> 0.02 ms) and the ~55 CrystalGUI button boxes
-cost 2.2 ms (each box element drew a full-window SDF quad; the app draws the boxes
-itself now, 2.2 -> 0.5 ms). What is left to optimize: the canvas redraw (~1.9 ms
-for 33 visible nodes, so it grows with the graph and wants invalidation-based
-caching) and, while playing, the audio-rate region (~2.7 ms/frame - its sample
-loop still resolves each node with a linear `Graph::find` and copies the whole
-`EvalContext` per sample). Do not put `ffmpeg::available()`-style probing or
-non-batchable per-item shader passes on a per-frame path; the editor frame cap in
-Preferences limits the damage otherwise.
+What the sessions showed (i5-10400F / GTX 1660 Ti, 2K window,
+`templates/demo.pforge`) and what has been done about it:
+
+| part of the frame | first measured | now | why |
+| --- | --- | --- | --- |
+| top bar | 2.95 ms | 0.02 ms | `ffmpeg::available()` walked the PATH on every call (1.77 ms each, twice per frame); the answer is cached |
+| CrystalGUI chrome | 2.2 ms | 0.49 ms | each button box was a full-window SDF quad that could not batch; the app draws the boxes itself now |
+| canvas | 1.9 ms | 0.6 ms | the block frames/ports/labels and the links are cached in a target and blitted until their key changes |
+| pipeline, paused | 0.25 ms | 0.25 ms | already cheap |
+| pipeline, playing | 2.7 ms | 1.85 ms | the audio-rate region is compiled (see below); what is left is per-sample block work (`Value` traffic, a few `runtimeState` state reads, the DAC's shared_ptr output) |
+| whole frame | 7.7 ms | 1.9 ms paused / 3.5 ms playing | at the default 60 fps cap that is ~3.5%/7% of one core, measured at ~21% before the cap alone |
+
+Do not put `ffmpeg::available()`-style probing or non-batchable per-item shader
+passes on a per-frame path.
+
+- The audio-rate region is **compiled once per frame**, not once per sample:
+  `compileRegion` (Graph.cpp) resolves the nodes, their input sources and the
+  ADC/DAC channel plumbing into `RegionStep`s, allocates the scratch once, and the
+  sample loop then draws from one `EvalContext` instead of copying it per sample
+  (the evaluators only read it). Measured win: 2.7 -> 2.1 ms before the publishing
+  fix below.
+- Blocks inside a region must not publish their readouts per sample. The editor
+  only ever sees the frame's final values, so the loop clears
+  `Node::publishReadouts` for every sample but the last; `publishEffective`, the
+  meter's `db`/`vu`/`needle`, the LFO's `phase`, the automation's `pos`, the
+  filter's `filter.rate`, the Guard's `blocked` and the ADC/DAC channel readouts
+  all check it. Movement *state* (`average`/`peak`, `z1`/`z2`, a ringbuffer phase,
+  the noise generator) keeps running per sample. A new publish inside a region
+  needs the same treatment, or it becomes a string-keyed map write per sample.
+- The canvas control layer (block frames, headers, titles, ports, labels, badges,
+  links, group frames) is cached in `UiState::canvasCache`; `canvasControlKey` is
+  an FNV-1a over the view transform, the theme colours, every block's position,
+  size, title, ports and *parameters* (a Sticky Note's height follows its text)
+  and every link, plus the hovered port and the drag state (both decide cached
+  details: the cable highlight and the group drop target). The live layer (block
+  visuals, footers, hover tooltip, drag preview, panel header) is drawn every
+  frame on top. Add anything drawn in the control layer to that key, or it will go
+  stale; a render-scaled pass (the hyper-resolution export) skips the cache
+  because the target is a different size.
 
 ## Tests and verification
 
