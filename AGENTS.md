@@ -502,11 +502,11 @@ docs         rendering notes and the README overlay image
   world-space counterpart that deliberately ignores it) and the lazily loaded
   large font atlases all follow the factor, so the frame is the window's layout
   with more pixels. Two rules: the preview never runs this pass (it is export
-  only, so the cost stays opt-in), and the CrystalGUI chrome boxes are drawn by
-  `drawScaledChromeBoxes` instead of the library, because the box element's
-  shader fills a window-sized quad and flips about the window height, which
-  mirrors or drops every box in a target of another size. `--shot` follows the
-  factor too, which is how the pass can be inspected without an export.
+  only, so the cost stays opt-in), and the chrome boxes are drawn by the app's own
+  `drawChromeBoxes` rather than by CrystalGUI - the library's box element fills a
+  window-sized quad (mirrored or dropped in a target of another size) and cannot
+  batch, so every pass uses the app's boxes. `--shot` follows the factor too,
+  which is how the pass can be inspected without an export.
 - Layout metrics come in three kinds, each with its helper in Theme.h: logical
   (`ui::s`, GUI scale x render scale), the graph's world space (`ui::sWorld`, GUI
   scale only - the canvas zoom carries the rest) and raw screen pixels a panel

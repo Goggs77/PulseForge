@@ -833,16 +833,14 @@ void updateWindowTitle(UiState &state) {
 void drawChromeLabels(UiState &state);
 void drawPaletteLabels(UiState &state, Rectangle bounds);
 
-// Set while the export hyper resolution draws the editor, where the CrystalGUI
-// boxes are replaced by drawScaledChromeBoxes().
-bool gScaledChrome = false;
-
-// The scaled pass draws the chrome boxes itself. CrystalGUI's box element fills
-// a quad of the *window* size and flips its rectangle about the window height,
-// so into an off-screen target of another size the boxes come out mirrored or
-// missing. The geometry and the theme colours are the same ones the labels use,
-// so the mirror still looks like the editor; the 1:1 paths keep the library.
-void drawScaledChromeBoxes(Rectangle paletteRect) {
+// Draws the chrome button boxes with the app's own batched rounded rectangles.
+// CrystalGUI's box element draws a *full-window* quad per button (its shader
+// masks the rest), so ~55 buttons cost ~2.2 ms per frame here and cannot batch -
+// and into an off-screen target of another size (the export hyper resolution)
+// they came out mirrored as well. The geometry and the theme colours are the
+// same ones the labels already use (CrystalGUI's own labels are disabled), so
+// the editor looks the same with one batched draw instead of 55 shader passes.
+void drawChromeBoxes(Rectangle paletteRect) {
     const ui::Theme &t = ui::theme();
     auto drawBox = [&](const ChromeRect &entry) {
         if (!entry.node) return;
@@ -915,24 +913,12 @@ void drawEditor(UiState &state, bool interactive) {
     {
         PF_PROFILE_PANEL(chrome, Chrome);
         if (state.root) {
-        if (interactive) CguiUpdate(state.root);
-        if (gScaledChrome) {
-            // The scaled pass draws the boxes itself (see the helper above).
-            drawScaledChromeBoxes(state.paletteRect);
-        } else {
-            // The palette scrolls, so its CrystalGUI buttons are clipped to the
-            // panel: otherwise a short window lets them draw over the status bar.
-            if (gPaletteLayer) {
-                const Rectangle view{paletteView(state.paletteRect)};
-                BeginScissorMode(static_cast<int>(view.x), static_cast<int>(view.y),
-                                 static_cast<int>(view.width), static_cast<int>(view.height));
-                CguiDrawNode(gPaletteLayer);
-                EndScissorMode();
-            }
-            if (gTopLayer) CguiDrawNode(gTopLayer);
-        }
-        drawChromeLabels(state);
-        drawPaletteLabels(state, state.paletteRect);
+            if (interactive) CguiUpdate(state.root);
+            // The boxes are the app's own (see drawChromeBoxes); the CrystalGUI
+            // tree stays as the hover/held/disabled state the boxes read.
+            drawChromeBoxes(state.paletteRect);
+            drawChromeLabels(state);
+            drawPaletteLabels(state, state.paletteRect);
         }
     }
     // Popups are a modal of their own and are drawn whatever else is happening.
@@ -1247,9 +1233,7 @@ bool captureEditorScaled(UiState &state, int scale) {
     ui::beginFrame();
     BeginTextureMode(state.editorTarget);
     ClearBackground(palette::background());
-    gScaledChrome = true;
     drawEditor(state, false);
-    gScaledChrome = false;
     // The capture has to come out of this target, so blit while it is bound.
     state.renderer.refreshScreenCapture(targetWidth, targetHeight);
     EndTextureMode();
