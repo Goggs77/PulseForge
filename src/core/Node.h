@@ -181,7 +181,15 @@ public:
     // A block publishes the value it actually used after modulation
     // (`value.<key>` in runtimeState) so the inspector slider and the in-block
     // previews can follow an LFO instead of only showing the base parameter.
+    // The audio-rate region clears this for every sample but the last of a frame
+    // (see compileRegion in Graph.cpp): a string-keyed map write per sample is
+    // measurable, and only the frame's final value is ever shown.
+    bool publishReadouts = true;
     void publishEffective(const std::string &key, float value) {
+        // An audio-rate region calls a block once per sample; the readouts it
+        // publishes are only there for the editor, which looks at the frame's
+        // last sample, so the loop turns this off for the samples before it.
+        if (!publishReadouts) return;
         runtimeState["value." + key] = static_cast<double>(value);
     }
     bool effectiveParam(const std::string &key, float *value) const {

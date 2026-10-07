@@ -465,7 +465,9 @@ void sampleAdcNode(Node &node, const EvalContext &ctx, const ChannelInput &input
             if (index < buffer->samples.size()) value = buffer->samples[index];
         }
         node.outputs[static_cast<size_t>(c)] = Value::makeScalar(value);
-        node.runtimeState["value." + std::to_string(c)] = value;
+        if (node.publishReadouts) {
+            node.runtimeState["value." + std::to_string(c)] = value;
+        }
     }
 }
 
@@ -513,8 +515,10 @@ void sampleDacNode(Node &node, const EvalContext &ctx,
         }
         ++node.audioRenderWrite;
     }
-    for (int c = 0; c < channels && c < 8; ++c) {
-        node.runtimeState["value." + std::to_string(c)] = values[c];
+    if (node.publishReadouts) {
+        for (int c = 0; c < channels && c < 8; ++c) {
+            node.runtimeState["value." + std::to_string(c)] = values[c];
+        }
     }
     node.outputs.assign(1, Value{});
     node.outputs[0].type = PortType::Audio;
@@ -575,6 +579,92 @@ void prepareDacBuffer(Node &node, const EvalContext &ctx, int rate, const void *
     node.outputs[0].audio = node.audioRenderOutput;
 }
 
+// ---------------------------------------------------------------------------
+// Compiled audio-rate region
+// ---------------------------------------------------------------------------
+// The per-sample loop used to re-resolve everything for every sample: each node
+// with a linear Graph::find, its links with another scan per port, a fresh
+// EvalContext copy, and a cleared and refilled Value scratch per node. None of
+// that depends on the sample, so it is compiled once per frame into the steps
+// below; the loop then only moves resolved values and calls the evaluator.
+struct RegionSource {
+    const Node *node = nullptr;  // null: nothing linked, or the source is off
+    int port = 0;
+};
+
+struct RegionStep {
+    enum class Kind : int { Block, Adc, Dac };
+    Node *node = nullptr;
+    Kind kind = Kind::Block;
+    std::vector<RegionSource> sources;    // Block: one entry per input port
+    ChannelInput adcInput;                // Adc
+    std::vector<ChannelInput> dacInputs;  // Dac
+};
+
+void compileRegion(Graph &graph, const AudioRatePlan &plan, std::vector<RegionStep> *steps) {
+    steps->clear();
+    steps->reserve(plan.region.size());
+    for (const int id : plan.region) {
+        Node *node = graph.find(id);
+        if (!node || !node->enabled) continue;
+        RegionStep step;
+        step.node = node;
+        if (node->kind == "dsp.adc") step.kind = RegionStep::Kind::Adc;
+        else if (node->kind == "dsp.dac") step.kind = RegionStep::Kind::Dac;
+        if (step.kind == RegionStep::Kind::Adc) {
+            if (const Link *link = graph.findInputLink(id, 0)) {
+                step.adcInput.source = graph.find(link->fromNode);
+                step.adcInput.port = link->fromPort;
+            }
+        } else if (step.kind == RegionStep::Kind::Dac) {
+            step.dacInputs.resize(node->inputPorts().size());
+            for (size_t port = 0; port < step.dacInputs.size(); ++port) {
+                if (const Link *link = graph.findInputLink(id, static_cast<int>(port))) {
+                    step.dacInputs[port].source = graph.find(link->fromNode);
+                    step.dacInputs[port].port = link->fromPort;
+                }
+            }
+        } else {
+            const std::vector<PortDesc> &ports = node->inputPorts();
+            step.sources.resize(ports.size());
+            for (size_t port = 0; port < ports.size(); ++port) {
+                if (const Link *link = graph.findInputLink(id, static_cast<int>(port))) {
+                    const Node *source = graph.find(link->fromNode);
+                    if (source && source->enabled) {
+                        step.sources[port].node = source;
+                        step.sources[port].port = link->fromPort;
+                    }
+                }
+            }
+            // The scratch is cleared once instead of per sample: a port with no
+            // resolved source stays None, which is what an evaluator expects for
+            // an unconnected input. Outputs are written by the evaluator on every
+            // sample, so they only need their size here.
+            node->inputScratch.assign(ports.size(), Value{});
+            node->outputs.assign(node->outputPorts().size(), Value{});
+        }
+        steps->push_back(std::move(step));
+    }
+}
+
+// One pure-Scalar block of the region, for one sample: move the resolved inputs
+// into the scratch and evaluate. The carrier propagation of the frame-rate path
+// is not needed here - the ADC's Scalars never carry one, so nothing inside the
+// region can see it.
+void sampleRegionBlock(Node &node, EvalContext &ctx, const std::vector<RegionSource> &sources) {
+    const std::vector<PortDesc> &ports = node.inputPorts();
+    for (size_t port = 0; port < sources.size() && port < ports.size(); ++port) {
+        const RegionSource &source = sources[port];
+        if (!source.node || source.port < 0 ||
+            source.port >= static_cast<int>(source.node->outputs.size())) {
+            continue;
+        }
+        node.inputScratch[port] =
+            convertValue(source.node->outputs[static_cast<size_t>(source.port)], ports[port].type);
+    }
+    if (node.def && node.def->evaluate) node.def->evaluate(node, ctx, node.inputScratch, node.outputs);
+}
+
 void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &ctx) {
     int rate = ctx.audio ? std::max(1, ctx.audio->sampleRate) : 48000;
     const void *source = ctx.audio.get();
@@ -612,57 +702,43 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
     if (sourceEnd >= 0) endFrame = std::min(endFrame, sourceEnd);
     if (endFrame < startFrame) endFrame = startFrame;
 
-    // Resolve the links once per frame; the sample loop must not search them
-    // per audio sample.
-    std::unordered_map<int, ChannelInput> adcInputs;
-    std::unordered_map<int, std::vector<ChannelInput>> dacInputs;
-    for (const int id : plan.region) {
-        Node *node = graph.find(id);
-        if (!node) continue;
-        if (node->kind == "dsp.adc") {
-            ChannelInput input;
-            if (const Link *link = graph.findInputLink(id, 0)) {
-                input.source = graph.find(link->fromNode);
-                input.port = link->fromPort;
-            }
-            adcInputs[id] = input;
-        } else if (node->kind == "dsp.dac") {
-            std::vector<ChannelInput> inputs(static_cast<size_t>(node->inputPorts().size()));
-            for (size_t port = 0; port < inputs.size(); ++port) {
-                if (const Link *link = graph.findInputLink(id, static_cast<int>(port))) {
-                    inputs[port].source = graph.find(link->fromNode);
-                    inputs[port].port = link->fromPort;
-                }
-            }
-            dacInputs[id] = std::move(inputs);
-        }
-    }
+    // Compile the region once: nodes, their input sources and the ADC/DAC
+    // plumbing. The sample loop only moves values afterwards.
+    std::vector<RegionStep> steps;
+    compileRegion(graph, plan, &steps);
 
     std::vector<int> dacs;
     bool needsRender = ctx.offline;
-    for (const int id : plan.region) {
-        Node *node = graph.find(id);
-        if (!node || node->kind != "dsp.dac") continue;
-        prepareDacBuffer(*node, ctx, rate, source, sourceEnd, startFrame, endFrame);
-        if (node->audioRenderWrite >= 0) needsRender = true;
-        dacs.push_back(id);
+    for (const RegionStep &step : steps) {
+        if (step.kind != RegionStep::Kind::Dac) continue;
+        prepareDacBuffer(*step.node, ctx, rate, source, sourceEnd, startFrame, endFrame);
+        if (step.node->audioRenderWrite >= 0) needsRender = true;
+        dacs.push_back(step.node->id);
     }
 
+    // One context for the whole loop: the evaluators only read it, and copying
+    // it per sample was shared_ptr traffic for nothing.
+    EvalContext sample = ctx;
+    sample.audioRate = true;
+    sample.audioSampleRate = rate;
     for (long long frame = startFrame; needsRender && frame < endFrame; ++frame) {
-        EvalContext sample = ctx;
-        sample.audioRate = true;
-        sample.audioSampleRate = rate;
         sample.audioTime = static_cast<double>(frame) / rate;
         sample.time = ctx.time + static_cast<double>(frame - startFrame) / rate;
-        for (const int id : plan.region) {
-            Node *node = graph.find(id);
-            if (!node || !node->enabled) continue;
-            if (node->kind == "dsp.adc") {
-                sampleAdcNode(*node, sample, adcInputs[id]);
-            } else if (node->kind == "dsp.dac") {
-                sampleDacNode(*node, sample, dacInputs[id]);
-            } else {
-                evaluateFrameNode(graph, *node, sample, false);
+        const bool lastSample = frame + 1 >= endFrame;
+        for (RegionStep &step : steps) {
+            // The editor only ever sees the frame's final values, so nothing
+            // publishes readouts for the samples before it.
+            step.node->publishReadouts = lastSample;
+            switch (step.kind) {
+                case RegionStep::Kind::Adc:
+                    sampleAdcNode(*step.node, sample, step.adcInput);
+                    break;
+                case RegionStep::Kind::Dac:
+                    sampleDacNode(*step.node, sample, step.dacInputs);
+                    break;
+                default:
+                    sampleRegionBlock(*step.node, sample, step.sources);
+                    break;
             }
         }
     }

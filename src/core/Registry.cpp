@@ -1287,7 +1287,7 @@ void evalLfo(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::ve
     float offset = node.pfloat("offset", 0.0f);
     if (offsetConnected) offset += in[3].scalar;
     // Keep the phase so the block preview can put its pivot on the waveform.
-    node.runtimeState["phase"] = t;
+    if (node.publishReadouts) node.runtimeState["phase"] = t;
     node.publishEffective("frequency", frequency);
     node.publishEffective("amplitude", amplitude);
     node.publishEffective("offset", offset);
@@ -1315,7 +1315,7 @@ void evalAutomation(Node &node, EvalContext &ctx, const std::vector<Value> &in, 
     // The curve is stored in 0..1 curve space; the bipolar switch decides whether
     // that maps to 0..1 or to -1..1 before depth/offset are applied.
     const float curve = std::clamp(node.curveAt("curve", normalized), 0.0f, 1.0f);
-    node.runtimeState["pos"] = normalized;
+    if (node.publishReadouts) node.runtimeState["pos"] = normalized;
     float result = node.pbool("bipolar", false) ? (curve * 2.0f - 1.0f) : curve;
     float depth = node.pfloat("depth", 1.0f);
     if (depthConnected) depth *= std::max(0.0f, 1.0f + in[0].scalar);
@@ -1421,7 +1421,7 @@ void evalSignalFilter(Node &node, EvalContext &ctx, const std::vector<Value> &in
     // The in-block response plot has to use the rate the filter actually ran
     // with: the project frame rate for a modulation signal, the audio rate
     // inside an ADC -> DAC region. Never serialised.
-    node.runtimeState["filter.rate"] = fs;
+    if (node.publishReadouts) node.runtimeState["filter.rate"] = fs;
     const int mode = std::clamp(node.pint("mode", 0), 0, 2);
     // Modulation inputs shift cutoff and resonance in octaves (x2 per unit), the
     // musical way to sweep a filter.
@@ -1464,15 +1464,20 @@ void evalMeter(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     const double magnitude = std::fabs(static_cast<double>(value));
     const float dbfs = magnitude > 1.0e-6 ? static_cast<float>(20.0 * std::log10(magnitude))
                                           : -120.0f;
-    node.runtimeState["db"] = dbfs;
-    node.runtimeState["vu"] = dbfs + 18.0f;  // 0 VU = -18 dBFS
+    // `db`/`vu`/`needle` are readouts (the inspector and the in-block meter
+    // read the frame's final value), while `average`/`peak` are the movement's
+    // state and have to keep integrating every audio sample.
+    if (node.publishReadouts) {
+        node.runtimeState["db"] = dbfs;
+        node.runtimeState["vu"] = dbfs + 18.0f;  // 0 VU = -18 dBFS
+    }
 
     double display = magnitude;
     if (digital) {
         // A digital meter shows the raw value: no averaging, no release. The
         // diagram and the readout follow the input directly.
         node.runtimeState["average"] = magnitude;
-        node.runtimeState["needle"] = dbfs + 18.0f;
+        if (node.publishReadouts) node.runtimeState["needle"] = dbfs + 18.0f;
     } else {
         // A VU meter averages the rectified signal with analog ballistics: a
         // fast-ish attack and a slow release, both as time constants so the
@@ -1489,7 +1494,7 @@ void evalMeter(Node &node, EvalContext &ctx, const std::vector<Value> &in,
         display = average;
         const float averageDb =
             average > 1.0e-6 ? static_cast<float>(20.0 * std::log10(average)) : -120.0f;
-        node.runtimeState["needle"] = averageDb + 18.0f;
+        if (node.publishReadouts) node.runtimeState["needle"] = averageDb + 18.0f;
         node.runtimeState["peak"] = std::max<double>(
             static_cast<double>(averageDb) + 18.0, node.runtimeState["peak"] * 0.99);
     }
@@ -1521,7 +1526,7 @@ void evalGuard(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     lamp("neg", negativeInf);
 
     const bool blocked = isNan || positiveInf || negativeInf;
-    node.runtimeState["blocked"] = blocked ? 1.0 : 0.0;
+    if (node.publishReadouts) node.runtimeState["blocked"] = blocked ? 1.0 : 0.0;
     out[0] = Value::makeScalar(blocked ? 0.0f : value);
 }
 
