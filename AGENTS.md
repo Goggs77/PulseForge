@@ -299,11 +299,14 @@ docs         rendering notes and the README overlay image
   most recent addition).
 - **Sorting** (`sort.sticky`, `sort.group`) is drawn by the canvas instead of
   the generic block path: both blocks have no ports and no evaluate, they shade
-  as translucent greyscale cards that contrast against the theme - a light card
-  with deep grey ink on the dark theme, a dark card with light grey ink on the
-  light theme, a quarter-transparent heading and a semi-transparent body - and
-  they never show the "category + ms"
-  footer. A group's frame is *derived*: `groupFrame` sizes it from the arranged
+  as greyscale cards that contrast against the theme - a light card with deep
+  grey ink on the dark theme, a dark card with light grey ink on the light
+  theme - and they never show the "category + ms" footer. A Group keeps the
+  translucent container look (a quarter-transparent heading over a
+  semi-transparent body), while a Sticky Note asks `sortingColours(..., true)`
+  for an almost opaque card: a translucent card turned the note's own ink
+  unreadable against the dark theme, and a comment has to be readable.
+  A group's frame is *derived*: `groupFrame` sizes it from the arranged
   members and `layoutGroup` writes their positions every frame in
   `syncGroups`, so the arrangement is never a saved user layout - only the
   `members` id list is persisted (a text parameter). The drop rules live in the

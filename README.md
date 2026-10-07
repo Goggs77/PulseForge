@@ -374,10 +374,12 @@ frequency axis and pivot use the rate the filter last ran with, not the frame ra
 | Sticky Note | - | - | A note with no ports and no effect on the render. Its text is edited in a large wrapped box in the Inspector (Enter breaks a line), and the block grows with the text - never smaller than its default size |
 | Group | - | - | Owns blocks: drop one inside to add it (the frame highlights while you drag over it), drag it out to remove it. Members are re-arranged in layers that follow the chain and move with the frame; `Depth tolerance` merges that many neighbouring depths into one layer, and groups cannot be nested |
 
-Sorting blocks draw as translucent greyscale cards instead of a category colour:
-a light card with deep grey text on the dark theme, a dark card with light grey
-text on the light theme. The heading is a quarter transparent and the body semi
-transparent, so a documented pipeline stays readable in either theme.
+Sorting blocks draw as greyscale cards instead of a category colour: a light
+card with deep grey text on the dark theme, a dark card with light grey text on
+the light theme. A Group keeps the translucent container look (a quarter
+transparent heading over a semi transparent body) so its frame never hides the
+pipeline; a Sticky Note's card is almost opaque, because a comment has to stay
+readable in either theme.
 
 The Group's arrangement is derived from the graph, not from where the blocks
 happened to sit:

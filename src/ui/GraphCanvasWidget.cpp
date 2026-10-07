@@ -497,7 +497,8 @@ void drawCanvasControlLayer(UiState &state, Rectangle bounds) {
         }
         const bool selected = node.id == state.selectedNode;
         const bool sorting = isSortingNode(node);
-        const SortingColours colours = sortingColours(node.enabled ? 1.0f : 0.55f);
+        const SortingColours colours =
+            sortingColours(node.enabled ? 1.0f : 0.55f, node.kind == "sort.sticky");
         const Color accent = sorting ? colours.ink : kindAccent(node.def->category);
         DrawRectangleRounded(box, 0.06f, 6,
                              sorting ? colours.body

@@ -799,7 +799,7 @@ void drawNoteVisual(UiState &state, const Node &node, Rectangle body, float zoom
     // The body was sized with the fixed note font, so draw with the same size
     // scaled by the canvas zoom instead of deriving it from the body again.
     const float size = std::max(7.0f, kNoteFont * zoom);
-    const SortingColours colours = sortingColours();
+    const SortingColours colours = sortingColours(1.0f, true);
     if (text.empty()) {
         ui::drawTextWrapped(inner, kNotePlaceholder, ui::pixelText(size),
                             withAlpha(colours.ink, 0.65f), ui::sWorld(kNoteLineHeight * zoom));
@@ -846,7 +846,7 @@ float nodeVisualHeight(const Node &node) {
     return 0.0f;
 }
 
-SortingColours sortingColours(float alphaScale) {
+SortingColours sortingColours(float alphaScale, bool noteSurface) {
     const bool dark = ui::isDarkTheme();
     // The card contrasts against the theme, and the ink contrasts against the
     // card: a light grey card with deep grey text on the dark theme, the other
@@ -856,8 +856,16 @@ SortingColours sortingColours(float alphaScale) {
     const Color grey = dark ? Color{208, 208, 216, 255} : Color{48, 48, 56, 255};
     SortingColours colours;
     colours.ink = dark ? Color{36, 36, 42, 255} : Color{235, 235, 240, 255};
-    colours.header = withAlpha(grey, 0.78f * alphaScale);
-    colours.body = withAlpha(grey, (dark ? 0.62f : 0.70f) * alphaScale);
+    // A group stays a translucent container the graph shows through; a sticky
+    // note is a comment, so its card carries (almost) the full opacity - on the
+    // dark theme the semi transparent card darkened the deep grey ink until the
+    // text was barely distinguishable, and a light theme had the same problem
+    // with the light ink over a see-through dark card.
+    const float headerAlpha = (noteSurface ? 0.97f : 0.78f) * alphaScale;
+    const float bodyAlpha = (noteSurface ? (dark ? 0.93f : 0.95f)
+                                         : (dark ? 0.62f : 0.70f)) * alphaScale;
+    colours.header = withAlpha(grey, headerAlpha);
+    colours.body = withAlpha(grey, bodyAlpha);
     colours.border = withAlpha(grey, 0.85f);
     return colours;
 }
