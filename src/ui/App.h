@@ -97,6 +97,9 @@ struct UiState {
 
     int selectedNode = -1;
     float inspectorScroll = 0.0f;
+    // Vertical scroll of the Preferences dialog's rows: at the default GUI
+    // scaling the whole section list is taller than a small window.
+    float preferencesScroll = 0.0f;
 
     // Slice automation handle currently dragged on the timeline: the node id
     // and which end (0 = Start, 1 = Finish). 0 = nothing being dragged.

@@ -194,7 +194,9 @@ The **Prefs** button (or `Ctrl+,`) opens a dialog with:
   default) and encoder preset.
 
 Appearance settings are written to `pulseforge_preferences.json` next to the
-executable when *Save preferences* is pressed.
+executable when *Save preferences* is pressed. The list is taller than the
+dialog at the default GUI scaling, so it scrolls (wheel or the bar on the right)
+while the Save and Close buttons stay pinned at the bottom.
 
 ### Editor behaviour worth knowing
 

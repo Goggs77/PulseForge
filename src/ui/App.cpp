@@ -109,7 +109,9 @@ void actionHelp(CguiNode *) {
 }
 
 void actionPreferences(CguiNode *) {
-    if (gApp) gApp->showPreferences = !gApp->showPreferences;
+    if (!gApp) return;
+    gApp->showPreferences = !gApp->showPreferences;
+    if (gApp->showPreferences) gApp->preferencesScroll = 0.0f;
 }
 
 void actionPaletteEntry(CguiNode *node) {

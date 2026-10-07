@@ -506,7 +506,13 @@ void drawPreferencesDialog(UiState &state) {
     ui::panel(box, "Preferences");
     DrawRectangleRoundedLines(box, 0.02f, 6, t.accent);
 
-    Rectangle cursor{box.x + ui::s(18.0f), box.y + ui::s(38.0f), box.width - ui::s(36.0f),
+    // The section list is taller than the dialog at the default GUI scaling, so
+    // it scrolls inside the view above the pinned footer instead of running off
+    // the bottom of the window. The offset is applied like the Inspector's.
+    const Rectangle view{box.x + ui::s(18.0f), box.y + ui::s(38.0f), box.width - ui::s(36.0f),
+                         box.height - ui::s(38.0f) - ui::s(50.0f)};
+    ui::beginScroll(view);
+    Rectangle cursor{view.x, view.y + ui::s(6.0f) - state.preferencesScroll, view.width,
                      ui::s(24.0f)};
     const float row = ui::s(24.0f);
     const float gap = ui::s(5.0f);
@@ -730,6 +736,27 @@ void drawPreferencesDialog(UiState &state) {
                             t.textDim);
     }
     cursor.y += row + ui::s(16.0f);
+
+    // ---- scroll handling --------------------------------------------------
+    // The rows were laid out from the offset of this frame; the wheel is read
+    // after them like the Inspector does, so the view follows one frame later.
+    {
+        const float top = view.y + ui::s(6.0f);
+        const float contentHeight = (cursor.y + state.preferencesScroll) - top;
+        const float maxScroll = std::max(0.0f, contentHeight - view.height);
+        if (ui::hovered(view)) {
+            state.preferencesScroll =
+                std::clamp(state.preferencesScroll - GetMouseWheelMove() * ui::s(48.0f), 0.0f,
+                           maxScroll);
+        }
+        state.preferencesScroll = std::clamp(state.preferencesScroll, 0.0f, maxScroll);
+        ui::endScroll();
+        if (maxScroll > 0.0f) {
+            ui::scrollbar(Rectangle{view.x + view.width + ui::s(4.0f), view.y, ui::s(7.0f),
+                                    view.height},
+                          &state.preferencesScroll, contentHeight, view.height);
+        }
+    }
 
     // ---- footer ----------------------------------------------------------
     const Rectangle saveBox{box.x + box.width - ui::s(240.0f), box.y + box.height - ui::s(42.0f),

@@ -279,6 +279,12 @@ docs         rendering notes and the README overlay image
   hand-edited project) get the bounds swapped rather than an inverted
   `std::clamp` range. The Slice handles on the timeline are *not* bounded like
   this - a Start dragged past the Finish has to stay possible.
+- The **Preferences** dialog's rows scroll (`UiState::preferencesScroll`) the
+  same way the Inspector's do: the view is scissored above the pinned Save and
+  Close buttons, the wheel is read after the rows are laid out and the bar sits
+  in the right margin. At the default GUI scaling the full section list is
+  taller than the dialog, which is what used to push the output settings behind
+  the footer. Opening the dialog resets the offset.
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
   the Frequency Band and Signal Filter Hz sliders) and an optional
   `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty
