@@ -12,10 +12,12 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <vector>
 
+#include "core/Preferences.h"
 #include "core/Project.h"
 #include "core/Registry.h"
 #include "core/Sorting.h"
@@ -218,6 +220,53 @@ int main(int argc, char **argv) {
     std::printf("PulseForge self test\n");
     std::printf("  ffmpeg   : %s\n", ffmpeg::ffmpegPath().c_str());
     std::printf("  ffprobe  : %s\n", ffmpeg::ffprobePath().c_str());
+
+    {
+        const std::string preferencesPath = "selftest_preferences.json";
+        Preferences saved;
+        saved.defaultDarkTheme = false;
+        saved.themePalette = "My Palette";
+        saved.guiScale = 1.5f;
+        ThemePalette custom;
+        custom.name = "My Palette";
+        custom.background = Color{12, 34, 56, 255};
+        custom.accent = Color{210, 120, 30, 255};
+        saved.themePalettes.push_back(custom);
+        if (!savePreferences(saved, preferencesPath)) {
+            return fail("could not write preferences");
+        }
+        std::string savedText;
+        {
+            std::ifstream savedFile(preferencesPath.c_str(), std::ios::binary);
+            savedText.assign(std::istreambuf_iterator<char>(savedFile),
+                             std::istreambuf_iterator<char>());
+        }
+        if (savedText.find("\"themePalettes\"") == std::string::npos ||
+            savedText.find("\"My Palette\"") == std::string::npos) {
+            std::remove(preferencesPath.c_str());
+            return fail("preferences did not write the theme palette dictionary");
+        }
+        Preferences loaded;
+        loadPreferences(loaded, preferencesPath);
+        if (loaded.themePalette != "My Palette" || loaded.themePalettes.size() != 1 ||
+            loaded.themePalettes[0].name != "My Palette" ||
+            loaded.themePalettes[0].background.r != 12 ||
+            loaded.themePalettes[0].accent.g != 120) {
+            std::remove(preferencesPath.c_str());
+            return fail("preferences theme palette round trip");
+        }
+        {
+            std::ofstream legacy(preferencesPath.c_str(), std::ios::binary);
+            legacy << "{\"defaultDarkTheme\":false}\n";
+        }
+        loadPreferences(loaded, preferencesPath);
+        if (loaded.themePalette != "Light") {
+            std::remove(preferencesPath.c_str());
+            return fail("preferences dark/light migration");
+        }
+        std::remove(preferencesPath.c_str());
+        std::printf("  preferences : palette dictionary and dark/light migration ok\n");
+    }
 
     {
         std::ifstream probe(audioPath.c_str(), std::ios::binary);

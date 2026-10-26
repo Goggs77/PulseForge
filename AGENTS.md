@@ -41,6 +41,10 @@ cmake --build I:\Goggs\Works\c++\PulseForge\build --parallel 8
 - Full rebuild: add `--clean-first`. Warnings are on (`-Wall -Wextra`) but there
   are a few known, accepted ones (an unused helper in `Registry.cpp`/`Project.cpp`
   and the vendored `jar_mod.h`).
+- CrystalGUI hard-wires ASan/UBSan into its Debug library. PulseForge appends
+  `-fno-sanitize=all` to that external target because some MinGW installations
+  lack `libasan`/`libubsan`; without the override Debug executables fail on
+  `__asan_*`. PulseForge's own sources remain uninstrumented in Debug.
 
 ### Profiling
 
@@ -135,7 +139,8 @@ build\bin\pf_selftest.exe "I:\Goggs\Goggsmusic\identity Project\identity_01.flac
 
 It covers decode -> analysis -> in-process rendering -> export -> probe, plus
 specific regressions: math/matrix blocks, project save/load round trip, project
-metadata, text editing (caret, selection, clipboard), shader ports derived from a
+metadata, preference theme-palette dictionaries and old dark/light migration,
+text editing (caret, selection, clipboard), shader ports derived from a
 `.glsl` file and `shader.pass` migration, per-family encoder arguments and the
 audio matching rules, legacy Audio Output migration, ADC/DAC conversion, and the
 exclusive Audio Output routing (processed, dry and silent exports, plus the
@@ -201,12 +206,16 @@ The window never takes focus in this environment, so real mouse/keyboard input
 cannot be injected. Use the off-screen capture mode instead:
 
 ```powershell
-PulseForge.exe --shot out.png --size 2000x1200 --shot-frames 40 [project.pforge|audio.wav]
+PulseForge.exe --shot out.png --size 2000x1200 --shot-frames 40 `
+    [--shot-rect X,Y,W,H] [project.pforge|audio.wav]
 ```
 
 - The shot follows a Self Reference's *Hyper resolution for export*: with the
   block set to 2 the PNG comes out at twice the `--size`, which is the way to
   inspect that pass (chrome boxes included) without running an export.
+- `--shot-rect X,Y,W,H` crops to a rectangle in final screenshot pixels with a
+  top-left origin. It is optional and defaults to the full captured image; the
+  rectangle is clamped to that image, including a hyper-resolution capture.
 - Verify visually with a screenshot plus a numeric check (crop + `ffmpeg
   signalstats`, or `volumeDetect` on exported audio) rather than by eye alone.
 - Drive UI state through data where possible (a test `.pforge`, a preferences
@@ -300,6 +309,27 @@ docs         rendering notes and the README overlay image
   in the right margin. At the default GUI scaling the full section list is
   taller than the dialog, which is what used to push the output settings behind
   the footer. Opening the dialog resets the offset.
+- Text fields and text areas restore the enclosing scroll clip after drawing
+  their own caret/content scissor. Raylib's scissor is not stack-based; ending an
+  inner clip must not leave the rest of a scrolling dialog unclipped.
+- Deferred popups (`drawPopups`) run after every dialog and its dim overlay.
+  They are interactive modal content, not background chrome, so opening a
+  dropdown or colour picker inside Preferences must place it in the foreground.
+- `ui::floatField` snapshots its value before keyboard/mouse processing; its
+  return value is how callers (including the HSV picker's RGB/HSV boxes) learn
+  that an Enter commit or focus-loss commit changed the number.
+- Theme palettes are `core/Preferences.h`'s `ThemePalette`: the 16 colours the
+  editor's `ui::Theme` consumes. Dark and Light are snapshots of CrystalGUI's
+  crystalline themes, so changes there flow into the built-in defaults;
+  Immaterial is defined in `Theme.cpp`. Built-ins are read-only in Preferences;
+  *New palette* copies the active one and edits it through `ui::colorField`.
+  User palettes are saved as the `themePalettes` object in
+  `pulseforge_preferences.json`, keyed by name, while `themePalette` selects the
+  active one. `defaultDarkTheme` is retained for old-file migration.
+- Do not paint editor surfaces with `palette::background()` or the other static
+  render-palette defaults. Those belong to video/block semantics; editor clears
+  and themeable UI use the active `ui::theme()` palette. `canvasControlKey`
+  already hashes the theme colours, so a palette change invalidates its cache.
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
   the Frequency Band and Signal Filter Hz sliders) and an optional
   `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty

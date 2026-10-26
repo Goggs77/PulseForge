@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/Preferences.h"
 #include "core/Project.h"
 #include "dsp/AudioClip.h"
 #include "raylib.h"
@@ -56,23 +57,6 @@ struct CanvasState {
     std::string lastConnectError;
 };
 
-// Application preferences, persisted next to the executable.
-struct Preferences {
-    bool defaultDarkTheme = true;
-    float guiScale = 1.25f;
-    // Decode and analyse imported audio on a worker thread, so opening a project
-    // or dropping a file does not block the editor; the timeline and the preview
-    // stay greyed out until the clip is ready.
-    bool asyncAudioLoad = true;
-    // Editor frame rate cap in frames per second; 0 draws as fast as the work
-    // allows. The editor redraws everything every frame (immediate mode), so this
-    // is the knob that decides how much CPU and GPU it may spend.
-    int editorFpsCap = 60;
-};
-
-void loadPreferences(Preferences &preferences, const std::string &path);
-bool savePreferences(const Preferences &preferences, const std::string &path);
-
 struct UiState {
     Project project;
     Renderer renderer;
@@ -100,6 +84,9 @@ struct UiState {
     // Vertical scroll of the Preferences dialog's rows: at the default GUI
     // scaling the whole section list is taller than a small window.
     float preferencesScroll = 0.0f;
+    // Transient name editor for the selected custom theme palette.
+    std::string themePaletteNameDraft;
+    std::string themePaletteNameTarget;
 
     // Slice automation handle currently dragged on the timeline: the node id
     // and which end (0 = Start, 1 = Finish). 0 = nothing being dragged.
@@ -219,6 +206,9 @@ struct UiState {
     // CrystalGUI chrome
     CguiNode *root = nullptr;
 };
+
+const ThemePalette *findThemePalette(const Preferences &preferences, const std::string &name);
+void activateThemePalette(Preferences &preferences, const std::string &name);
 
 void setStatus(UiState &state, const std::string &message, bool error = false);
 

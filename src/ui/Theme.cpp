@@ -14,6 +14,10 @@ CguiTheme *gLight = nullptr;
 bool gDarkTheme = true;
 bool gKeyboardCaptured = false;
 bool gInitialised = false;
+ThemePalette gDarkPalette;
+ThemePalette gLightPalette;
+ThemePalette gImmaterialPalette;
+std::vector<ThemePalette> gBuiltinPalettes;
 
 void applyFonts(const CguiCrystallineThemeData *data) {
     if (!data) return;
@@ -25,64 +29,108 @@ void applyFonts(const CguiCrystallineThemeData *data) {
     gTheme.captionSize = data->captionFontSize > 0 ? data->captionFontSize : 13.0f;
 }
 
-void applyColors(const CguiCrystallineThemeData *data) {
-    // The widget colours are derived from the active CrystalGUI theme, so
-    // switching between the dark and light crystalline themes restyles the
-    // whole editor, not just the CrystalGUI components.
+ThemePalette paletteFromData(const CguiCrystallineThemeData *data) {
+    ThemePalette result;
     if (data) {
         auto sla = [](Vector3 value, float hue) {
             return CguiColorFromHSLA(hue, value.x, value.y, value.z);
         };
-        gTheme.background = sla(data->backgroundSLA, 0.0f);
-        gTheme.panel = sla(data->backlayerSLA, 0.0f);
-        gTheme.panelAlt = sla(data->midlayerSLA, 0.0f);
-        gTheme.panelRaised = sla(data->frontlayerSLA, 0.0f);
-        gTheme.border = sla(data->layerBorderSLA, 0.0f);
+        result.background = sla(data->backgroundSLA, 0.0f);
+        result.panel = sla(data->backlayerSLA, 0.0f);
+        result.panelAlt = sla(data->midlayerSLA, 0.0f);
+        result.panelRaised = sla(data->frontlayerSLA, 0.0f);
+        result.border = sla(data->layerBorderSLA, 0.0f);
         // Text and accent are derived from the background luminance instead of
         // the theme's raw SLA values, which are not contrast-safe in the light
         // variant (dim text ended up lighter than the surface).
         const float luminance =
-            (0.299f * gTheme.background.r + 0.587f * gTheme.background.g +
-             0.114f * gTheme.background.b) / 255.0f;
+            (0.299f * result.background.r + 0.587f * result.background.g +
+             0.114f * result.background.b) / 255.0f;
         const bool light = luminance > 0.5f;
         const float textLightness = light ? 0.16f : 0.93f;
         const float dimLightness = light ? 0.42f : 0.62f;
         const float accentLightness = light ? 0.42f : 0.68f;
-        gTheme.text = CguiColorFromHSLA(0.0f, 0.0f, textLightness, 1.0f);
-        gTheme.textDim = CguiColorFromHSLA(0.0f, 0.08f, dimLightness, 1.0f);
-        gTheme.accent = CguiColorFromHSLA(data->accentHue, 0.72f, accentLightness, 1.0f);
-        gTheme.accentDim = CguiColorFromHSLA(data->accentHue, 0.55f, accentLightness + 0.12f,
+        result.text = CguiColorFromHSLA(0.0f, 0.0f, textLightness, 1.0f);
+        result.textDim = CguiColorFromHSLA(0.0f, 0.08f, dimLightness, 1.0f);
+        result.accent = CguiColorFromHSLA(data->accentHue, 0.72f, accentLightness, 1.0f);
+        result.accentDim = CguiColorFromHSLA(data->accentHue, 0.55f, accentLightness + 0.12f,
                                              light ? 0.35f : 1.0f);
-        gTheme.accentAlt = CguiColorFromHSLA(data->infoHue, 0.62f, accentLightness, 1.0f);
-        gTheme.warn = CguiColorFromHSLA(data->warningHue, data->activeSLA.x, data->activeSLA.y,
-                                        data->activeSLA.z);
-        gTheme.warn = CguiColorFromHSLA(data->warningHue, 0.85f, light ? 0.42f : 0.62f, 1.0f);
-        gTheme.danger = CguiColorFromHSLA(data->dangerousHue, 0.80f, light ? 0.45f : 0.62f, 1.0f);
-        gTheme.success = CguiColorFromHSLA(data->successHue, data->activeSLA.x, data->activeSLA.y,
-                                           data->activeSLA.z);
-        gTheme.success = CguiColorFromHSLA(data->successHue, 0.70f, light ? 0.38f : 0.62f, 1.0f);
-        gTheme.controlFill = CguiColorFromHSLA(0.0f, 0.0f, data->inactiveSLA.y, data->inactiveSLA.z);
-        gTheme.controlFillFlat = CguiColorFromHSLA(0.0f, 0.0f, data->flatSLA.y, data->flatSLA.z);
-        gTheme.controlBorder =
+        result.accentAlt = CguiColorFromHSLA(data->infoHue, 0.62f, accentLightness, 1.0f);
+        result.warn = CguiColorFromHSLA(data->warningHue, 0.85f, light ? 0.42f : 0.62f, 1.0f);
+        result.danger =
+            CguiColorFromHSLA(data->dangerousHue, 0.80f, light ? 0.45f : 0.62f, 1.0f);
+        result.success =
+            CguiColorFromHSLA(data->successHue, 0.70f, light ? 0.38f : 0.62f, 1.0f);
+        result.controlFill =
+            CguiColorFromHSLA(0.0f, 0.0f, data->inactiveSLA.y, data->inactiveSLA.z);
+        result.controlFillFlat =
+            CguiColorFromHSLA(0.0f, 0.0f, data->flatSLA.y, data->flatSLA.z);
+        result.controlBorder =
             CguiColorFromHSLA(0.0f, 0.0f, data->componentBorderSLA.y, data->componentBorderSLA.z);
-        return;
+        return result;
     }
-    gTheme.background = palette::background();
-    gTheme.panel = palette::backlayer();
-    gTheme.panelAlt = palette::midlayer();
-    gTheme.panelRaised = palette::frontlayer();
-    gTheme.border = palette::border();
-    gTheme.text = palette::text();
-    gTheme.textDim = palette::textDim();
-    gTheme.accent = palette::accent();
-    gTheme.accentDim = palette::modulate(palette::accent(), 0.55f);
-    gTheme.accentAlt = palette::accentAlt();
-    gTheme.warn = palette::warn();
-    gTheme.danger = palette::danger();
-    gTheme.success = palette::success();
-    gTheme.controlFill = palette::frontlayer();
-    gTheme.controlFillFlat = palette::midlayer();
-    gTheme.controlBorder = palette::border();
+    result.background = palette::background();
+    result.panel = palette::backlayer();
+    result.panelAlt = palette::midlayer();
+    result.panelRaised = palette::frontlayer();
+    result.border = palette::border();
+    result.text = palette::text();
+    result.textDim = palette::textDim();
+    result.accent = palette::accent();
+    result.accentDim = palette::modulate(palette::accent(), 0.55f);
+    result.accentAlt = palette::accentAlt();
+    result.warn = palette::warn();
+    result.danger = palette::danger();
+    result.success = palette::success();
+    result.controlFill = palette::frontlayer();
+    result.controlFillFlat = palette::midlayer();
+    result.controlBorder = palette::border();
+    return result;
+}
+
+void copyPaletteColours(const ThemePalette &palette) {
+    gTheme.background = palette.background;
+    gTheme.panel = palette.panel;
+    gTheme.panelAlt = palette.panelAlt;
+    gTheme.panelRaised = palette.panelRaised;
+    gTheme.border = palette.border;
+    gTheme.text = palette.text;
+    gTheme.textDim = palette.textDim;
+    gTheme.accent = palette.accent;
+    gTheme.accentDim = palette.accentDim;
+    gTheme.accentAlt = palette.accentAlt;
+    gTheme.controlFill = palette.controlFill;
+    gTheme.controlFillFlat = palette.controlFillFlat;
+    gTheme.controlBorder = palette.controlBorder;
+    gTheme.warn = palette.warn;
+    gTheme.danger = palette.danger;
+    gTheme.success = palette.success;
+}
+
+const CguiCrystallineThemeData *themeData(CguiTheme *theme) {
+    return theme ? static_cast<const CguiCrystallineThemeData *>(theme->themeData) : nullptr;
+}
+
+ThemePalette immaterialPalette() {
+    ThemePalette palette;
+    palette.name = "Immaterial";
+    palette.background = pf::palette::fromHex(0x080B18);
+    palette.panel = pf::palette::fromHex(0x10162A);
+    palette.panelAlt = pf::palette::fromHex(0x18213C);
+    palette.panelRaised = pf::palette::fromHex(0x243052);
+    palette.border = pf::palette::fromHex(0x3D4E78);
+    palette.text = pf::palette::fromHex(0xE8EEFF);
+    palette.textDim = pf::palette::fromHex(0x91A1C6);
+    palette.accent = pf::palette::fromHex(0x69E3FF);
+    palette.accentDim = pf::palette::fromHex(0x347A96);
+    palette.accentAlt = pf::palette::fromHex(0xC38DFF);
+    palette.controlFill = pf::palette::fromHex(0x243052);
+    palette.controlFillFlat = pf::palette::fromHex(0x18213C);
+    palette.controlBorder = pf::palette::fromHex(0x4E6797);
+    palette.warn = pf::palette::fromHex(0xF7C96B);
+    palette.danger = pf::palette::fromHex(0xFF6B8A);
+    palette.success = pf::palette::fromHex(0x73E6B0);
+    return palette;
 }
 
 // Latin-1 plus the typographic symbols the UI uses, so characters such as x, /,
@@ -129,11 +177,15 @@ void init(bool dark) {
     } else if (gLight) {
         CguiSetActiveTheme(gLight);
     }
-    const CguiTheme *active = CguiGetActiveTheme();
-    const CguiCrystallineThemeData *data =
-        active ? static_cast<const CguiCrystallineThemeData *>(active->themeData) : nullptr;
+    const CguiCrystallineThemeData *data = themeData(CguiGetActiveTheme());
     applyFonts(data);
-    applyColors(data);
+    gDarkPalette = paletteFromData(themeData(gDark));
+    gDarkPalette.name = "Dark";
+    gLightPalette = paletteFromData(themeData(gLight));
+    gLightPalette.name = "Light";
+    gImmaterialPalette = immaterialPalette();
+    gBuiltinPalettes = {gDarkPalette, gLightPalette, gImmaterialPalette};
+    copyPaletteColours(dark ? gDarkPalette : gLightPalette);
     if (gTheme.body.texture.id == 0) gTheme.body = GetFontDefault();
     if (gTheme.heading.texture.id == 0) gTheme.heading = gTheme.body;
     if (gTheme.caption.texture.id == 0) gTheme.caption = gTheme.body;
@@ -232,20 +284,63 @@ void shutdown() {
 }
 
 void setDarkTheme(bool dark) {
-    gDarkTheme = dark;
-    if (dark) {
-        CguiSetActiveTheme(gDark);
-    } else if (gLight) {
-        CguiSetActiveTheme(gLight);
+    if (dark != gDarkTheme) {
+        if (dark && gDark) {
+            CguiSetActiveTheme(gDark);
+        } else if (!dark && gLight) {
+            CguiSetActiveTheme(gLight);
+        }
     }
-    // Re-derive the widget palette from the newly active theme.
-    const CguiTheme *active = CguiGetActiveTheme();
-    applyColors(active ? static_cast<const CguiCrystallineThemeData *>(active->themeData) : nullptr);
+    gDarkTheme = dark;
+    copyPaletteColours(dark ? gDarkPalette : gLightPalette);
 }
 
 bool isDarkTheme() { return gDarkTheme; }
 
 Theme &theme() { return gTheme; }
+
+const std::vector<ThemePalette> &builtinThemePalettes() { return gBuiltinPalettes; }
+
+ThemePalette currentThemePalette() {
+    ThemePalette palette;
+    palette.background = gTheme.background;
+    palette.panel = gTheme.panel;
+    palette.panelAlt = gTheme.panelAlt;
+    palette.panelRaised = gTheme.panelRaised;
+    palette.border = gTheme.border;
+    palette.text = gTheme.text;
+    palette.textDim = gTheme.textDim;
+    palette.accent = gTheme.accent;
+    palette.accentDim = gTheme.accentDim;
+    palette.accentAlt = gTheme.accentAlt;
+    palette.controlFill = gTheme.controlFill;
+    palette.controlFillFlat = gTheme.controlFillFlat;
+    palette.controlBorder = gTheme.controlBorder;
+    palette.warn = gTheme.warn;
+    palette.danger = gTheme.danger;
+    palette.success = gTheme.success;
+    return palette;
+}
+
+bool themePaletteIsDark(const ThemePalette &palette) {
+    const float luminance =
+        (0.299f * palette.background.r + 0.587f * palette.background.g +
+         0.114f * palette.background.b) / 255.0f;
+    return luminance <= 0.5f;
+}
+
+void applyThemePalette(const ThemePalette &palette) {
+    const bool dark = themePaletteIsDark(palette);
+    if (dark != gDarkTheme) {
+        if (dark && gDark) {
+            CguiSetActiveTheme(gDark);
+        } else if (!dark && gLight) {
+            CguiSetActiveTheme(gLight);
+        }
+    }
+    gDarkTheme = dark;
+    copyPaletteColours(palette);
+}
 
 bool keyboardCaptured() { return gKeyboardCaptured; }
 void setKeyboardCaptured(bool captured) { gKeyboardCaptured = captured; }

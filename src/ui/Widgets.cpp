@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 
 #include "render/Palette.h"
 #include "core/TextEdit.h"
@@ -24,6 +25,8 @@ bool gModal = false;
 // so its buttons and fields must stay interactive even though everything behind
 // them is blocked.
 bool gDrawingPopup = false;
+bool gScrollClipActive = false;
+Rectangle gScrollClip{};
 
 struct PopupDrawScope {
     PopupDrawScope() { gDrawingPopup = true; }
@@ -125,6 +128,34 @@ Color screenTint(Color base, bool isHovered, bool isHeld) {
     if (isHeld) return palette::modulate(base, 1.25f);
     if (isHovered) return palette::modulate(base, 1.12f);
     return base;
+}
+
+// Text fields and text areas clip their own contents. Raylib scissor state is
+// not stack-based, so restore the enclosing scroll viewport afterwards instead
+// of disabling clipping and letting the rest of a dialog overflow.
+void beginWidgetClip(Rectangle rect) {
+    if (gScrollClipActive) {
+        const float right =
+            std::min(rect.x + rect.width, gScrollClip.x + gScrollClip.width);
+        const float bottom =
+            std::min(rect.y + rect.height, gScrollClip.y + gScrollClip.height);
+        rect.x = std::max(rect.x, gScrollClip.x);
+        rect.y = std::max(rect.y, gScrollClip.y);
+        rect.width = std::max(0.0f, right - rect.x);
+        rect.height = std::max(0.0f, bottom - rect.y);
+    }
+    BeginScissorMode(static_cast<int>(rect.x), static_cast<int>(rect.y),
+                     static_cast<int>(rect.width), static_cast<int>(rect.height));
+}
+
+void endWidgetClip() {
+    if (!gScrollClipActive) {
+        EndScissorMode();
+        return;
+    }
+    BeginScissorMode(static_cast<int>(gScrollClip.x), static_cast<int>(gScrollClip.y),
+                     static_cast<int>(gScrollClip.width),
+                     static_cast<int>(gScrollClip.height));
 }
 
 // ---------------------------------------------------------------------------
@@ -323,8 +354,7 @@ void textEditDraw(const Rectangle &field, float size, Color color, bool centered
         gEdit.scroll = std::clamp(gEdit.scroll, 0.0f, textW - inner.width);
     }
     const float origin = textEditOrigin(field, size, centered, inset);
-    BeginScissorMode(static_cast<int>(inner.x), static_cast<int>(inner.y),
-                     static_cast<int>(inner.width), static_cast<int>(inner.height));
+    beginWidgetClip(inner);
     if (text.empty() && placeholder && *placeholder) {
         drawText(Rectangle{inner.x, inner.y, inner.width, inner.height}, placeholder, size,
                  placeholderColor);
@@ -357,7 +387,7 @@ void textEditDraw(const Rectangle &field, float size, Color color, bool centered
                           static_cast<int>(field.height - s(6.0f)), t.text);
         }
     }
-    EndScissorMode();
+    endWidgetClip();
 }
 
 // Values typed into the numeric fields are applied as they are typed, guarded
@@ -1126,8 +1156,7 @@ bool textArea(Rectangle r, std::string *value, const char *placeholder, int stab
     }
     gEdit.scrollY = std::clamp(gEdit.scrollY, 0.0f, std::max(0.0f, contentHeight - inner.height));
 
-    BeginScissorMode(static_cast<int>(inner.x), static_cast<int>(inner.y),
-                     static_cast<int>(inner.width), static_cast<int>(inner.height));
+    beginWidgetClip(inner);
     if (text.empty() && placeholder && *placeholder) {
         drawText(Rectangle{inner.x, inner.y, inner.width, lineHeight}, placeholder, size,
                  palette::withAlpha(t.textDim, 0.85f));
@@ -1167,7 +1196,7 @@ bool textArea(Rectangle r, std::string *value, const char *placeholder, int stab
                           static_cast<int>(lineHeight), t.text);
         }
     }
-    EndScissorMode();
+    endWidgetClip();
     if (contentHeight > inner.height) {
         scrollbar(Rectangle{r.x + r.width - barWidth - s(3.0f), inner.y, barWidth,
                             inner.height},
@@ -1226,6 +1255,7 @@ bool floatField(Rectangle r, float *value, float lo, float hi, const char *forma
     const int id = stableId != 0 ? stableId : nextId();
     const bool interactive = !inputBlocked();
     const bool editing = gEdit.active() && gEdit.id == id;
+    const float before = *value;
 
     if (interactive && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         if (hovered(r)) {
@@ -1252,7 +1282,6 @@ bool floatField(Rectangle r, float *value, float lo, float hi, const char *forma
         }
     }
 
-    const float before = *value;
     DrawRectangleRounded(r, roundness(r, s(4.0f)), 5,
                          editing ? palette::modulate(t.panelAlt, 1.06f) : t.panelAlt);
     DrawRectangleRoundedLines(r, roundness(r, s(4.0f)), 5, editing ? t.accent : t.border);
@@ -1399,10 +1428,15 @@ void progressBar(Rectangle r, float fraction, const char *label) {
 // ---------------------------------------------------------------------------
 
 void beginScroll(Rectangle view) {
+    gScrollClip = view;
+    gScrollClipActive = true;
     BeginScissorMode(static_cast<int>(view.x), static_cast<int>(view.y),
                      static_cast<int>(view.width), static_cast<int>(view.height));
 }
-void endScroll() { EndScissorMode(); }
+void endScroll() {
+    EndScissorMode();
+    gScrollClipActive = false;
+}
 
 void scrollbar(Rectangle track, float *offset, float contentHeight, float viewHeight) {
     const Theme &t = theme();
@@ -1506,6 +1540,7 @@ void drawPopups() {
                 gPopup.hasListResult = true;
                 gPopup.kind = PopupKind::None;
                 gPopup.openedThisFrame = false;
+                EndScissorMode();
                 return;
             }
         }

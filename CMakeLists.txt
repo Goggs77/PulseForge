@@ -79,6 +79,7 @@ add_library(pulseforge_core STATIC
     src/core/Graph.cpp
     src/core/Project.cpp
     src/core/Json.cpp
+    src/core/Preferences.cpp
     src/core/Sorting.cpp
     src/core/TextEdit.cpp
     src/core/Registry.cpp
@@ -98,6 +99,15 @@ add_library(pulseforge_core STATIC
 
 target_include_directories(pulseforge_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(pulseforge_core PUBLIC CrystalGUI raylib)
+
+# CrystalGUI hard-wires ASan/UBSan into its Debug static library. Some MinGW
+# installations have the compiler front end but not libasan/libubsan, leaving
+# every consumer with unresolved __asan_* symbols. Disable instrumentation for
+# that external target; PulseForge's own Debug build was never instrumented.
+if (CMAKE_BUILD_TYPE STREQUAL "Debug" AND
+    CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(CrystalGUI PRIVATE -fno-sanitize=all)
+endif ()
 
 # Raw OpenGL access (glad ships with raylib and is compiled into libraylib).
 target_include_directories(pulseforge_core PRIVATE

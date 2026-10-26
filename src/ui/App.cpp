@@ -98,8 +98,6 @@ void actionStop(CguiNode *) {
     stopPlayback(*gApp);
 }
 
-void actionTheme(CguiNode *) { ui::setDarkTheme(!ui::isDarkTheme()); }
-
 void actionLoop(CguiNode *) {
     if (gApp) gApp->loopPlayback = !gApp->loopPlayback;
 }
@@ -163,7 +161,6 @@ void buildChrome(UiState &state) {
         {"Play", actionPlay, CGUI_BUTTON_TYPE_FLAT, 56.0f},
         {"Stop", actionStop, CGUI_BUTTON_TYPE_FLAT, 56.0f},
         {"Loop", actionLoop, CGUI_BUTTON_TYPE_FLAT, 58.0f},
-        {"Theme", actionTheme, CGUI_BUTTON_TYPE_FLAT, 64.0f},
         {"Prefs", actionPreferences, CGUI_BUTTON_TYPE_FLAT, 58.0f},
         {"Help", actionHelp, CGUI_BUTTON_TYPE_FLAT, 54.0f},
     };
@@ -923,17 +920,17 @@ void drawEditor(UiState &state, bool interactive) {
             drawPaletteLabels(state, state.paletteRect);
         }
     }
-    // Popups are a modal of their own and are drawn whatever else is happening.
+    // Dialogs draw first; popups opened by their fields must sit above the
+    // dialog and its dim layer.
     {
         PF_PROFILE_PANEL(dialogs, Dialogs);
-        ui::drawPopups();
-
         ui::setModal(false);
         drawPreferencesDialog(state);
         drawExportDialog(state);
         drawBrowser(state);
         drawHelpOverlay(state);
         drawMessageBox(state);
+        ui::drawPopups();
         updateWindowTitle(state);
     }
 }
@@ -1234,7 +1231,7 @@ bool captureEditorScaled(UiState &state, int scale) {
     // Widget ids are handed out in draw order, so this pass starts its own run.
     ui::beginFrame();
     BeginTextureMode(state.editorTarget);
-    ClearBackground(palette::background());
+    ClearBackground(ui::theme().background);
     drawEditor(state, false);
     // The capture has to come out of this target, so blit while it is bound.
     state.renderer.refreshScreenCapture(targetWidth, targetHeight);
@@ -1307,7 +1304,7 @@ void drawExportFrame(UiState &state, bool captureMirror, int videoFrame) {
     // Refreshes the chrome hit test with the modal flag set, so every button
     // paints its disabled state while the export runs.
     updateChromeLayout(state);
-    ClearBackground(palette::background());
+    ClearBackground(ui::theme().background);
     // The editor stays visible but frozen, dimmed by the overlay below, so the
     // chrome buttons grey out like everything else.
     drawEditor(state, false);
@@ -1448,10 +1445,16 @@ std::string profileContext(UiState &state) {
 
 int runApp(int argc, char **argv) {
     // Optional offscreen capture used for automated verification:
-    //   PulseForge --shot out.png [--size 2400x1350] [audio.wav]
+    //   PulseForge --shot out.png [--size 2400x1350] [--shot-rect 0,0,640,480]
+    //              [audio.wav]
     std::string shotPath;
     int shotFrames = 10;
     double shotDelay = 0.0;
+    int shotRectX = 0;
+    int shotRectY = 0;
+    int shotRectWidth = 0;
+    int shotRectHeight = 0;
+    bool shotRectSet = false;
     int windowWidth = 0;
     int windowHeight = 0;
     bool hiddenWindow = false;
@@ -1467,6 +1470,28 @@ int runApp(int argc, char **argv) {
             // Wall-clock delay before the capture, e.g. to let a resize or the
             // first few frames settle.
             shotDelay = std::max(0.0, std::atof(argv[++i]));
+        } else if (argument == "--shot-rect" && i + 1 < argc) {
+            // Optional crop in final screenshot pixels, measured from the
+            // top-left. Coordinates are clamped to the captured image.
+            char trailing = '\0';
+            int x = 0;
+            int y = 0;
+            int width = 0;
+            int height = 0;
+            if (std::sscanf(argv[++i], "%d,%d,%d,%d%c", &x, &y, &width, &height,
+                            &trailing) == 4 &&
+                width > 0 && height > 0) {
+                shotRectX = x;
+                shotRectY = y;
+                shotRectWidth = width;
+                shotRectHeight = height;
+                shotRectSet = true;
+            } else {
+                std::fprintf(stderr,
+                             "PulseForge: invalid --shot-rect '%s'; expected "
+                             "X,Y,W,H with positive width and height\n",
+                             argv[i]);
+            }
         } else if (argument == "--hidden") {
             hiddenWindow = true;
         } else if (argument == "--visible") {
@@ -1546,7 +1571,7 @@ int runApp(int argc, char **argv) {
     // the machine the editor may use; 0 means uncapped.
     SetTargetFPS(state.preferences.editorFpsCap);
     ui::theme().uiScale = state.preferences.guiScale;
-    ui::setDarkTheme(state.preferences.defaultDarkTheme);
+    activateThemePalette(state.preferences, state.preferences.themePalette);
     state.project.resetToDefault(&state.renderer.shaders());
     selectNode(state, state.project.graph.videoSinkNodeId());
     updateExportExtension(state);  // "output.<container>" next to the project
@@ -1739,7 +1764,7 @@ int runApp(int argc, char **argv) {
                 // Widget ids are handed out in draw order, so they must be reset
                 // before the panels are drawn.
                 ui::beginFrame();
-                ClearBackground(palette::background());
+                ClearBackground(ui::theme().background);
                 // A dialog freezes the editor behind it; popups are handled inside.
                 drawEditor(state, !dialogOpen(state));
                 // Self Reference reads this frame; the export overlay is drawn
@@ -1761,7 +1786,7 @@ int runApp(int argc, char **argv) {
 
         if (capture) {
             // Read back the off-screen frame and flip it into top-down order
-            // before writing the PNG.
+            // before applying the optional crop and writing the PNG.
             FrameReadback readback;
             readback.capture(captureTarget);
             readback.capture(captureTarget);
@@ -1769,22 +1794,52 @@ int runApp(int argc, char **argv) {
             if (pixels) {
                 const int width = captureTarget.texture.width;
                 const int height = captureTarget.texture.height;
-                std::vector<unsigned char> flipped(static_cast<size_t>(width) * height * 4);
-                for (int y = 0; y < height; ++y) {
-                    std::memcpy(flipped.data() + static_cast<size_t>(y) * width * 4,
-                                pixels + static_cast<size_t>(height - 1 - y) * width * 4,
-                                static_cast<size_t>(width) * 4);
+                int cropLeft = 0;
+                int cropTop = 0;
+                int cropWidth = width;
+                int cropHeight = height;
+                if (shotRectSet) {
+                    const long long right =
+                        static_cast<long long>(shotRectX) + shotRectWidth;
+                    const long long bottom =
+                        static_cast<long long>(shotRectY) + shotRectHeight;
+                    cropLeft = static_cast<int>(std::clamp<long long>(
+                        shotRectX, 0, width));
+                    cropTop = static_cast<int>(std::clamp<long long>(
+                        shotRectY, 0, height));
+                    const int cropRight = static_cast<int>(
+                        std::clamp<long long>(right, 0, width));
+                    const int cropBottom = static_cast<int>(
+                        std::clamp<long long>(bottom, 0, height));
+                    cropWidth = std::max(0, cropRight - cropLeft);
+                    cropHeight = std::max(0, cropBottom - cropTop);
                 }
-                Image image{};
-                image.data = flipped.data();
-                image.width = width;
-                image.height = height;
-                image.mipmaps = 1;
-                image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
-                if (!ExportImage(image, shotPath.c_str())) {
-                    TraceLog(LOG_WARNING, "PulseForge: could not write %s", shotPath.c_str());
+                if (cropWidth <= 0 || cropHeight <= 0) {
+                    TraceLog(LOG_WARNING,
+                             "PulseForge: --shot-rect does not overlap the "
+                             "captured image");
                 } else {
-                    TraceLog(LOG_INFO, "PulseForge: wrote %s", shotPath.c_str());
+                    std::vector<unsigned char> cropped(
+                        static_cast<size_t>(cropWidth) * cropHeight * 4);
+                    for (int y = 0; y < cropHeight; ++y) {
+                        const int sourceY = height - 1 - (cropTop + y);
+                        std::memcpy(
+                            cropped.data() + static_cast<size_t>(y) * cropWidth * 4,
+                            pixels + (static_cast<size_t>(sourceY) * width + cropLeft) * 4,
+                            static_cast<size_t>(cropWidth) * 4);
+                    }
+                    Image image{};
+                    image.data = cropped.data();
+                    image.width = cropWidth;
+                    image.height = cropHeight;
+                    image.mipmaps = 1;
+                    image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+                    if (!ExportImage(image, shotPath.c_str())) {
+                        TraceLog(LOG_WARNING, "PulseForge: could not write %s",
+                                 shotPath.c_str());
+                    } else {
+                        TraceLog(LOG_INFO, "PulseForge: wrote %s", shotPath.c_str());
+                    }
                 }
                 readback.release();
             }

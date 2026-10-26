@@ -64,9 +64,9 @@ The app is still in early stages, so expect minor bugs and glitches.
   Audio above 100 MB or above 192 kHz is refused with an explanation,
   I guess realtime for this kind of quality is absurd,
   but you can remove this for experiments.
-- **Preferences.** A preferences dialog holds the startup theme and the GUI
-  scaling factor, the async audio loading switch and the editor frame cap, next to
-  the project's own information and metadata.
+- **Preferences.** A preferences dialog holds the theme palette and the GUI
+  scaling factor, the async audio loading switch and the editor frame cap, next
+  to the project's own information and metadata.
 
 ## Requirements
 
@@ -113,13 +113,17 @@ cd build/bin
 ./PulseForge.exe project.pforge      # open a saved project
 ./PulseForge.exe --shot out.png track.wav           # off-screen capture of the editor
 ./PulseForge.exe --size 2560x1440 --shot ui.png     # capture at a specific size
+./PulseForge.exe --shot panel.png --shot-rect 0,80,640,480  # capture a region
 ```
 
 The `--shot` mode renders the whole editor into an off-screen target and writes
 a PNG, which is how the UI is regression-checked without a human at the screen;
 `--hidden` keeps the window out of the way and `--size WxH` picks the capture
 resolution. `--shot-frames N` and `--shot-delay S` decide how long to wait
-before capturing (useful when the layout is being exercised).
+before capturing (useful when the layout is being exercised). The optional
+`--shot-rect X,Y,W,H` crops the result using final screenshot pixels with a
+top-left origin; when omitted, the full capture is written. The rectangle is
+clamped to the captured image.
 
 The window opens at a size derived from the monitor - on a 2560x1440 display
 it opens at 2201x1267, centred. Everything in the layout is recomputed from the
@@ -177,7 +181,10 @@ changes.
 
 The **Prefs** button (or `Ctrl+,`) opens a dialog with:
 
-- **Default theme** - dark or light, applied at startup.
+- **Theme palette** - Dark, Light and Immaterial are built in. *New palette*
+  copies the active colours into a user palette; its 16 colour fields use the
+  same HSV picker as block colours. User palettes are saved as a dictionary in
+  `pulseforge_preferences.json`.
 - **GUI scaling** - 0.75x to 2x. Every widget metric, panel size and label is
   multiplied by it, which is also the knob for making the text larger or
   smaller.
@@ -197,6 +204,11 @@ Appearance settings are written to `pulseforge_preferences.json` next to the
 executable when *Save preferences* is pressed. The list is taller than the
 dialog at the default GUI scaling, so it scrolls (wheel or the bar on the right)
 while the Save and Close buttons stay pinned at the bottom.
+
+The selected palette is stored as `themePalette`; user palettes live under
+`themePalettes`, keyed by name. The legacy `defaultDarkTheme` field is still
+written and is migrated to Dark or Light when an older preferences file is
+opened.
 
 ### Editor behaviour worth knowing
 

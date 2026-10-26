@@ -3,7 +3,9 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
+#include "core/Preferences.h"
 #include "crystalgui/crystalgui.h"
 #include "raylib.h"
 
@@ -74,6 +76,10 @@ void shutdown();
 void setDarkTheme(bool dark);
 bool isDarkTheme();
 Theme &theme();
+const std::vector<ThemePalette> &builtinThemePalettes();
+ThemePalette currentThemePalette();
+bool themePaletteIsDark(const ThemePalette &palette);
+void applyThemePalette(const ThemePalette &palette);
 
 // Scales a logical pixel measurement by the GUI scaling factor.
 inline float s(float value) { return value * theme().uiScale * theme().renderScale; }

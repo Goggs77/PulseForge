@@ -3,14 +3,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <filesystem>
-#include <sstream>
+#include <iterator>
 #include <string>
 
 #include "export/FFmpeg.h"
 #include "export/Exporter.h"
-#include "core/Json.h"
 #include "render/Palette.h"
 #include "ui/App.h"
 
@@ -18,30 +16,27 @@ namespace fs = std::filesystem;
 
 namespace pf {
 
-void loadPreferences(Preferences &preferences, const std::string &path) {
-    std::ifstream file(path.c_str(), std::ios::binary);
-    if (!file.good()) return;
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    json::Value root;
-    if (!json::parse(buffer.str(), root, nullptr)) return;
-    preferences.defaultDarkTheme = root["defaultDarkTheme"].asBool(true);
-    preferences.guiScale = std::clamp(root["guiScale"].asFloat(1.25f), 0.75f, 2.0f);
-    preferences.asyncAudioLoad = root["asyncAudioLoad"].asBool(true);
-    preferences.editorFpsCap = std::clamp(root["editorFpsCap"].asInt(60), 0, 240);
+const ThemePalette *findThemePalette(const Preferences &preferences, const std::string &name) {
+    for (const ThemePalette &palette : ui::builtinThemePalettes()) {
+        if (palette.name == name) return &palette;
+    }
+    for (const ThemePalette &palette : preferences.themePalettes) {
+        if (palette.name == name) return &palette;
+    }
+    return nullptr;
 }
 
-bool savePreferences(const Preferences &preferences, const std::string &path) {
-    json::Value root = json::Value::makeObject();
-    root.set("application", "PulseForge");
-    root.set("defaultDarkTheme", preferences.defaultDarkTheme);
-    root.set("guiScale", preferences.guiScale);
-    root.set("asyncAudioLoad", preferences.asyncAudioLoad);
-    root.set("editorFpsCap", preferences.editorFpsCap);
-    std::ofstream file(path.c_str(), std::ios::binary);
-    if (!file.good()) return false;
-    file << json::write(root, 2);
-    return true;
+void activateThemePalette(Preferences &preferences, const std::string &name) {
+    const ThemePalette *palette = findThemePalette(preferences, name);
+    if (!palette) {
+        palette = findThemePalette(preferences, "Dark");
+        preferences.themePalette = "Dark";
+    } else {
+        preferences.themePalette = name;
+    }
+    if (!palette) return;
+    ui::applyThemePalette(*palette);
+    preferences.defaultDarkTheme = ui::isDarkTheme();
 }
 
 void showMessage(UiState &state, const std::string &title, const std::string &text, bool error) {
@@ -499,8 +494,8 @@ void drawPreferencesDialog(UiState &state) {
     const ui::Theme &t = ui::theme();
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.55f));
 
-    const float width = std::min(660.0f, GetScreenWidth() - ui::s(40.0f));
-    const float height = std::min(660.0f, GetScreenHeight() - ui::s(40.0f));
+    const float width = std::min(ui::s(820.0f), GetScreenWidth() - ui::s(40.0f));
+    const float height = std::min(ui::s(680.0f), GetScreenHeight() - ui::s(40.0f));
     const Rectangle box{(GetScreenWidth() - width) * 0.5f, (GetScreenHeight() - height) * 0.5f,
                         width, height};
     ui::panel(box, "Preferences");
@@ -520,25 +515,193 @@ void drawPreferencesDialog(UiState &state) {
     // ---- appearance ------------------------------------------------------
     ui::sectionHeader(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(18.0f)}, "Appearance");
     cursor.y += ui::s(24.0f);
-    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, ui::s(150.0f), row}, "Default theme",
+    std::vector<std::string> paletteNames;
+    for (const ThemePalette &palette : ui::builtinThemePalettes()) {
+        paletteNames.push_back(palette.name);
+    }
+    for (const ThemePalette &palette : state.preferences.themePalettes) {
+        paletteNames.push_back(palette.name);
+    }
+    int paletteIndex = 0;
+    for (size_t i = 0; i < paletteNames.size(); ++i) {
+        if (paletteNames[i] == state.preferences.themePalette) {
+            paletteIndex = static_cast<int>(i);
+        }
+    }
+    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, ui::s(150.0f), row}, "Theme palette",
                         12.0f, t.textDim);
     {
-        const Rectangle darkBox{cursor.x + ui::s(150.0f), cursor.y, ui::s(84.0f), row};
-        const Rectangle lightBox{darkBox.x + darkBox.width + gap, cursor.y, ui::s(84.0f), row};
-        if (ui::toggleButton(darkBox, "Dark", state.preferences.defaultDarkTheme)) {
-            state.preferences.defaultDarkTheme = true;
-            ui::setDarkTheme(true);
-        }
-        if (ui::toggleButton(lightBox, "Light", !state.preferences.defaultDarkTheme)) {
-            state.preferences.defaultDarkTheme = false;
-            ui::setDarkTheme(false);
+        const int before = paletteIndex;
+        ui::dropdown(
+            Rectangle{cursor.x + ui::s(150.0f), cursor.y, ui::s(230.0f), row},
+            &paletteIndex, paletteNames, 7112);
+        if (paletteIndex != before && paletteIndex >= 0 &&
+            paletteIndex < static_cast<int>(paletteNames.size())) {
+            activateThemePalette(state.preferences,
+                                 paletteNames[static_cast<size_t>(paletteIndex)]);
         }
     }
     cursor.y += row + gap;
+
+    const ThemePalette *selectedPalette =
+        findThemePalette(state.preferences, state.preferences.themePalette);
+    const bool selectedBuiltin =
+        selectedPalette &&
+        std::any_of(ui::builtinThemePalettes().begin(), ui::builtinThemePalettes().end(),
+                    [&](const ThemePalette &palette) {
+                        return palette.name == selectedPalette->name;
+                    });
+    if (ui::button(Rectangle{cursor.x + ui::s(150.0f), cursor.y, ui::s(128.0f), row},
+                   "New palette")) {
+        std::string name;
+        for (int suffix = 1;; ++suffix) {
+            name = "Custom " + std::to_string(suffix);
+            if (!findThemePalette(state.preferences, name)) break;
+        }
+        ThemePalette palette = ui::currentThemePalette();
+        palette.name = name;
+        state.preferences.themePalettes.push_back(palette);
+        activateThemePalette(state.preferences, name);
+    }
+    if (selectedPalette && !selectedBuiltin &&
+        ui::button(Rectangle{cursor.x + ui::s(286.0f), cursor.y, ui::s(88.0f), row},
+                   "Delete")) {
+        const std::string name = selectedPalette->name;
+        auto &palettes = state.preferences.themePalettes;
+        palettes.erase(std::remove_if(palettes.begin(), palettes.end(),
+                                      [&](const ThemePalette &palette) {
+                                          return palette.name == name;
+                                      }),
+                       palettes.end());
+        activateThemePalette(state.preferences, "Dark");
+    }
+    cursor.y += row + gap;
     ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(16.0f)},
-                        "Applied at startup and saved with the other preferences.", 10.5f,
-                        palette::withAlpha(t.textDim, 0.9f));
+                        "Built-in palettes are read-only. New palette copies the active "
+                        "colours for editing.",
+                        10.5f, palette::withAlpha(t.textDim, 0.9f));
     cursor.y += ui::s(20.0f);
+
+    selectedPalette = findThemePalette(state.preferences, state.preferences.themePalette);
+    const bool editingPalette =
+        selectedPalette &&
+        std::none_of(ui::builtinThemePalettes().begin(), ui::builtinThemePalettes().end(),
+                     [&](const ThemePalette &palette) {
+                         return palette.name == selectedPalette->name;
+                     });
+    ThemePalette *editablePalette = nullptr;
+    if (editingPalette) {
+        for (ThemePalette &palette : state.preferences.themePalettes) {
+            if (palette.name == selectedPalette->name) {
+                editablePalette = &palette;
+                break;
+            }
+        }
+        if (editablePalette &&
+            state.themePaletteNameTarget != editablePalette->name) {
+            state.themePaletteNameDraft = editablePalette->name;
+            state.themePaletteNameTarget = editablePalette->name;
+        }
+    }
+    if (selectedPalette && !editingPalette) {
+        const Color swatches[] = {
+            selectedPalette->background, selectedPalette->panel,
+            selectedPalette->panelAlt,   selectedPalette->panelRaised,
+            selectedPalette->border,     selectedPalette->text,
+            selectedPalette->textDim,    selectedPalette->accent,
+            selectedPalette->accentDim,  selectedPalette->accentAlt,
+            selectedPalette->controlFill, selectedPalette->controlFillFlat,
+            selectedPalette->controlBorder, selectedPalette->warn,
+            selectedPalette->danger,     selectedPalette->success,
+        };
+        const float swatchWidth = cursor.width / static_cast<float>(std::size(swatches));
+        for (size_t i = 0; i < std::size(swatches); ++i) {
+            const Rectangle swatch{cursor.x + swatchWidth * static_cast<float>(i), cursor.y,
+                                   swatchWidth, ui::s(14.0f)};
+            DrawRectangleRec(swatch, swatches[i]);
+            DrawRectangleLinesEx(swatch, ui::s(1.0f), palette::withAlpha(t.border, 0.8f));
+        }
+        cursor.y += ui::s(18.0f);
+    } else if (selectedPalette && editablePalette) {
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, ui::s(150.0f), row},
+                            "Palette name", 12.0f, t.textDim);
+        const Rectangle nameField{cursor.x + ui::s(150.0f), cursor.y,
+                                  ui::s(230.0f), row};
+        if (ui::textField(nameField, &state.themePaletteNameDraft, "palette name",
+                          7113)) {
+            const std::string candidate = state.themePaletteNameDraft;
+            const ThemePalette *existing =
+                findThemePalette(state.preferences, candidate);
+            const bool reserved =
+                candidate.empty() || (existing && existing != editablePalette);
+            if (!reserved) {
+                editablePalette->name = candidate;
+                state.preferences.themePalette = candidate;
+                state.themePaletteNameTarget = candidate;
+            }
+        }
+        const bool nameReserved =
+            state.themePaletteNameDraft.empty() ||
+            [&]() {
+                const ThemePalette *existing =
+                    findThemePalette(state.preferences,
+                                     state.themePaletteNameDraft);
+                return existing && existing != editablePalette;
+            }();
+        if (nameReserved) {
+            ui::drawTextClipped(
+                Rectangle{nameField.x + nameField.width + gap, cursor.y,
+                          cursor.width - ui::s(150.0f) - nameField.width - gap, row},
+                "Enter a unique name", 10.5f, t.danger);
+        }
+        cursor.y += row + gap;
+
+        struct PaletteColourSlot {
+            const char *label;
+            Color ThemePalette::*colour;
+        };
+        static const PaletteColourSlot slots[] = {
+            {"Background", &ThemePalette::background},
+            {"Panel", &ThemePalette::panel},
+            {"Panel alternate", &ThemePalette::panelAlt},
+            {"Panel raised", &ThemePalette::panelRaised},
+            {"Border", &ThemePalette::border},
+            {"Text", &ThemePalette::text},
+            {"Dim text", &ThemePalette::textDim},
+            {"Accent", &ThemePalette::accent},
+            {"Accent dim", &ThemePalette::accentDim},
+            {"Accent alternate", &ThemePalette::accentAlt},
+            {"Control fill", &ThemePalette::controlFill},
+            {"Flat control", &ThemePalette::controlFillFlat},
+            {"Control border", &ThemePalette::controlBorder},
+            {"Warning", &ThemePalette::warn},
+            {"Danger", &ThemePalette::danger},
+            {"Success", &ThemePalette::success},
+        };
+        const float columnGap = ui::s(10.0f);
+        const float columnWidth = (cursor.width - columnGap) * 0.5f;
+        const float labelWidth = ui::s(94.0f);
+        bool paletteChanged = false;
+        for (size_t i = 0; i < std::size(slots); ++i) {
+            const int column = static_cast<int>(i % 2);
+            const int line = static_cast<int>(i / 2);
+            const float x = cursor.x + (columnWidth + columnGap) * static_cast<float>(column);
+            const float y = cursor.y + (row + ui::s(2.0f)) * static_cast<float>(line);
+            ui::drawTextClipped(
+                Rectangle{x, y, labelWidth, row}, slots[i].label, 11.0f, t.textDim);
+            if (ui::colorField(
+                    Rectangle{x + labelWidth, y, columnWidth - labelWidth, row},
+                    &(editablePalette->*slots[i].colour), 7130 + static_cast<int>(i))) {
+                paletteChanged = true;
+            }
+        }
+        if (paletteChanged) {
+            ui::applyThemePalette(*editablePalette);
+            state.preferences.defaultDarkTheme = ui::isDarkTheme();
+        }
+        cursor.y += (row + ui::s(2.0f)) * 8.0f;
+    }
+    cursor.y += gap;
 
     ui::drawTextClipped(Rectangle{cursor.x, cursor.y, ui::s(150.0f), row}, "GUI scaling",
                         12.0f, t.textDim);
@@ -833,8 +996,8 @@ void drawHelpOverlay(UiState &state) {
     if (!state.showHelp) return;
     const ui::Theme &t = ui::theme();
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.6f));
-    const float width = std::min(760.0f, GetScreenWidth() - 40.0f);
-    const float height = std::min(560.0f, GetScreenHeight() - 60.0f);
+    const float width = std::min(ui::s(900.0f), GetScreenWidth() - ui::s(40.0f));
+    const float height = std::min(ui::s(650.0f), GetScreenHeight() - ui::s(60.0f));
     const Rectangle box{(GetScreenWidth() - width) * 0.5f, (GetScreenHeight() - height) * 0.5f,
                         width, height};
     ui::panel(box, "PulseForge - how it works");
@@ -871,8 +1034,9 @@ void drawHelpOverlay(UiState &state) {
     // The body shrinks to fit when the GUI scale makes it taller than the panel,
     // and scrolls if even the smallest size does not fit, so no line is ever
     // clipped away.
-    const float bodyWidth = box.width - 36.0f;
-    const Rectangle bodyView{box.x + 18.0f, box.y + 38.0f, bodyWidth, box.height - 88.0f};
+    const float bodyWidth = box.width - ui::s(36.0f);
+    const Rectangle bodyView{box.x + ui::s(18.0f), box.y + ui::s(38.0f), bodyWidth,
+                             box.height - ui::s(88.0f)};
     float bodySize = 12.5f;
     while (bodySize > 9.0f &&
            ui::textWrappedHeight(helpText, bodySize, bodyWidth) > bodyView.height) {
@@ -895,7 +1059,9 @@ void drawHelpOverlay(UiState &state) {
                                 ui::s(5.0f), bodyView.height},
                       &helpScroll, contentHeight, bodyView.height);
     }
-    if (ui::button(Rectangle{box.x + box.width - 110.0f, box.y + box.height - 40.0f, 96.0f, 26.0f},
+    if (ui::button(Rectangle{box.x + box.width - ui::s(110.0f),
+                             box.y + box.height - ui::s(40.0f), ui::s(96.0f),
+                             ui::s(26.0f)},
                    "Close")) {
         state.showHelp = false;
     }
