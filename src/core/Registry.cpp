@@ -1356,6 +1356,8 @@ void evalAmount(Node &node, EvalContext &ctx, const std::vector<Value> &in, std:
 void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                     std::vector<Value> &out) {
     const float value = scalarFrom(in, 0);
+    const float fs = rateOf(ctx);
+
     const int size = std::clamp(node.pint("size", 64), 2, 1024);
     // O(1) ring: push, running sum and read pointer all avoid the old O(size)
     // shift/sum, which was too slow inside an audio-rate region.
@@ -1381,7 +1383,6 @@ void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     // Read pointer: `speed` loops per second, advanced one evaluation at a time
     // so the movement is independent of the evaluation rate (video frame rate
     // normally, audio sample rate inside an ADC -> DAC region).
-    const float fs = rateOf(ctx);
     float speed = node.pfloat("speed", 0.5f);
     if (in.size() > 1 && in[1].type == PortType::Scalar) {
         speed *= std::pow(2.0f, std::clamp(in[1].scalar, -8.0f, 8.0f));
@@ -2385,8 +2386,10 @@ void Registry::registerBuiltins() {
         def.inputs = {PortDesc{"Analysis", PortType::Analysis}};
         def.outputs = {PortDesc{"Value", PortType::Scalar}};
         // Logarithmic: the ear and the analysis bands are both log-spaced.
-        Param lowHz = makeParam("lowHz", "Low (Hz)", 40.0f, 20.0f, 16000.0f, 1.0f, "Band", true);
-        Param highHz = makeParam("highHz", "High (Hz)", 250.0f, 21.0f, 20000.0f, 1.0f, "Band", true);
+        Param lowHz =
+            makeParam("lowHz", "Low (Hz)", 40.0f, 20.0f, 16000.0f, 1.0f, "Band", true, 0.01f);
+        Param highHz =
+            makeParam("highHz", "High (Hz)", 250.0f, 21.0f, 20000.0f, 1.0f, "Band", true, 0.01f);
         lowHz.valueFormat = "%.0f Hz";
         highHz.valueFormat = "%.0f Hz";
         def.params = {
@@ -2952,7 +2955,7 @@ void Registry::registerBuiltins() {
                       PortDesc{"Resonance", PortType::Scalar, "Q x 2^input"}};
         def.outputs = {PortDesc{"Out", PortType::Scalar}};
         Param cutoff = makeParam("cutoff", "Cutoff (Hz)", 4.0f, 0.01f, 20000.0f, 0.01f, "Filter",
-                                 true);
+                                 true, 0.01f);
         cutoff.valueFormat = "%.2f Hz";
         def.params = {
             makeEnumParam("mode", "Mode", {"Low pass", "High pass", "Band pass"}, 0, "Filter"),
@@ -3293,9 +3296,9 @@ void Registry::registerBuiltins() {
         def.description =
             "A frame that owns blocks: drop a block inside to add it (it is highlighted while "
             "you drag over it), drag it out to remove it again. Members are arranged "
-            "automatically in layers that follow the signal chain - each column is one step "
-            "further from a block with no inputs, top aligned - and moving the group moves "
-            "them with it. Groups cannot be nested.";
+            "automatically from global flow: cycles are collapsed, external paths identify "
+            "upstream clusters, and equal layers keep their stable member order. Moving the "
+            "group moves its members with it. Groups cannot be nested.";
         def.inputs = {};
         def.outputs = {};
         def.params = {

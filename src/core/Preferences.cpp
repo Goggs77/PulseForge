@@ -104,6 +104,7 @@ void loadPreferences(Preferences &preferences, const std::string &path) {
     loaded.guiScale = std::clamp(root["guiScale"].asFloat(1.25f), 0.75f, 2.0f);
     loaded.asyncAudioLoad = root["asyncAudioLoad"].asBool(true);
     loaded.editorFpsCap = std::clamp(root["editorFpsCap"].asInt(60), 0, 240);
+    loaded.snapBlocksToGrid = root["snapBlocksToGrid"].asBool(true);
 
     const json::Value &palettes = root["themePalettes"];
     if (palettes.isObject()) {
@@ -128,6 +129,7 @@ bool savePreferences(const Preferences &preferences, const std::string &path) {
     root.set("guiScale", preferences.guiScale);
     root.set("asyncAudioLoad", preferences.asyncAudioLoad);
     root.set("editorFpsCap", preferences.editorFpsCap);
+    root.set("snapBlocksToGrid", preferences.snapBlocksToGrid);
     std::ofstream file(path.c_str(), std::ios::binary);
     if (!file.good()) return false;
     file << json::write(root, 2);

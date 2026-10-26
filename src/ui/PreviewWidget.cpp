@@ -13,20 +13,23 @@ void drawPreview(UiState &state, Rectangle bounds) {
     ui::panel(bounds, "Preview");
 
     Project &project = state.project;
-    const Rectangle view{bounds.x + 1.0f, bounds.y + 26.0f, bounds.width - 2.0f,
-                         bounds.height - 27.0f};
+    const float border = ui::s(1.0f);
+    const Rectangle view{bounds.x + border, bounds.y + ui::s(26.0f),
+                         bounds.width - border * 2.0f,
+                         bounds.height - ui::s(27.0f)};
     const float controlsHeight = ui::s(62.0f);
-    const Rectangle imageArea{view.x, view.y, view.width, std::max(ui::s(20.0f), view.height - controlsHeight)};
+    const Rectangle imageArea{view.x, view.y, view.width,
+                              std::max(ui::s(20.0f), view.height - controlsHeight)};
     const Rectangle controls{view.x, view.y + imageArea.height, view.width, controlsHeight};
 
     DrawRectangleRounded(imageArea, 0.02f, 4, Color{8, 9, 12, 255});
     if (state.previewImage && state.previewImage->valid()) {
         const float aspect = static_cast<float>(state.previewImage->width) /
                              static_cast<float>(std::max(1, state.previewImage->height));
-        float width = imageArea.width - 12.0f;
+        float width = imageArea.width - ui::s(12.0f);
         float height = width / aspect;
-        if (height > imageArea.height - 12.0f) {
-            height = imageArea.height - 12.0f;
+        if (height > imageArea.height - ui::s(12.0f)) {
+            height = imageArea.height - ui::s(12.0f);
             width = height * aspect;
         }
         const Rectangle dest{imageArea.x + (imageArea.width - width) * 0.5f,

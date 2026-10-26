@@ -20,6 +20,7 @@
 #include "core/Preferences.h"
 #include "core/Project.h"
 #include "core/Registry.h"
+#include "core/Snapping.h"
 #include "core/Sorting.h"
 #include "core/TextEdit.h"
 #include "dsp/Analysis.h"
@@ -227,6 +228,7 @@ int main(int argc, char **argv) {
         saved.defaultDarkTheme = false;
         saved.themePalette = "My Palette";
         saved.guiScale = 1.5f;
+        saved.snapBlocksToGrid = false;
         ThemePalette custom;
         custom.name = "My Palette";
         custom.background = Color{12, 34, 56, 255};
@@ -251,7 +253,8 @@ int main(int argc, char **argv) {
         if (loaded.themePalette != "My Palette" || loaded.themePalettes.size() != 1 ||
             loaded.themePalettes[0].name != "My Palette" ||
             loaded.themePalettes[0].background.r != 12 ||
-            loaded.themePalettes[0].accent.g != 120) {
+            loaded.themePalettes[0].accent.g != 120 ||
+            loaded.snapBlocksToGrid) {
             std::remove(preferencesPath.c_str());
             return fail("preferences theme palette round trip");
         }
@@ -678,10 +681,55 @@ int main(int argc, char **argv) {
                 }
             }
 
+            if (result == 0) {
+                Param percentSnap =
+                    makeParam("snap", "Snap", 0.0f, 0.0f, 10.0f, 0.0f, std::string(),
+                              false, 0.1f);
+                Param legacySnap =
+                    makeParam("legacy", "Legacy", 0.0f, 0.0f, 10.0f, 0.5f);
+                const float low = snapSliderFraction(0.24f, percentSnap.snapPercent);
+                const float high = snapSliderFraction(0.26f, percentSnap.snapPercent);
+                if (std::fabs(percentSnap.snapPercent - 0.1f) > 1e-5f ||
+                    std::fabs(legacySnap.snapPercent - 0.05f) > 1e-5f ||
+                    std::fabs(low - 0.2f) > 1e-5f ||
+                    std::fabs(high - 0.3f) > 1e-5f) {
+                    result = fail("slider percentage snapping");
+                } else {
+                    std::printf("  sliders  : normalized percentage detents and legacy step "
+                                "conversion ok\n");
+                }
+            }
+
+            if (result == 0) {
+                const std::vector<SnapRect> targets = {
+                    SnapRect{0.0f, 0.0f, 100.0f, 100.0f}};
+                const SnapResult alignment =
+                    snapBlock(SnapRect{97.0f, 200.0f, 50.0f, 50.0f}, targets,
+                              4.0f, 24.0f, 32.0f, true);
+                const SnapResult nearby =
+                    snapBlock(SnapRect{128.0f, 20.0f, 50.0f, 50.0f}, targets,
+                              8.0f, 24.0f, 32.0f, true);
+                const SnapResult grid =
+                    snapBlock(SnapRect{7.0f, 40.0f, 50.0f, 50.0f}, {},
+                              8.0f, 24.0f, 32.0f, true);
+                const SnapResult noGrid =
+                    snapBlock(SnapRect{7.0f, 40.0f, 50.0f, 50.0f}, {},
+                              8.0f, 24.0f, 32.0f, false);
+                if (std::fabs(alignment.x - 100.0f) > 1e-4f ||
+                    std::fabs(alignment.y - 200.0f) > 1e-4f ||
+                    std::fabs(nearby.x - 124.0f) > 1e-4f ||
+                    std::fabs(grid.x) > 1e-4f || std::fabs(grid.y - 32.0f) > 1e-4f ||
+                    std::fabs(noGrid.x - 7.0f) > 1e-4f ||
+                    std::fabs(noGrid.y - 40.0f) > 1e-4f) {
+                    result = fail("block snapping alignment, adjacency or grid");
+                } else {
+                    std::printf("  snapping : block alignment, adjacency and grid fallback ok\n");
+                }
+            }
+
             // Sorting: the Sticky Note and Group blocks carry no ports, the
             // group's members are stored as a text parameter, and the layered
-            // order follows the chain (compacted depths, rows sorted by depth,
-            // connected ports and id).
+            // order follows global flow while keeping member-list order stable.
             if (result == 0) {
                 bool ok = true;
                 std::string what;
@@ -697,9 +745,9 @@ int main(int argc, char **argv) {
                     what = "Sorting blocks must not have ports";
                 }
                 if (ok) {
-                    // 1 -> 2 -> 3 (2 is not a member, so 3 keeps depth 2) and a
-                    // dangling constant 4. Member 4 has no links at all, so it
-                    // sorts above 1 in the same column (fewer connected ports).
+                    // 1 -> 2 -> 3 (2 is outside the group, so 3 still flows after
+                    // it) plus dangling member 4. Equal-depth rows retain member
+                    // order instead of sorting by id or connected-port count.
                     Node *constant = sorting.addNode("math.constant", 0, 0);
                     Node *arith = sorting.addNode("math.arithmetic", 0, 0);
                     Node *power = sorting.addNode("math.power", 0, 0);
@@ -717,11 +765,11 @@ int main(int argc, char **argv) {
                         const std::vector<int> members = {constant->id, power->id, dangling->id};
                         const std::vector<GroupSlot> slots = groupLayerOrder(sorting, members);
                         // Depth 2 compacts to the second column; the extra depth 1
-                        // that no member uses must not leave a hole.
+                        // used only outside the group must not leave a hole.
                         const bool layoutOk =
-                            slots.size() == 3 && slots[0].id == dangling->id &&
+                            slots.size() == 3 && slots[0].id == constant->id &&
                             slots[0].column == 0 && slots[0].row == 0 &&
-                            slots[1].id == constant->id && slots[1].column == 0 &&
+                            slots[1].id == dangling->id && slots[1].column == 0 &&
                             slots[1].row == 1 && slots[2].id == power->id &&
                             slots[2].column == 1 && slots[2].row == 0;
                         if (!layoutOk) {
@@ -735,16 +783,69 @@ int main(int argc, char **argv) {
                             const std::vector<GroupSlot> merged = groupLayerOrder(
                                 sorting, {constant->id, arith->id, power->id, dangling->id}, 1);
                             const bool mergedOk =
-                                merged.size() == 4 && merged[0].id == dangling->id &&
+                                merged.size() == 4 && merged[0].id == constant->id &&
                                 merged[0].column == 0 && merged[0].row == 0 &&
-                                merged[1].id == constant->id && merged[1].column == 0 &&
-                                merged[1].row == 1 && merged[2].id == arith->id &&
+                                merged[1].id == arith->id && merged[1].column == 0 &&
+                                merged[1].row == 1 && merged[2].id == dangling->id &&
                                 merged[2].column == 0 && merged[2].row == 2 &&
                                 merged[3].id == power->id && merged[3].column == 1 &&
                                 merged[3].row == 0;
                             if (!mergedOk) {
                                 ok = false;
                                 what = "the depth tolerance did not merge the layers";
+                            }
+                        }
+                    }
+                    if (ok) {
+                        // Removing the final link between two members may merge
+                        // their columns, but must not reverse their visual order.
+                        Graph stableGraph;
+                        Node *first = stableGraph.addNode("math.constant", 0, 0);
+                        Node *second = stableGraph.addNode("math.arithmetic", 0, 0);
+                        std::string why;
+                        const bool connected =
+                            first && second &&
+                            stableGraph.connect(first->id, 0, second->id, 0, &why);
+                        if (!connected) {
+                            ok = false;
+                            what = why.empty() ? "could not build stable-order graph" : why;
+                        } else {
+                            const std::vector<int> ids = {first->id, second->id};
+                            const std::vector<GroupSlot> before =
+                                groupLayerOrder(stableGraph, ids);
+                            stableGraph.disconnectInput(second->id, 0);
+                            const std::vector<GroupSlot> after =
+                                groupLayerOrder(stableGraph, ids);
+                            if (before.size() != 2 || after.size() != 2 ||
+                                before[0].id != first->id || before[1].id != second->id ||
+                                after[0].id != first->id || after[1].id != second->id) {
+                                ok = false;
+                                what = "breaking a group link changed stable order";
+                            }
+                        }
+                    }
+                    if (ok) {
+                        // A hand-edited feedback loop must collapse to one SCC
+                        // rank instead of recursing forever.
+                        Graph cycleGraph;
+                        Node *cycleA = cycleGraph.addNode("math.constant", 0, 0);
+                        Node *cycleB = cycleGraph.addNode("math.arithmetic", 0, 0);
+                        if (!cycleA || !cycleB) {
+                            ok = false;
+                            what = "could not build cycle graph";
+                        } else {
+                            cycleGraph.links.push_back(
+                                Link{cycleA->id, 0, cycleB->id, 0});
+                            cycleGraph.links.push_back(
+                                Link{cycleB->id, 0, cycleA->id, 0});
+                            const std::vector<GroupSlot> cycleSlots =
+                                groupLayerOrder(cycleGraph, {cycleA->id, cycleB->id});
+                            if (cycleSlots.size() != 2 ||
+                                cycleSlots[0].depth != cycleSlots[1].depth ||
+                                cycleSlots[0].id != cycleA->id ||
+                                cycleSlots[1].id != cycleB->id) {
+                                ok = false;
+                                what = "feedback SCC ordering is unstable";
                             }
                         }
                     }

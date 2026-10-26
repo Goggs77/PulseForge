@@ -21,12 +21,10 @@ float kGap() { return ui::s(4.0f); }
 float kLabelWidth() { return ui::s(118.0f); }
 float kCurveHeight() { return ui::s(132.0f); }
 
-// The panel's rows are logical (kRow/kGap) but its spacing was tuned with raw
-// screen pixels. px() keeps those exactly as they are in the 1:1 editor and
-// scales them for the export hyper resolution pass, which draws the same layout
-// with more pixels - without it the logical rows grew while the offsets did not
-// and the sections collided.
-float px(float pixels) { return ui::pixelOffset(pixels); }
+// Older rows mixed logical controls with fixed screen offsets. They now follow
+// GUI scale as well as render scale so large preference scaling cannot make the
+// text and header grow while their surrounding geometry stays small.
+float px(float pixels) { return ui::s(pixels); }
 
 float labelWidthFor(Rectangle cursor) { return cursor.width < ui::s(300.0f) ? ui::s(92.0f) : kLabelWidth(); }
 
@@ -216,7 +214,7 @@ void drawParam(UiState &state, Node &node, Param &param, Rectangle &cursor) {
             }
             if (ui::slider(Rectangle{cursor.x, cursor.y + px(14.0f), cursor.width, kRow()}, nullptr,
                            &displayed, param.minValue, param.maxValue, param.step, valueFormat,
-                           sliderId, param.logarithmic)) {
+                           sliderId, param.logarithmic, param.snapPercent)) {
                 param.value = displayed;
                 state.project.dirty = true;
             }

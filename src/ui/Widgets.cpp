@@ -661,7 +661,7 @@ bool smallButton(Rectangle r, const char *label, bool active) {
 // ---------------------------------------------------------------------------
 
 bool slider(Rectangle r, const char *label, float *value, float lo, float hi, float step,
-            const char *format, int stableId, bool logarithmic) {
+            const char *format, int stableId, bool logarithmic, float snapPercent) {
     const Theme &t = theme();
     const int id = stableId != 0 ? stableId : nextId();
     const Vector2 mouse = GetMousePosition();
@@ -733,8 +733,16 @@ bool slider(Rectangle r, const char *label, float *value, float lo, float hi, fl
     if (dragging) {
         const float position =
             std::clamp((mouse.x - trackArea.x) / std::max(1.0f, trackArea.width), 0.0f, 1.0f);
-        float next = fromFraction(position);
-        if (step > 0.0f) next = std::round(next / step) * step;
+        const bool altBypass =
+            IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+        float snappedPosition = position;
+        if (!altBypass && snapPercent > 0.0f) {
+            snappedPosition = pf::snapSliderFraction(position, snapPercent);
+        }
+        float next = fromFraction(snappedPosition);
+        if (!altBypass && snapPercent <= 0.0f && step > 0.0f) {
+            next = std::round(next / step) * step;
+        }
         *value = std::clamp(next, std::min(lo, hi), std::max(lo, hi));
     }
 

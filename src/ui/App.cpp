@@ -1265,8 +1265,14 @@ void computeLayout(UiState &state, float width, float height) {
         Rectangle{centerX, topHeight + gap, contentWidth, contentHeight - timelineHeight - gap};
     state.timelineRect = Rectangle{centerX, state.canvasRect.y + state.canvasRect.height + gap,
                                    contentWidth, timelineHeight};
+    const float previewMin = ui::s(112.0f);
+    const float inspectorMin = ui::s(170.0f);
+    const float preferredPreview =
+        std::clamp(contentHeight * 0.42f, ui::s(220.0f), ui::s(620.0f));
+    const float previewMax =
+        std::max(previewMin, contentHeight - inspectorMin - gap);
     const float previewHeight =
-        std::clamp(contentHeight * 0.42f, ui::s(260.0f), ui::s(620.0f));
+        std::clamp(preferredPreview, previewMin, previewMax);
     state.previewRect = Rectangle{rightX, topHeight + gap, rightWidth, previewHeight};
     state.inspectorRect = Rectangle{rightX, state.previewRect.y + previewHeight + gap, rightWidth,
                                     contentHeight - previewHeight - gap};

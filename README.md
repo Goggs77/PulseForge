@@ -188,6 +188,9 @@ The **Prefs** button (or `Ctrl+,`) opens a dialog with:
 - **GUI scaling** - 0.75x to 2x. Every widget metric, panel size and label is
   multiplied by it, which is also the knob for making the text larger or
   smaller.
+- **Snap dragged blocks to grid** - on by default. Block edge/centre alignment
+  and nearby adjacency snapping still run when this is off; holding **Alt**
+  temporarily bypasses every block snap.
 - **Async audio loading** - on by default. Decoding, analysing and measuring an
   imported clip happens on a worker thread, so the graph appears immediately and
   the timeline and the preview stay greyed out ("Loading audio...") until the
@@ -214,7 +217,16 @@ opened.
 
 - **Sliders** can be dragged, or **double-clicked** to type an exact value.
   Whatever you enter is clamped to the slider's range and the handle jumps to
-  match.
+  match. Pointer drags use each slider's normalized percentage detents; hold
+  **Alt** while dragging for the unsnapped value. Typed values always bypass the
+  detents. Logarithmic frequency sliders snap in their log-scaled position
+  rather than in raw Hz.
+- **Dragged blocks** align their edges and centres to nearby blocks, snap to
+  consistent nearby spacing, and fall back to the 32-unit canvas grid when it
+  is enabled. A block-derived snap disables the grid for the whole position so
+  the axes cannot jump between two different snap systems. Dragged Groups ignore
+  their own children as snap targets. Hold **Alt** while dragging to suspend
+  snapping.
 - **Text boxes** edit like a normal field (caret, selection, word jumps,
   clipboard) and **Ctrl+Z** undoes a typing run or a discrete edit. The Sticky
   Note's box is multi-line: Enter breaks a line, Up/Down move across the wrapped
@@ -396,15 +408,19 @@ readable in either theme.
 The Group's arrangement is derived from the graph, not from where the blocks
 happened to sit:
 
-- a block's **depth** is the shortest number of steps to a block with no input
-  links, so `Audio Source -> Analyzer -> Spectrum` gives depths 0, 1, 2 (the walk
-  follows links outside the group too);
+- a block's **depth** is its longest flow rank after feedback cycles are
+  collapsed into strongly connected components. The walk covers the whole graph,
+  including paths entering and leaving the group;
 - each depth that actually occurs is one **column**, left to right, and empty
   depths are compacted away; `Depth tolerance` widens a layer to
   `tolerance + 1` consecutive depths (0 and 1 share a layer at 1, then 2 and 3),
   which never cascades the way a transitive merge would;
-- rows inside a column are sorted by depth, then by the number of ports that
-  carry a link (fewest first), then by block id, and top aligned;
+- internal links and paths through blocks outside the Group form stable visual
+  clusters, keeping related branches together and ordering upstream clusters
+  before downstream ones;
+- rows inside a column are sorted by cluster, then depth, then the existing
+  member-list order. Breaking a connection can merge or split clusters without
+  reversing unrelated members or changing any graph/block IDs;
 - the frame is sized from the arranged members, so it grows and shrinks with
   them, and the member list heals itself: a deleted block, a nested group or an
   id already claimed by another group is dropped from the `Members` text.

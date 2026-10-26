@@ -249,42 +249,50 @@ void drawBrowser(UiState &state) {
     BrowserState &browser = state.browser;
 
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.55f));
-    const float width = std::min(760.0f, GetScreenWidth() - 40.0f);
-    const float height = std::min(520.0f, GetScreenHeight() - 60.0f);
+    const float width = std::min(ui::s(760.0f), GetScreenWidth() - ui::s(40.0f));
+    const float height = std::min(ui::s(520.0f), GetScreenHeight() - ui::s(60.0f));
     const Rectangle box{(GetScreenWidth() - width) * 0.5f, (GetScreenHeight() - height) * 0.5f,
                         width, height};
     ui::panel(box, browser.title.c_str());
     DrawRectangleRoundedLines(box, 0.02f, 6, t.accent);
 
     // path + up
-    const Rectangle pathBar{box.x + 10.0f, box.y + 32.0f, box.width - 130.0f, 24.0f};
+    const Rectangle pathBar{box.x + ui::s(10.0f), box.y + ui::s(32.0f),
+                            box.width - ui::s(130.0f), ui::s(24.0f)};
     ui::drawTextClipped(Rectangle{pathBar.x, pathBar.y, pathBar.width, pathBar.height},
                         browser.directory.c_str(), 11.0f, t.textDim);
-    if (ui::button(Rectangle{box.x + box.width - 112.0f, box.y + 32.0f, 50.0f, 24.0f}, "Up")) {
+    if (ui::button(Rectangle{box.x + box.width - ui::s(112.0f), box.y + ui::s(32.0f),
+                             ui::s(50.0f), ui::s(24.0f)}, "Up")) {
         const fs::path parent = fs::path(browser.directory).parent_path();
         if (!parent.empty()) {
             browser.directory = parent.string();
             refreshBrowserListing(browser);
         }
     }
-    if (ui::button(Rectangle{box.x + box.width - 58.0f, box.y + 32.0f, 48.0f, 24.0f}, "Home")) {
+    if (ui::button(Rectangle{box.x + box.width - ui::s(58.0f), box.y + ui::s(32.0f),
+                             ui::s(48.0f), ui::s(24.0f)}, "Home")) {
         browser.directory = fs::current_path().string();
         refreshBrowserListing(browser);
     }
 
-    const Rectangle list{box.x + 10.0f, box.y + 62.0f, box.width - 32.0f, height - 150.0f};
+    const Rectangle list{box.x + ui::s(10.0f), box.y + ui::s(62.0f),
+                         box.width - ui::s(32.0f), height - ui::s(150.0f)};
     DrawRectangleRounded(list, 0.02f, 4, palette::modulate(t.panelAlt, 0.85f));
     ui::beginScroll(list);
-    const float rowHeight = 22.0f;
-    const float contentHeight = rowHeight * static_cast<float>(browser.entryNames.size()) + 8.0f;
+    const float rowHeight = ui::s(22.0f);
+    const float contentHeight =
+        rowHeight * static_cast<float>(browser.entryNames.size()) + ui::s(8.0f);
     if (ui::hovered(list)) ui::scrollWheel(&browser.scroll, contentHeight, list.height);
     for (size_t i = 0; i < browser.entryNames.size(); ++i) {
-        const Rectangle row{list.x + 4.0f, list.y + 4.0f + rowHeight * static_cast<float>(i) - browser.scroll,
-                            list.width - 12.0f, rowHeight};
+        const Rectangle row{list.x + ui::s(4.0f),
+                            list.y + ui::s(4.0f) +
+                                rowHeight * static_cast<float>(i) - browser.scroll,
+                            list.width - ui::s(12.0f), rowHeight};
         if (row.y + row.height < list.y || row.y > list.y + list.height) continue;
         const bool isHovered = ui::hovered(row) && ui::hovered(list);
         if (isHovered) DrawRectangleRounded(row, 0.3f, 4, palette::withAlpha(t.accent, 0.18f));
-        ui::drawTextClipped(Rectangle{row.x + 6.0f, row.y, row.width - 12.0f, row.height},
+        ui::drawTextClipped(Rectangle{row.x + ui::s(6.0f), row.y,
+                                      row.width - ui::s(12.0f), row.height},
                             ((browser.entryIsDirectory[i] ? "[ ] " : "    ") +
                              browser.entryNames[i])
                                 .c_str(),
@@ -300,25 +308,33 @@ void drawBrowser(UiState &state) {
         }
     }
     ui::endScroll();
-    ui::scrollbar(Rectangle{list.x + list.width + 4.0f, list.y, 10.0f, list.height}, &browser.scroll,
+    ui::scrollbar(Rectangle{list.x + list.width + ui::s(4.0f), list.y,
+                            ui::s(10.0f), list.height}, &browser.scroll,
                   contentHeight, list.height);
 
     if (!browser.error.empty()) {
-        ui::drawText(Rectangle{list.x, list.y + list.height + 2.0f, list.width, 16.0f},
+        ui::drawText(Rectangle{list.x, list.y + list.height + ui::s(2.0f),
+                               list.width, ui::s(16.0f)},
                      browser.error.c_str(), 11.0f, t.danger);
     }
 
     // file name
-    const Rectangle nameBar{box.x + 10.0f, box.y + height - 74.0f, box.width - 220.0f, 26.0f};
+    const Rectangle nameBar{box.x + ui::s(10.0f), box.y + height - ui::s(74.0f),
+                            box.width - ui::s(220.0f), ui::s(26.0f)};
     ui::textField(nameBar, &browser.fileName, "file name", 9001);
     char filterInfo[96];
     std::snprintf(filterInfo, sizeof(filterInfo), "filter: %s",
                   browser.filter.empty() ? "any" : browser.filter.c_str());
-    ui::drawTextClipped(Rectangle{nameBar.x, nameBar.y + 28.0f, nameBar.width, 16.0f}, filterInfo,
-                        10.0f, t.textDim);
+    ui::drawTextClipped(Rectangle{nameBar.x, nameBar.y + ui::s(28.0f),
+                                  nameBar.width, ui::s(16.0f)},
+                        filterInfo, 10.0f, t.textDim);
 
-    const Rectangle okBox{box.x + box.width - 200.0f, box.y + height - 74.0f, 90.0f, 26.0f};
-    const Rectangle cancelBox{box.x + box.width - 104.0f, box.y + height - 74.0f, 94.0f, 26.0f};
+    const Rectangle okBox{box.x + box.width - ui::s(200.0f),
+                          box.y + height - ui::s(74.0f), ui::s(90.0f),
+                          ui::s(26.0f)};
+    const Rectangle cancelBox{box.x + box.width - ui::s(104.0f),
+                              box.y + height - ui::s(74.0f), ui::s(94.0f),
+                              ui::s(26.0f)};
     if (ui::button(okBox, "Select", true)) {
         std::string fullPath;
         if (!browser.fileName.empty()) {
@@ -722,6 +738,12 @@ void drawPreferencesDialog(UiState &state) {
                    "Reset layout")) {
         state.preferences.guiScale = 1.25f;
         ui::theme().uiScale = 1.25f;
+    }
+    cursor.y += row + gap;
+    if (ui::checkbox(Rectangle{cursor.x, cursor.y, cursor.width, row},
+                     "Snap dragged blocks to grid",
+                     &state.preferences.snapBlocksToGrid)) {
+        // Applied immediately; persisted by Save preferences.
     }
     cursor.y += row + ui::s(14.0f);
 

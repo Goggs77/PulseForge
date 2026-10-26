@@ -16,11 +16,9 @@ namespace pf {
 std::vector<int> parseGroupMembers(const std::string &text);
 std::string formatGroupMembers(const std::vector<int> &ids);
 
-// Depth of a block: 0 when nothing feeds it (no input links), otherwise
-// 1 + the smallest depth among the blocks feeding it. The walk follows the
-// whole graph, so a member wired from outside its group is still placed after
-// the block that feeds it. Cycles (only possible in a hand edited file) count
-// as depth 0 instead of recursing forever.
+// Longest-path flow depth across the whole graph. Strongly connected components
+// are collapsed first, so feedback becomes one stable step instead of recursive
+// cycles. External upstream/downstream links therefore influence group layout.
 int blockDepth(const Graph &graph, int id);
 
 // Number of the block's ports that carry at least one link, inputs and outputs
@@ -37,12 +35,12 @@ struct GroupSlot {
     int connectedPorts = 0;
 };
 
-// Layered order for a group: columns are the depth bands that actually occur
-// (compacted so an unused band does not leave an empty column), and the rows
-// inside a column are sorted by depth, then by the number of connected ports,
-// then by block id. A layer covers `depthTolerance + 1` consecutive depths, so
-// a tolerance of 1 puts depth 0 and 1 in the first column and 2 and 3 in the
-// second. Missing blocks and nested groups are skipped.
+// Layered order for a group. Columns are compacted global flow-depth bands.
+// Branches connected internally or through an outside path form a cluster; rows
+// sort by depth, cluster order and finally original member order. The final
+// stable key means deleting a link exposes a tie without reshuffling unrelated
+// blocks. Layout is visual only and never rewrites IDs. A layer covers
+// `depthTolerance + 1` consecutive depths.
 std::vector<GroupSlot> groupLayerOrder(const Graph &graph, const std::vector<int> &members,
                                        int depthTolerance = 0);
 

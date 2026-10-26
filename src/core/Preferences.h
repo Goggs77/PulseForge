@@ -45,6 +45,8 @@ struct Preferences {
     // allows. The editor redraws everything every frame (immediate mode), so
     // this is the knob that decides how much CPU and GPU it may spend.
     int editorFpsCap = 60;
+    // Snaps dragged blocks to the canvas grid unless Alt overrides it.
+    bool snapBlocksToGrid = true;
 };
 
 void loadPreferences(Preferences &preferences, const std::string &path);

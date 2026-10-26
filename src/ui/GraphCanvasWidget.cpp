@@ -8,6 +8,7 @@
 
 #include "core/Registry.h"
 #include "core/Profile.h"
+#include "core/Snapping.h"
 #include "core/Sorting.h"
 #include "render/Palette.h"
 #include "ui/App.h"
@@ -32,6 +33,36 @@ float nodeTotalHeight(const Node &node) {
     // the footer for it.
     return headerHeight() + rows * portRowHeight() + ui::sWorld(nodeVisualHeight(node)) +
            footerHeight();
+}
+
+std::vector<int> groupMembersOf(const Node &group);
+
+// Nearby block snapping works in two passes per axis: edge/centre alignment
+// with any nearby block, then edge adjacency at a consistent spacing. The grid
+// is a fallback only, so it can never override a stronger alignment. Alt
+// bypasses the whole function.
+Vector2 snapBlockPosition(const Graph &graph, const Node &moving, Vector2 desired,
+                          float zoom, bool gridEnabled) {
+    if (IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT)) return desired;
+    const float threshold = ui::s(8.0f) / std::max(0.01f, zoom);
+    const float width = nodeWidth();
+    const float height = nodeTotalHeight(moving);
+    std::unordered_set<int> excluded;
+    if (moving.kind == "sort.group") {
+        const std::vector<int> members = groupMembersOf(moving);
+        excluded.insert(members.begin(), members.end());
+    }
+    std::vector<SnapRect> targets;
+    targets.reserve(graph.nodes.size());
+    for (const Node &other : graph.nodes) {
+        if (other.id == moving.id || !other.def || excluded.count(other.id) != 0) continue;
+        const Rectangle box = nodeBounds(graph, other);
+        targets.push_back(SnapRect{box.x, box.y, box.width, box.height});
+    }
+    const SnapResult snapped =
+        snapBlock(SnapRect{desired.x, desired.y, width, height}, targets,
+                  threshold, ui::sWorld(24.0f), 32.0f, gridEnabled);
+    return Vector2{snapped.x, snapped.y};
 }
 
 // Fraction of the block height taken by the port rows.
@@ -980,8 +1011,13 @@ void drawGraphCanvas(UiState &state, Rectangle bounds) {
             Node *node = graph.find(state.canvas.dragNodeId);
             if (node && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
                 const Vector2 world = screenToWorld(mouse);
-                node->x = world.x - state.canvas.dragOffset.x;
-                node->y = world.y - state.canvas.dragOffset.y;
+                const Vector2 desired{world.x - state.canvas.dragOffset.x,
+                                      world.y - state.canvas.dragOffset.y};
+                const Vector2 snapped =
+                    snapBlockPosition(graph, *node, desired, view.zoom,
+                                      state.preferences.snapBlocksToGrid);
+                node->x = snapped.x;
+                node->y = snapped.y;
                 state.project.dirty = true;
             } else {
                 state.canvas.draggingNode = false;

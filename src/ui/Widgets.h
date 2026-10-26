@@ -74,7 +74,8 @@ bool toggleButton(Rectangle r, const char *label, bool active, const char *toolt
 bool smallButton(Rectangle r, const char *label, bool active = false);
 
 bool slider(Rectangle r, const char *label, float *value, float lo, float hi, float step = 0.0f,
-            const char *format = "%.2f", int stableId = 0, bool logarithmic = false);
+            const char *format = "%.2f", int stableId = 0, bool logarithmic = false,
+            float snapPercent = 0.0f);
 // True while that slider is being dragged. The inspector uses it to show the
 // base value (instead of the modulation-following readout) during a drag.
 bool sliderDragging(int stableId);

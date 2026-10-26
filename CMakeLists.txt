@@ -80,6 +80,7 @@ add_library(pulseforge_core STATIC
     src/core/Project.cpp
     src/core/Json.cpp
     src/core/Preferences.cpp
+    src/core/Snapping.cpp
     src/core/Sorting.cpp
     src/core/TextEdit.cpp
     src/core/Registry.cpp

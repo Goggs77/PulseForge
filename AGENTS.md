@@ -140,7 +140,9 @@ build\bin\pf_selftest.exe "I:\Goggs\Goggsmusic\identity Project\identity_01.flac
 It covers decode -> analysis -> in-process rendering -> export -> probe, plus
 specific regressions: math/matrix blocks, project save/load round trip, project
 metadata, preference theme-palette dictionaries and old dark/light migration,
-text editing (caret, selection, clipboard), shader ports derived from a
+normalized slider detents, block alignment/adjacency/grid snapping, stable
+cycle-aware Group ordering, text editing (caret, selection, clipboard), shader
+ports derived from a
 `.glsl` file and `shader.pass` migration, per-family encoder arguments and the
 audio matching rules, legacy Audio Output migration, ADC/DAC conversion, and the
 exclusive Audio Output routing (processed, dry and silent exports, plus the
@@ -341,6 +343,18 @@ docs         rendering notes and the README overlay image
   `kPaletteScrollFriction`, and stops it at the bounds. Direct scrollbar drag
   clears that velocity and keeps the existing immediate pointer tracking. Other
   button groups keep their own fixed layout for now.
+- Canvas block dragging uses `core/Snapping`: edge/centre alignment and
+  gap-based nearby adjacency are always tried first. If either axis gets a
+  block-derived snap, grid snapping is disabled on both axes for that frame;
+  mixing a block snap with a grid snap caused diagonal jitter. The 32-world-unit
+  grid applies only when there are no block snaps.
+  `Preferences::snapBlocksToGrid` controls it, and holding either Alt key
+  bypasses every positional snap. A dragged Group excludes its own members from
+  snap targets, otherwise it can chase its derived child geometry.
+- Slider pointer drags snap in normalized track position through
+  `Param::snapPercent` and `snapSliderFraction`. Existing absolute `step` values
+  become equivalent percentage grids in `makeParam`; logarithmic sliders use
+  their log position. Alt bypasses the detent and typed entry never snaps.
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
   the Frequency Band and Signal Filter Hz sliders) and an optional
   `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty
@@ -376,6 +390,11 @@ docs         rendering notes and the README overlay image
   in core - the split is what makes the layout testable without a canvas.
   `sortingColours` in `NodeVisuals.cpp` is the single source for the card and
   ink shades, so the canvas and the note text can never drift apart.
+  Group flow (`core/Sorting.cpp`) collapses graph cycles with SCCs, computes
+  longest-path ranks across the whole graph, clusters members connected by
+  internal or external paths, and uses member-list order as the final stable
+  tie-break. Sorting is visual only: it never changes block ids or project
+  ordering, and breaking a link must not reshuffle unrelated members.
   A group's `depthTolerance` widens a layer to `tolerance + 1` consecutive
   depths (`band = depth / (tolerance + 1)`, bands compacted into columns): a
   quantised merge, never a transitive one, or every depth in a chain would
@@ -604,14 +623,12 @@ docs         rendering notes and the README overlay image
   window-sized quad (mirrored or dropped in a target of another size) and cannot
   batch, so every pass uses the app's boxes. `--shot` follows the factor too,
   which is how the pass can be inspected without an export.
-- Layout metrics come in three kinds, each with its helper in Theme.h: logical
-  (`ui::s`, GUI scale x render scale), the graph's world space (`ui::sWorld`, GUI
-  scale only - the canvas zoom carries the rest) and raw screen pixels a panel
-  was tuned with (`ui::pixelOffset` for offsets, `ui::pixelText` to undo the
-  render scale before a text helper applies it). Both pixel helpers are
-  identities at render scale 1, so the 1:1 editor never changes, but without
-  them a hyper resolution pass grows the logical rows while the raw spacing
-  stays put and the sections collide (the Inspector was drawn that way).
+- Layout metrics come in two kinds, each with its helper in Theme.h: logical
+  (`ui::s`, GUI scale x render scale) and the graph's world space (`ui::sWorld`,
+  GUI scale only - the canvas zoom carries the rest). `ui::pixelText` only undoes
+  the render scale for text derived from already-scaled geometry. Panel offsets
+  must follow GUI scale too; keeping them in raw pixels made the Inspector
+  header and sections collide at high preference scaling.
   `visualFont`/`visualInset`/`visualHandle`/`visualStroke` scale their pixel
   clamps with the render scale for the same reason - a clamped font would stop
   growing while its block kept scaling.

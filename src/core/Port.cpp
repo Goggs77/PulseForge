@@ -133,7 +133,8 @@ const float *AnalysisData::spectrumRow(double time) const {
 // ---------------------------------------------------------------------------
 
 Param makeParam(const std::string &key, const std::string &label, float value, float minValue,
-                float maxValue, float step, const std::string &group, bool logarithmic) {
+                float maxValue, float step, const std::string &group, bool logarithmic,
+                float snapPercent) {
     Param p;
     p.key = key;
     p.label = label;
@@ -144,6 +145,12 @@ Param makeParam(const std::string &key, const std::string &label, float value, f
     p.step = step;
     p.group = group;
     p.logarithmic = logarithmic;
+    if (snapPercent > 0.0f) {
+        p.snapPercent = std::clamp(snapPercent, 0.0f, 1.0f);
+    } else if (step > 0.0f && maxValue > minValue) {
+        // Existing step values become equivalent normalized detent grids.
+        p.snapPercent = std::clamp(step / (maxValue - minValue), 0.0f, 1.0f);
+    }
     return p;
 }
 

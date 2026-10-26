@@ -218,6 +218,9 @@ struct Param {
     float minValue = 0.0f;
     float maxValue = 1.0f;
     float step = 0.0f;       // 0 = continuous
+    // Normalized detent spacing for pointer dragging. Zero keeps the legacy
+    // absolute `step`; logarithmic tracks still snap by position percentage.
+    float snapPercent = 0.0f;
     // printf format for the value readout; empty picks a default from the kind
     // ("%.3g", or "%.0f Hz" for logarithmic parameters).
     std::string valueFormat;
@@ -259,7 +262,7 @@ CurveKeyBounds curveKeyBounds(const Param &curve, size_t index);
 
 Param makeParam(const std::string &key, const std::string &label, float value, float minValue,
                 float maxValue, float step = 0.0f, const std::string &group = std::string(),
-                bool logarithmic = false);
+                bool logarithmic = false, float snapPercent = 0.0f);
 Param makeIntParam(const std::string &key, const std::string &label, int value, int minValue,
                    int maxValue, const std::string &group = std::string());
 Param makeBoolParam(const std::string &key, const std::string &label, bool value,
@@ -292,6 +295,11 @@ inline float lerp(float a, float b, float t) { return a + (b - a) * t; }
 inline float normalize01(float value, float lo, float hi) {
     if (hi <= lo) return 0.0f;
     return std::clamp((value - lo) / (hi - lo), 0.0f, 1.0f);
+}
+inline float snapSliderFraction(float fraction, float snapPercent) {
+    fraction = std::clamp(fraction, 0.0f, 1.0f);
+    if (snapPercent <= 0.0f) return fraction;
+    return std::clamp(std::round(fraction / snapPercent) * snapPercent, 0.0f, 1.0f);
 }
 Color colorFromHsv(float h, float s, float v, float a = 1.0f);
 // Inverse of colorFromHsv; h, s and v are returned in 0..1.
