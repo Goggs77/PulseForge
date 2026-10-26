@@ -330,6 +330,17 @@ docs         rendering notes and the README overlay image
   render-palette defaults. Those belong to video/block semantics; editor clears
   and themeable UI use the active `ui::theme()` palette. `canvasControlKey`
   already hashes the theme colours, so a palette change invalidates its cache.
+- Blocks-tab rows stay left-aligned and recompute their individual widths every
+  layout pass from `paletteButtonWidth`. Each row blends from its normal right
+  margin to a scaled gap left of the moving highlighted thumb over one row
+  height using smoothstep; do not replace this with a Boolean overlap test,
+  which makes the width jump. `scrollbarThumb` is the shared thumb geometry used
+  by both the control and the button layout, so wheel and scrollbar drags update
+  widths in the same frame.
+  Wheel scrolling adds velocity to `gPaletteScrollVelocity`, decays it with
+  `kPaletteScrollFriction`, and stops it at the bounds. Direct scrollbar drag
+  clears that velocity and keeps the existing immediate pointer tracking. Other
+  button groups keep their own fixed layout for now.
 - Parameters are `ParamKind` values with an optional `logarithmic` flag (used for
   the Frequency Band and Signal Filter Hz sliders) and an optional
   `valueFormat` for the readout (`"%.0f Hz"`, `"%.2f Hz"`); an empty

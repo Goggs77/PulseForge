@@ -53,7 +53,65 @@ std::unordered_map<const CguiNode *, std::string> gPaletteKinds;
 float gPaletteRowHeight = 24.0f;
 float gPaletteContentHeight = 0.0f;
 float gPaletteScroll = 0.0f;
+float gPaletteScrollVelocity = 0.0f;
 float gTopBarContentWidth = 0.0f;
+
+constexpr float kPaletteButtonInset = 6.0f;
+constexpr float kPaletteSliderWidth = 7.0f;
+constexpr float kPaletteSliderRightInset = 12.0f;
+constexpr float kPaletteSliderGap = 6.0f;
+constexpr float kPaletteWheelImpulse = 520.0f;
+constexpr float kPaletteScrollFriction = 10.0f;
+constexpr float kPaletteMaxScrollSpeed = 2400.0f;
+
+Rectangle paletteScrollbarTrack(Rectangle bounds) {
+    const Rectangle view = paletteView(bounds);
+    return Rectangle{bounds.x + bounds.width - ui::s(kPaletteSliderRightInset),
+                     view.y, ui::s(kPaletteSliderWidth), view.height};
+}
+
+bool paletteHasScrollbar(Rectangle bounds) {
+    return gPaletteContentHeight > paletteView(bounds).height + 1.0f;
+}
+
+Rectangle paletteScrollbarThumb(Rectangle bounds) {
+    if (!paletteHasScrollbar(bounds)) return Rectangle{};
+    return ui::scrollbarThumb(paletteScrollbarTrack(bounds), gPaletteScroll,
+                              gPaletteContentHeight, paletteView(bounds).height);
+}
+
+// Width to the right of one left-aligned Blocks button. Rows fade from the
+// normal right margin to the moving thumb's left edge over one row height, so
+// the width changes continuously as the thumb enters and leaves that row.
+float paletteButtonWidth(Rectangle bounds, float y, float height) {
+    const float left = bounds.x + ui::s(kPaletteButtonInset);
+    float right = bounds.x + bounds.width - ui::s(8.0f);
+    if (paletteHasScrollbar(bounds)) {
+        const Rectangle thumb = paletteScrollbarThumb(bounds);
+        const float separation =
+            std::max({0.0f, thumb.y - (y + height), y - (thumb.y + thumb.height)});
+        const float influence = std::max(0.0f, 1.0f - separation / std::max(1.0f, height));
+        const float eased = influence * influence * (3.0f - 2.0f * influence);
+        const float thumbLimit = thumb.x - ui::s(kPaletteSliderGap);
+        right += (thumbLimit - right) * eased;
+    }
+    return std::max(0.0f, right - left);
+}
+
+void layoutPaletteButtons(Rectangle bounds) {
+    const float originX = bounds.x + ui::s(kPaletteButtonInset);
+    const float originY = bounds.y + ui::s(30.0f) - gPaletteScroll;
+    for (ChromeRect &entry : gChromeRects) {
+        if (entry.topBar || !entry.node) continue;
+        entry.rect.x = originX;
+        entry.rect.y = originY + entry.localY;
+        entry.rect.width = paletteButtonWidth(bounds, entry.rect.y, entry.rect.height);
+        entry.node->transformation =
+            CguiTAbsolute(Vector2{entry.rect.x, entry.rect.y},
+                          Vector2{entry.rect.width, entry.rect.height});
+        entry.node->rebound = true;
+    }
+}
 
 constexpr const char *kDefaultProject = "demo.pforge";
 
@@ -207,13 +265,15 @@ void buildChrome(UiState &state) {
     float y = 0.0f;
     const float originX = state.paletteRect.x + ui::s(6.0f);
     const float originY = state.paletteRect.y + ui::s(30.0f);
-    const float paletteWidth = std::max(ui::s(80.0f), state.paletteRect.width - ui::s(14.0f));
     for (const std::string &category : categories) {
         gPaletteCaptions.emplace_back(category, y);
         y += ui::s(22.0f);
         for (const NodeDef *def : Registry::instance().byCategory(category)) {
             // The press callback reads the block kind from the node name.
-            const Rectangle rect{originX, originY + y, paletteWidth, gPaletteRowHeight};
+            const float buttonY = originY + y;
+            const float paletteWidth =
+                paletteButtonWidth(state.paletteRect, buttonY, gPaletteRowHeight);
+            const Rectangle rect{originX, buttonY, paletteWidth, gPaletteRowHeight};
             CguiNode *buttonNode = CguiCreateButton(
                 CguiTAbsolute(Vector2{rect.x, rect.y}, Vector2{rect.width, rect.height}),
                 CGUI_BUTTON_TYPE_NORMAL, actionPaletteEntry, false);
@@ -234,6 +294,7 @@ void buildChrome(UiState &state) {
     }
     gPaletteContentHeight = y;
     gPaletteScroll = 0.0f;
+    gPaletteScrollVelocity = 0.0f;
 }
 
 // The chrome buttons are painted by CrystalGUI but clicked through this
@@ -246,12 +307,18 @@ void buildChrome(UiState &state) {
 void updateChromeInput(UiState &state, Vector2 mouse, bool pressed, bool released) {
     const bool interactive = !ui::inputBlocked();
     const Rectangle paletteClip = paletteView(state.paletteRect);
+    const bool scrollbarVisible = paletteHasScrollbar(state.paletteRect);
+    const Rectangle scrollbarTrack = paletteScrollbarTrack(state.paletteRect);
     for (size_t i = 0; i < gChromeRects.size(); ++i) {
         ChromeRect &entry = gChromeRects[i];
         if (!entry.node) continue;
         const bool visible = entry.topBar || CheckCollisionPointRec(mouse, paletteClip);
+        const bool overScrollbar =
+            !entry.topBar && scrollbarVisible &&
+            CheckCollisionPointRec(mouse, scrollbarTrack);
         const bool hovered =
-            interactive && visible && CheckCollisionPointRec(mouse, entry.rect);
+            interactive && visible && !overScrollbar &&
+            CheckCollisionPointRec(mouse, entry.rect);
         if (interactive && pressed && hovered) {
             gChromePressedIndex = static_cast<int>(i);
         }
@@ -287,17 +354,9 @@ void updateChromeLayout(UiState &state) {
                           Vector2{state.paletteRect.width - 12.0f,
                                   state.paletteRect.height - 38.0f});
         gPaletteLayer->rebound = true;
-        // Buttons are placed in screen space, so scrolling is applied here.
-        const float originX = state.paletteRect.x + ui::s(6.0f);
-        const float originY = state.paletteRect.y + ui::s(30.0f) - gPaletteScroll;
-        for (ChromeRect &entry : gChromeRects) {
-            if (entry.topBar || !entry.node) continue;
-            entry.rect.x = originX;
-            entry.rect.y = originY + entry.localY;
-            entry.node->transformation = CguiTAbsolute(Vector2{entry.rect.x, entry.rect.y},
-                                                       Vector2{entry.rect.width, entry.rect.height});
-            entry.node->rebound = true;
-        }
+        // Buttons are placed in screen space, so scrolling and thumb avoidance
+        // are recomputed here for hit testing.
+        layoutPaletteButtons(state.paletteRect);
     }
     for (const ChromeRect &entry : gChromeRects) {
         if (entry.node) entry.node->canHandleMouseEvents = false;
@@ -1076,16 +1135,45 @@ void drawPalette(UiState &state, Rectangle bounds) {
     // The block list scrolls when it does not fit.
     const Rectangle view{bounds.x, bounds.y + ui::s(28.0f), bounds.width, bounds.height - ui::s(30.0f)};
     const float maxScroll = std::max(0.0f, gPaletteContentHeight - view.height);
-    if (ui::hovered(view) && GetMouseWheelMove() != 0.0f) {
-        gPaletteScroll = std::clamp(gPaletteScroll - GetMouseWheelMove() * ui::s(40.0f), 0.0f,
-                                    maxScroll);
+    const float wheel = GetMouseWheelMove();
+    const bool draggingScrollbar =
+        maxScroll > 0.0f && CheckCollisionPointRec(GetMousePosition(),
+                                                   paletteScrollbarTrack(bounds)) &&
+        IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    if (maxScroll <= 0.0f) {
+        gPaletteScroll = 0.0f;
+        gPaletteScrollVelocity = 0.0f;
+    } else if (draggingScrollbar) {
+        // Direct manipulation should track the pointer exactly, with no carry
+        // over from a previous wheel gesture.
+        gPaletteScrollVelocity = 0.0f;
+    } else {
+        if (ui::hovered(view) && wheel != 0.0f) {
+            gPaletteScrollVelocity = std::clamp(
+                gPaletteScrollVelocity - wheel * ui::s(kPaletteWheelImpulse),
+                -ui::s(kPaletteMaxScrollSpeed), ui::s(kPaletteMaxScrollSpeed));
+        }
+        if (gPaletteScrollVelocity != 0.0f) {
+            const float dt = std::clamp(GetFrameTime(), 0.0f, 0.05f);
+            const float next =
+                std::clamp(gPaletteScroll + gPaletteScrollVelocity * dt, 0.0f, maxScroll);
+            if ((next <= 0.0f && gPaletteScrollVelocity < 0.0f) ||
+                (next >= maxScroll && gPaletteScrollVelocity > 0.0f)) {
+                gPaletteScrollVelocity = 0.0f;
+            }
+            gPaletteScroll = next;
+            gPaletteScrollVelocity *= std::exp(-kPaletteScrollFriction * dt);
+            if (std::fabs(gPaletteScrollVelocity) < 1.0f) gPaletteScrollVelocity = 0.0f;
+        }
     }
     gPaletteScroll = std::clamp(gPaletteScroll, 0.0f, maxScroll);
     if (maxScroll > 0.0f) {
-        ui::scrollbar(Rectangle{bounds.x + bounds.width - ui::s(12.0f), view.y, ui::s(7.0f),
-                                view.height},
+        ui::scrollbar(paletteScrollbarTrack(bounds),
                       &gPaletteScroll, gPaletteContentHeight, view.height);
     }
+    // The thumb may have moved above (or a wheel event just changed the offset).
+    // Re-layout before the chrome pass paints so row widths animate this frame.
+    layoutPaletteButtons(bounds);
 }
 
 // Captions and block names are drawn after the CrystalGUI buttons so the
@@ -1581,6 +1669,7 @@ int runApp(int argc, char **argv) {
     buildChrome(state);
     float builtWidth = static_cast<float>(GetScreenWidth());
     float builtHeight = static_cast<float>(GetScreenHeight());
+    float builtGuiScale = ui::theme().uiScale;
 
     // Optionally preload an audio file / project from the command line.
     for (size_t i = 0; i < positional.size(); ++i) {
@@ -1638,10 +1727,13 @@ int runApp(int argc, char **argv) {
             PF_PROFILE_PHASE(layout, Layout);
             const float windowWidthNow = static_cast<float>(GetScreenWidth());
             const float windowHeightNow = static_cast<float>(GetScreenHeight());
+            const float guiScaleNow = ui::theme().uiScale;
             computeLayout(state, windowWidthNow, windowHeightNow);
-            if (windowWidthNow != builtWidth || windowHeightNow != builtHeight) {
+            if (windowWidthNow != builtWidth || windowHeightNow != builtHeight ||
+                guiScaleNow != builtGuiScale) {
                 builtWidth = windowWidthNow;
                 builtHeight = windowHeightNow;
+                builtGuiScale = guiScaleNow;
                 buildChrome(state);
             }
             // The chrome's ability to handle the mouse depends on the modal

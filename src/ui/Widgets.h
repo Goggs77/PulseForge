@@ -102,6 +102,7 @@ void progressBar(Rectangle r, float fraction, const char *label = nullptr);
 // Scrolling region: the caller offsets its own y coordinates by *offset.
 void beginScroll(Rectangle view);
 void endScroll();
+Rectangle scrollbarThumb(Rectangle track, float offset, float contentHeight, float viewHeight);
 void scrollbar(Rectangle track, float *offset, float contentHeight, float viewHeight);
 bool scrollWheel(float *offset, float contentHeight, float viewHeight);
 

@@ -1438,6 +1438,18 @@ void endScroll() {
     gScrollClipActive = false;
 }
 
+Rectangle scrollbarThumb(Rectangle track, float offset, float contentHeight,
+                         float viewHeight) {
+    if (contentHeight <= viewHeight + 1.0f) return Rectangle{};
+    const float ratio = std::clamp(viewHeight / contentHeight, 0.05f, 1.0f);
+    const float thumbHeight = std::max(s(24.0f), track.height * ratio);
+    const float maxOffset = contentHeight - viewHeight;
+    const float position =
+        maxOffset > 0.0f ? std::clamp(offset / maxOffset, 0.0f, 1.0f) : 0.0f;
+    return Rectangle{track.x, track.y + position * (track.height - thumbHeight),
+                     track.width, thumbHeight};
+}
+
 void scrollbar(Rectangle track, float *offset, float contentHeight, float viewHeight) {
     const Theme &t = theme();
     if (contentHeight <= viewHeight + 1.0f) {
@@ -1445,21 +1457,18 @@ void scrollbar(Rectangle track, float *offset, float contentHeight, float viewHe
         return;
     }
     DrawRectangleRounded(track, roundness(track, track.width * 0.5f), 6, palette::withAlpha(t.panelAlt, 0.6f));
-    const float ratio = std::clamp(viewHeight / contentHeight, 0.05f, 1.0f);
-    const float thumbHeight = std::max(s(24.0f), track.height * ratio);
+    const Rectangle initialThumb = scrollbarThumb(track, *offset, contentHeight, viewHeight);
+    const float thumbHeight = initialThumb.height;
     const float maxOffset = contentHeight - viewHeight;
-    const float position = maxOffset > 0.0f ? std::clamp(*offset / maxOffset, 0.0f, 1.0f) : 0.0f;
-    const Rectangle thumb{track.x, track.y + position * (track.height - thumbHeight), track.width,
-                          thumbHeight};
-    const bool isHovered = hovered(thumb) || hovered(track);
-    DrawRectangleRounded(thumb, roundness(thumb, thumb.width * 0.5f), 6, isHovered ? t.accent : t.accentDim);
-
     if (pointIn(track, GetMousePosition()) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
         const float local = std::clamp((GetMouseY() - track.y - thumbHeight * 0.5f) /
                                            std::max(1.0f, track.height - thumbHeight),
                                        0.0f, 1.0f);
         *offset = local * maxOffset;
     }
+    const Rectangle thumb = scrollbarThumb(track, *offset, contentHeight, viewHeight);
+    const bool isHovered = hovered(thumb) || hovered(track);
+    DrawRectangleRounded(thumb, roundness(thumb, thumb.width * 0.5f), 6, isHovered ? t.accent : t.accentDim);
 }
 
 bool scrollWheel(float *offset, float contentHeight, float viewHeight) {
