@@ -32,8 +32,9 @@ struct ThemePalette {
 struct Preferences {
     bool defaultDarkTheme = true;
     // Name of the selected built-in or user palette. Built-ins are "Dark",
-    // "Light" and "Immaterial"; user names are keys in `themePalettes`.
-    std::string themePalette = "Dark";
+    // "Light" and "Immaterial"; Immaterial is the default. User names are keys
+    // in `themePalettes`.
+    std::string themePalette = "Immaterial";
     // User palettes only. They are written as a JSON object keyed by name.
     std::vector<ThemePalette> themePalettes;
     float guiScale = 1.25f;

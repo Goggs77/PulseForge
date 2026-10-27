@@ -140,6 +140,15 @@ struct Value {
         out.scalar = v;
         return out;
     }
+    void setScalar(float v) {
+        type = PortType::Scalar;
+        scalar = v;
+        if (!text.empty()) text.clear();
+        if (audio) audio.reset();
+        if (carrier) carrier.reset();
+        if (analysis) analysis.reset();
+        if (image) image.reset();
+    }
     static Value makeColor(Color c) {
         Value out;
         out.type = PortType::Color;

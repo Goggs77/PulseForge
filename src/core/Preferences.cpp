@@ -98,9 +98,10 @@ void loadPreferences(Preferences &preferences, const std::string &path) {
 
     loaded.defaultDarkTheme = root["defaultDarkTheme"].asBool(true);
     // Older files only stored a dark/light boolean. Preserve that choice while
-    // moving to named palettes.
-    loaded.themePalette =
-        root["themePalette"].asString(loaded.defaultDarkTheme ? "Dark" : "Light");
+    // moving to named palettes; a file with neither field uses the new default.
+    const std::string legacyPalette = loaded.defaultDarkTheme ? "Dark" : "Light";
+    loaded.themePalette = root["themePalette"].asString(
+        root.has("defaultDarkTheme") ? legacyPalette : "Immaterial");
     loaded.guiScale = std::clamp(root["guiScale"].asFloat(1.25f), 0.75f, 2.0f);
     loaded.asyncAudioLoad = root["asyncAudioLoad"].asBool(true);
     loaded.editorFpsCap = std::clamp(root["editorFpsCap"].asInt(60), 0, 240);

@@ -387,8 +387,9 @@ void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoo
     const double peak = std::clamp(reading("peak", vu), static_cast<double>(kVuMin),
                                    static_cast<double>(kVuMax));
 
-    if (node.pint("mode", 0) == 1) {
-        // Value/time diagram: the same shape the Frequency Band block uses.
+    const int mode = node.pint("mode", 0);
+    if (mode == 1 || mode == 2) {
+        // Value graph and Waveform share the same history; only the fill differs.
         const int capacity = static_cast<int>(node.historyA.size());
         if (capacity < 2) {
             ui::drawText(inner, "waiting for a signal", ui::pixelText(visualFont(inner, 0.16f)),
@@ -408,8 +409,10 @@ void drawMeterVisual(UiState &state, const Node &node, Rectangle body, float zoo
         DrawLine(static_cast<int>(inner.x), static_cast<int>(midY),
                  static_cast<int>(inner.x + inner.width), static_cast<int>(midY),
                  withAlpha(t.border, 0.6f));
-        drawFilledSeries(inner, series.data(), capacity, withAlpha(t.accent, 0.7f),
-                         withAlpha(t.accent, 0.08f));
+        if (mode == 1) {
+            drawFilledSeries(inner, series.data(), capacity, withAlpha(t.accent, 0.7f),
+                             withAlpha(t.accent, 0.08f));
+        }
         drawSeriesOutline(inner, series.data(), capacity, withAlpha(t.accent, 0.95f), 0.0f, 1.0f);
         char text[64];
         std::snprintf(text, sizeof(text), "%.3f   %.1f dBFS",
@@ -819,7 +822,8 @@ float nodeVisualHeight(const Node &node) {
     if (node.kind == "mod.lfo" || node.kind == "mod.automation") return kVisualHeightCurve;
     if (node.kind == "src.audio") return kVisualHeightWave;
     if (node.kind == "dbg.meter") {
-        return node.pint("mode", 0) == 1 ? kVisualHeightGraph : kVisualHeightVumeter;
+        const int mode = node.pint("mode", 0);
+        return mode == 1 || mode == 2 ? kVisualHeightGraph : kVisualHeightVumeter;
     }
     if (node.kind == "dbg.guard") return kVisualHeightGuard;
     if (node.kind == "mod.ringbuffer") return kVisualHeightRing;

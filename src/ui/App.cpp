@@ -1406,14 +1406,19 @@ void drawExportFrame(UiState &state, bool captureMirror, int videoFrame) {
     // the frame before the dim rectangle and the progress panel.
     if (captureMirror) captureEditorForFrame(state, videoFrame);
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.55f));
-    const Rectangle box{(GetScreenWidth() - 560.0f) * 0.5f,
-                        (GetScreenHeight() - 150.0f) * 0.5f, 560.0f, 150.0f};
+    const float boxWidth = ui::s(560.0f);
+    const float boxHeight = ui::s(150.0f);
+    const Rectangle box{(GetScreenWidth() - boxWidth) * 0.5f,
+                        (GetScreenHeight() - boxHeight) * 0.5f, boxWidth, boxHeight};
     ui::panel(box, "Exporting");
-    ui::progressBar(Rectangle{box.x + 20.0f, box.y + 50.0f, box.width - 40.0f, 22.0f},
+    ui::progressBar(Rectangle{box.x + ui::s(20.0f), box.y + ui::s(50.0f),
+                              box.width - ui::s(40.0f), ui::s(22.0f)},
                     state.exportProgress, nullptr);
-    ui::drawText(Rectangle{box.x + 20.0f, box.y + 80.0f, box.width - 40.0f, 20.0f},
+    ui::drawText(Rectangle{box.x + ui::s(20.0f), box.y + ui::s(80.0f),
+                           box.width - ui::s(40.0f), ui::s(20.0f)},
                  state.exportStatus.c_str(), 13.0f, ui::theme().text, ui::Align::Center);
-    ui::drawText(Rectangle{box.x + 20.0f, box.y + 104.0f, box.width - 40.0f, 18.0f},
+    ui::drawText(Rectangle{box.x + ui::s(20.0f), box.y + ui::s(104.0f),
+                           box.width - ui::s(40.0f), ui::s(18.0f)},
                  "press Escape to cancel", 11.0f, ui::theme().textDim, ui::Align::Center);
     EndDrawing();
 }

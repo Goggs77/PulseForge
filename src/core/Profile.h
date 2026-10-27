@@ -10,7 +10,8 @@
 //      end, together with whatever context the caller passes (renderer stats).
 //   2  + the cost of each editor panel (palette, canvas, timeline, preview,
 //      inspector, top bar, status bar, chrome, dialogs).
-//   3  + a ranking of the blocks by evaluation time.
+//   3  + a ranking of the blocks by evaluation time, including the compiled
+//      audio-rate region and each block sampled inside it.
 //
 // A build with any level also honours two environment variables so a session can
 // run unattended: PF_PROFILE_SECONDS=<seconds> stops the app after that long and

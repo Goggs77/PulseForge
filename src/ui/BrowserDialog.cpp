@@ -29,8 +29,8 @@ const ThemePalette *findThemePalette(const Preferences &preferences, const std::
 void activateThemePalette(Preferences &preferences, const std::string &name) {
     const ThemePalette *palette = findThemePalette(preferences, name);
     if (!palette) {
-        palette = findThemePalette(preferences, "Dark");
-        preferences.themePalette = "Dark";
+        palette = findThemePalette(preferences, "Immaterial");
+        preferences.themePalette = "Immaterial";
     } else {
         preferences.themePalette = name;
     }
@@ -381,8 +381,8 @@ void drawExportDialog(UiState &state) {
     if (!state.showExportDialog) return;
     const ui::Theme &t = ui::theme();
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), palette::withAlpha(BLACK, 0.55f));
-    const float width = std::min(620.0f, GetScreenWidth() - 40.0f);
-    const float height = 330.0f;
+    const float width = std::min(ui::s(620.0f), GetScreenWidth() - ui::s(40.0f));
+    const float height = std::min(ui::s(330.0f), GetScreenHeight() - ui::s(40.0f));
     const Rectangle box{(GetScreenWidth() - width) * 0.5f, (GetScreenHeight() - height) * 0.5f,
                         width, height};
     ui::panel(box, "Export video");
@@ -390,20 +390,23 @@ void drawExportDialog(UiState &state) {
 
     Project &project = state.project;
     const double duration = project.effectiveDuration(state.clip.duration());
-    Rectangle cursor{box.x + 14.0f, box.y + 40.0f, box.width - 28.0f, 24.0f};
+    Rectangle cursor{box.x + ui::s(14.0f), box.y + ui::s(40.0f), box.width - ui::s(28.0f),
+                     ui::s(24.0f)};
 
-    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, 110.0f, cursor.height}, "Output file", 12.0f,
-                        t.textDim);
+    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, ui::s(110.0f), cursor.height}, "Output file",
+                        12.0f, t.textDim);
     const std::string placeholder = "output." + project.output.container;
-    if (ui::textField(Rectangle{cursor.x + 110.0f, cursor.y, cursor.width - 210.0f, cursor.height},
+    if (ui::textField(Rectangle{cursor.x + ui::s(110.0f), cursor.y,
+                                cursor.width - ui::s(210.0f), cursor.height},
                       &state.exportPath, placeholder.c_str(), 9002)) {
     }
-    if (ui::button(Rectangle{cursor.x + cursor.width - 94.0f, cursor.y, 94.0f, cursor.height},
+    if (ui::button(Rectangle{cursor.x + cursor.width - ui::s(94.0f), cursor.y, ui::s(94.0f),
+                             cursor.height},
                    "Browse")) {
         openBrowser(state, "export", "Choose output file", "." + project.output.container,
                     Project::directoryOf(state.exportPath));
     }
-    cursor.y += 32.0f;
+    cursor.y += ui::s(32.0f);
 
     char summary[320];
     std::snprintf(summary, sizeof(summary),
@@ -414,14 +417,15 @@ void drawExportDialog(UiState &state) {
                   audioEncoderLabel(project.output.audioCodec).c_str(),
                   project.output.audioSampleRate > 0 ? project.output.audioSampleRate : 48000,
                   project.output.crf);
-    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 20.0f}, summary, 12.0f, t.text);
-    cursor.y += 24.0f;
+    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(20.0f)}, summary, 12.0f,
+                        t.text);
+    cursor.y += ui::s(24.0f);
 
     if (state.clip.valid()) {
         const int sourceKbps = static_cast<int>(project.audio.bitRate / 1000);
         std::string audioDesc = "audio: " + state.clip.path();
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 18.0f}, audioDesc.c_str(),
-                            11.0f, t.textDim);
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(18.0f)},
+                            audioDesc.c_str(), 11.0f, t.textDim);
         audioDesc = "[";
         audioDesc += project.audio.codec.empty() ? "unknown" : project.audio.codec;
         if (sourceKbps > 0) audioDesc += " " + std::to_string(sourceKbps) + " kbps";
@@ -432,14 +436,15 @@ void drawExportDialog(UiState &state) {
             !audioCodecIsLossless(project.output.audioCodec)) {
             audioDesc += " " + project.output.audioBitrate;
         }
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y + 16.0f, cursor.width, 18.0f},
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y + ui::s(16.0f), cursor.width,
+                                      ui::s(18.0f)},
                             audioDesc.c_str(), 11.0f,
                             project.audio.transcodedAac ? t.warn : t.textDim);
     } else {
-        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 20.0f},
+        ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(20.0f)},
                             "no audio loaded - the export will be video only", 11.0f, t.warn);
     }
-    cursor.y += 44.0f;
+    cursor.y += ui::s(44.0f);
 
     // quick output settings
     const std::vector<std::string> containers = supportedContainers();
@@ -448,7 +453,8 @@ void drawExportDialog(UiState &state) {
         if (containers[i] == project.output.container) index = static_cast<int>(i);
     }
     const int before = index;
-    ui::dropdown(Rectangle{cursor.x, cursor.y, 130.0f, 24.0f}, &index, containers, 9003);
+    ui::dropdown(Rectangle{cursor.x, cursor.y, ui::s(130.0f), ui::s(24.0f)}, &index, containers,
+                 9003);
     if (index != before) {
         project.output = outputSpecForContainer(containers[static_cast<size_t>(index)]);
         refreshOutputAudio(state);
@@ -457,21 +463,23 @@ void drawExportDialog(UiState &state) {
         updateExportExtension(state);
     }
     int crf = project.output.crf;
-    if (ui::intSlider(Rectangle{cursor.x + 140.0f, cursor.y, cursor.width - 140.0f, 24.0f},
+    if (ui::intSlider(Rectangle{cursor.x + ui::s(140.0f), cursor.y,
+                                cursor.width - ui::s(140.0f), ui::s(24.0f)},
                       "Quality (CRF)", &crf, 0, 51, 9004)) {
         project.output.crf = crf;
     }
-    cursor.y += 32.0f;
+    cursor.y += ui::s(32.0f);
 
-    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, 18.0f},
+    ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(18.0f)},
                         "The renderer pipes raw RGBA frames straight into ffmpeg over a pipe; no "
                         "intermediate image sequence is written.",
                         10.0f, palette::withAlpha(t.textDim, 0.9f));
-    cursor.y += 24.0f;
+    cursor.y += ui::s(24.0f);
 
-    const Rectangle logBox{cursor.x, cursor.y, cursor.width, 60.0f};
+    const Rectangle logBox{cursor.x, cursor.y, cursor.width, ui::s(60.0f)};
     DrawRectangleRounded(logBox, 0.04f, 4, Color{12, 13, 18, 255});
-    ui::drawTextClipped(Rectangle{logBox.x + 6.0f, logBox.y + 2.0f, logBox.width - 12.0f, 14.0f},
+    ui::drawTextClipped(Rectangle{logBox.x + ui::s(6.0f), logBox.y + ui::s(2.0f),
+                                  logBox.width - ui::s(12.0f), ui::s(14.0f)},
                         Exporter::describeCommand(
                             Exporter::buildCommand(project,
                                                    ExportRequest{state.exportPath, true, 0.0, 0.0},
@@ -479,19 +487,22 @@ void drawExportDialog(UiState &state) {
                             .c_str(),
                         10.0f, palette::withAlpha(t.textDim, 0.95f));
     if (!state.exportError.empty()) {
-        ui::drawTextClipped(Rectangle{logBox.x + 6.0f, logBox.y + 20.0f, logBox.width - 12.0f, 16.0f},
+        ui::drawTextClipped(Rectangle{logBox.x + ui::s(6.0f), logBox.y + ui::s(20.0f),
+                                      logBox.width - ui::s(12.0f), ui::s(16.0f)},
                             state.exportError.c_str(), 11.0f, t.danger);
     }
-    cursor.y += 68.0f;
+    cursor.y += ui::s(68.0f);
 
     if (state.exporting) {
-        ui::progressBar(Rectangle{cursor.x, cursor.y, cursor.width, 18.0f}, state.exportProgress,
-                        state.exportStatus.c_str());
-        cursor.y += 26.0f;
+        ui::progressBar(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(18.0f)},
+                        state.exportProgress, state.exportStatus.c_str());
+        cursor.y += ui::s(26.0f);
     }
 
-    const Rectangle exportBox{cursor.x, box.y + box.height - 40.0f, 140.0f, 28.0f};
-    const Rectangle cancelBox{cursor.x + 148.0f, box.y + box.height - 40.0f, 100.0f, 28.0f};
+    const Rectangle exportBox{cursor.x, box.y + box.height - ui::s(40.0f), ui::s(140.0f),
+                              ui::s(28.0f)};
+    const Rectangle cancelBox{cursor.x + ui::s(148.0f), box.y + box.height - ui::s(40.0f),
+                              ui::s(100.0f), ui::s(28.0f)};
     if (ui::button(exportBox, state.exporting ? "Exporting..." : "Start export", true,
                    !state.exporting)) {
         state.exportError.clear();
@@ -589,7 +600,7 @@ void drawPreferencesDialog(UiState &state) {
                                           return palette.name == name;
                                       }),
                        palettes.end());
-        activateThemePalette(state.preferences, "Dark");
+        activateThemePalette(state.preferences, "Immaterial");
     }
     cursor.y += row + gap;
     ui::drawTextClipped(Rectangle{cursor.x, cursor.y, cursor.width, ui::s(16.0f)},

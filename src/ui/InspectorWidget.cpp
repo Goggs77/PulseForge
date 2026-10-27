@@ -28,6 +28,13 @@ float px(float pixels) { return ui::s(pixels); }
 
 float labelWidthFor(Rectangle cursor) { return cursor.width < ui::s(300.0f) ? ui::s(92.0f) : kLabelWidth(); }
 
+bool inspectorParamVisible(const Node &node, const Param &param) {
+    if (node.kind != "mod.ringbuffer") return true;
+    if (param.key == "size") return !node.runsAudioRate;
+    if (param.key == "sizeSeconds") return node.runsAudioRate;
+    return true;
+}
+
 // Clamps the scroll offset, handles the wheel and draws the scroll bar. Called
 // from every exit point of drawInspector.
 void finishInspectorScroll(UiState &state, Rectangle view, float cursorBottom) {
@@ -576,6 +583,7 @@ void drawInspector(UiState &state, Rectangle bounds) {
     cursor.y += px(6.0f);
     std::string currentGroup;
     for (Param &param : node->params) {
+        if (!inspectorParamVisible(*node, param)) continue;
         if (param.group != currentGroup) {
             currentGroup = param.group;
             if (!currentGroup.empty()) {

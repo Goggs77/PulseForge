@@ -94,14 +94,20 @@ passes on a per-frame path.
   sample loop then draws from one `EvalContext` instead of copying it per sample
   (the evaluators only read it). Measured win: 2.7 -> 2.1 ms before the publishing
   fix below.
+- At profile level 3 the ranking reports `Audio-rate region` and each step inside
+  it. The `trap_crow.pforge` four-Ringbuffer chain measured roughly 11.6 ms per
+  frame in Debug before the typed-value pass and 2.8 ms after it. Keep Scalar
+  copies on `Value::setScalar`, cache frame constants in typed Node fields, and
+  do not rebuild Audio `shared_ptr` outputs or write `runtimeState` per sample.
 - Blocks inside a region must not publish their readouts per sample. The editor
   only ever sees the frame's final values, so the loop clears
   `Node::publishReadouts` for every sample but the last; `publishEffective`, the
   meter's `db`/`vu`/`needle`, the LFO's `phase`, the automation's `pos`, the
   filter's `filter.rate`, the Guard's `blocked` and the ADC/DAC channel readouts
-  all check it. Movement *state* (`average`/`peak`, `z1`/`z2`, a ringbuffer phase,
-  the noise generator) keeps running per sample. A new publish inside a region
-  needs the same treatment, or it becomes a string-keyed map write per sample.
+  all check it. Movement *state* uses typed Node fields for the meter, filter and
+  Ringbuffer and keeps running per sample; the map is synchronized only for the
+  final sample. A new publish inside a region needs the same treatment, or it
+  becomes a string-keyed map write per sample.
 - The canvas control layer (block frames, headers, titles, ports, labels, badges,
   links, group frames) is cached in `UiState::canvasCache`; `canvasControlKey` is
   an FNV-1a over the view transform, the theme colours, every block's position,
@@ -146,6 +152,9 @@ ports derived from a
 `.glsl` file and `shader.pass` migration, per-family encoder arguments and the
 audio matching rules, legacy Audio Output migration, ADC/DAC conversion, and the
 exclusive Audio Output routing (processed, dry and silent exports, plus the
+dead-end ADC branch rate/publication, Ringbuffer seconds-vs-samples, deterministic
+phase-offset modulation, Digital/Waveform meter and DAC -> Dynamics continuity
+cases,
 monitor's source/silent/processed decisions). The Math checks include Lerp/Clamp
 (port values versus Inspector fallbacks) and the Transform block's
 pass-through/zoom/translation, and the Shader check compiles the three bundled
@@ -156,7 +165,8 @@ parsing/formatting and a Sticky Note/Group project round trip. It also checks
 the Picture block (a BMP with a red top and blue bottom decodes the right way
 up), the Textbox (white glyph over a kept Layer) and that a two frame gif
 advances with the timeline, and the meter's ballistics (a VU that averages and
-releases slowly, a digital meter that stays raw). The Self Reference check paints
+releases slowly, while Digital and Waveform modes stay raw). The Self Reference
+check paints
 a known pattern into the window, captures it, and asserts the image is upright,
 absent before the first capture and handed out without a copy. It also checks
 that a processed Analysis input measures the same window in preview and export
@@ -311,6 +321,10 @@ docs         rendering notes and the README overlay image
   in the right margin. At the default GUI scaling the full section list is
   taller than the dialog, which is what used to push the output settings behind
   the footer. Opening the dialog resets the offset.
+- Every dialog rectangle, inset and control height goes through `ui::s()`.
+  This includes the export settings dialog and the frozen progress overlay;
+  text helpers scale their font size themselves, so only layout geometry needs
+  the explicit wrapper.
 - Text fields and text areas restore the enclosing scroll clip after drawing
   their own caret/content scissor. Raylib's scissor is not stack-based; ending an
   inner clip must not leave the rest of a scrolling dialog unclipped.
@@ -323,8 +337,9 @@ docs         rendering notes and the README overlay image
 - Theme palettes are `core/Preferences.h`'s `ThemePalette`: the 16 colours the
   editor's `ui::Theme` consumes. Dark and Light are snapshots of CrystalGUI's
   crystalline themes, so changes there flow into the built-in defaults;
-  Immaterial is defined in `Theme.cpp`. Built-ins are read-only in Preferences;
-  *New palette* copies the active one and edits it through `ui::colorField`.
+  Immaterial is defined in `Theme.cpp` and is the default for new preferences.
+  Built-ins are read-only in Preferences; *New palette* copies the active one
+  and edits it through `ui::colorField`.
   User palettes are saved as the `themePalettes` object in
   `pulseforge_preferences.json`, keyed by name, while `themePalette` selects the
   active one. `defaultDarkTheme` is retained for old-file migration.
@@ -500,6 +515,12 @@ docs         rendering notes and the README overlay image
   window after every preview render, so rewiring the Audio Output or editing a
   parameter is heard on the next displayed frame. `Exporter::renderOutputAudio`
   remains the offline per-frame renderer used by export.
+- Rendered Audio buffers are windows with their own absolute `startFrame`, not
+  necessarily whole clips. When Dynamics receives a DAC window it must subtract
+  the source `startFrame` before indexing samples or measuring loudness. Its
+  cache key also excludes the growing source length; including that length made
+  the offline pass restart Dynamics every frame. Keep both rules for any audio
+  processor downstream of DAC or Dynamics, or the signal becomes silence.
 - A node's rendered audio buffer is only valid for the pass that filled it.
   `Exporter::resetRenderedAudio` is called at the end of the audio pre-pass, at
   the end of a run and when the monitor starts a processed stream: an export
@@ -519,17 +540,17 @@ docs         rendering notes and the README overlay image
   them and a Self Reference capture of the mirror shows a static UI while the
   video moves. Any new in-block visual must read `state.frameContext` (not
   `GetTime()`) to get the same treatment.
-- ADC/DAC define **audio-rate regions**. `Graph::evaluate` detects every
-  ADC -> Scalar -> DAC path with `buildAudioRatePlan` and evaluates its
-  pure-Scalar nodes (Math, Modulation, Timing, Debug) once per audio sample:
-  ADC reads the waveform sample, the intermediate blocks transform it, and DAC
-  writes it back at the same rate. Pure-Scalar processors feeding the region run
-  at audio rate too; window producers (Spectrum Analyzer, Dynamics) keep their
-  frame-rate evaluation and hold their value inside the region. Nodes downstream
-  of the region run after the sample loop and see the last sample, which is the
-  downsample back to video rate. `EvalContext::audioRate`/`audioSampleRate` and
-  `rateOf()`/`dtOf()` are how rate-aware blocks pick their timing; do not read
-  `ctx.fps` directly in a block that can sit inside a region.
+- ADC descendants define **audio-rate regions**, not just ADC -> DAC paths.
+  `buildAudioRatePlan` propagates sample rate through every enabled pure-Scalar
+  branch whether or not it reaches a DAC, then pulls in pure-Scalar producers
+  feeding those branches. DAC writes audio and terminates that branch;
+  non-Scalar consumers are the downsampling boundary and run afterwards with
+  the final sample of the video frame. Window producers (Spectrum Analyzer,
+  Dynamics) keep frame-rate evaluation and hold their values inside a region.
+  Regions are evaluated even while preview is paused, so parameter edits and
+  published diagnostics stay live. `EvalContext::audioRate`/
+  `audioSampleRate` and `rateOf()`/`dtOf()` are how rate-aware blocks pick
+  timing; do not read `ctx.fps` directly in a block that can sit in a region.
 - A rate-aware block's *visuals* follow the same rule: `evalSignalFilter`
   publishes the rate it ran with in `Node::runtimeState["filter.rate"]`, and
   `NodeVisuals::filterRate` (the response plot and the pivot drag) reads it,
@@ -549,14 +570,22 @@ docs         rendering notes and the README overlay image
 - Audio-rate blocks must stay O(1) per sample. Ringbuffer keeps a
   `Node::ringValues` ring with `ringSum`/`ringHead` and only refreshes its
   visual history once per video frame; do not reintroduce per-sample O(N) sums
-  or full-buffer shifts. Dynamics uses a linear-domain static curve
+  or full-buffer shifts. Its `size` parameter is in samples outside a region
+  and `sizeSeconds` is the active capacity at audio rate; the Inspector shows
+  only the applicable slider. `ringPhase` is private typed state; the visible
+  Phase offset parameter and appended modulation port shift the read position
+  without following or replacing the advancing phase. Entering an audio region,
+  or changing sample rate, resets the running phase to zero so newly connected
+  buffers start together instead of inheriting an arbitrary video-rate phase.
+  Dynamics uses a linear-domain static curve
   (`detector^exponent * factor`) instead of a log10 + pow pair per sample.
 - The VU meter integrates the rectified signal with time-constant ballistics
   (`dtOf(ctx)` based, so it reads the same at 24 fps, 240 fps and inside an
   audio-rate region): ~100 ms rising and 0.3-1.2 s falling through the Release
-  knob, with 0 VU at -18 dBFS. The Digital mode must stay raw - no averaging,
-  no release - because that is what its diagram is for; it also keeps the
-  history push at video rate inside a region.
+  knob, with 0 VU at -18 dBFS. Digital and Waveform modes must stay raw - no
+  averaging or release. Value graph fills the history area; Waveform draws only
+  the signal line without the shaded fill. Both keep the history push at video
+  rate inside a region.
 - Dynamics applies pre-gain and post-gain outside the compressor's ballistics,
   so both must ramp across a rendered window (`DynamicsSettings::rampGains` with
   the `...DbStart` values `evalDynamics` keeps in `runtimeState`) whenever the

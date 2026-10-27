@@ -1,6 +1,7 @@
 // The flow graph: blocks, typed connections and evaluation.
 #pragma once
 
+#include <cstdint>
 #include <deque>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@ public:
     std::vector<Link> links;
     int nextId = 1;
     std::string lastError;
+    std::uint64_t evaluationSerial = 0;
 
     void clear();
 

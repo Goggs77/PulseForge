@@ -562,7 +562,7 @@ void evalClamp(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     const float high = std::max(first, second);
     node.publishEffective("min", low);
     node.publishEffective("max", high);
-    out[0] = Value::makeScalar(std::clamp(value, low, high));
+    out[0].setScalar(std::clamp(value, low, high));
 }
 
 // Single-band dynamics. The Audio stream is processed one video frame at a
@@ -635,8 +635,8 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     // deliberately excluded so an LFO moving the threshold keeps appending to
     // the same buffer instead of restarting the render every frame.
     char key[320];
-    std::snprintf(key, sizeof(key), "%p|%d|%d|%lld|%d|%.5f|%.5f|%.5f|%.5f|%.5f|%.5f|%d|%d|%.5f|%.5f",
-                  static_cast<const void *>(source), channels, sampleRate, frameCount,
+    std::snprintf(key, sizeof(key), "%p|%d|%d|%d|%.5f|%.5f|%.5f|%.5f|%.5f|%.5f|%d|%d|%.5f|%.5f",
+                  static_cast<const void *>(source), channels, sampleRate,
                   node.pint("mode", 0), node.pfloat("preGain", 0.0f),
                   node.pfloat("threshold", -18.0f), node.pfloat("ratio", 4.0f),
                   node.pfloat("attack", 10.0f), node.pfloat("release", 150.0f),
@@ -653,11 +653,20 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
         const double quantized = static_cast<double>(ctx.frame) / fps;
         clipFrameStart = ctx.audioTime + (quantized - ctx.time);
     }
+    // Audio buffers may be windows into a longer clip: a decoded source starts at
+    // 0, while a DAC hands over only the audio-rate window just rendered. Convert
+    // the absolute playhead range into this buffer's local range before indexing
+    // samples. This is what lets DAC -> Dynamics -> Audio Output stay audible.
+    const long long sourceBegin = source->startFrame;
+    const long long sourceFinish = sourceBegin + frameCount;
+    const long long requestedStart = std::llround(clipFrameStart * sampleRate);
+    const long long requestedEnd = std::llround(
+        (clipFrameStart + 1.0 / std::max(1.0f, fps)) * sampleRate);
     const long long startFrame =
-        std::clamp<long long>(std::llround(clipFrameStart * sampleRate), 0, frameCount);
-    const long long endFrame = std::clamp<long long>(
-        std::llround((clipFrameStart + 1.0 / std::max(1.0f, fps)) * sampleRate), startFrame,
-        frameCount);
+        std::clamp(requestedStart, sourceBegin, sourceFinish);
+    const long long endFrame =
+        std::clamp(requestedEnd, startFrame, sourceFinish);
+    const long long localStart = startFrame - sourceBegin;
 
     bool reusable = node.audioRenderOutput && node.audioRenderKey == key &&
                     startFrame >= node.audioRenderStart &&
@@ -700,7 +709,8 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
             state.detector = stored("dyn.detector", 0.0f);
             state.gain = stored("dyn.gain", 1.0f);
             state.limiterGain = stored("dyn.limiterGain", 1.0f);
-            processDynamicsBlock(source->samples.data() + static_cast<size_t>(startFrame) * channels,
+            processDynamicsBlock(source->samples.data() +
+                                     static_cast<size_t>(localStart) * channels,
                                  rendered.samples.data() + base, frames, channels, sampleRate, settings,
                                  state);
             node.runtimeState["dyn.detector"] = state.detector;
@@ -716,7 +726,7 @@ void evalDynamics(Node &node, EvalContext &ctx, const std::vector<Value> &in,
 
     // Dry and wet loudness for the 4:3 dBFS graph at the top of the block.
     const long long frames = endFrame - startFrame;
-    const float dryDb = loudnessDb(*source, startFrame, frames);
+    const float dryDb = loudnessDb(*source, localStart, frames);
     const long long wetOffset = startFrame - node.audioRenderStart;
     const bool wetAvailable = node.audioRenderOutput && wetOffset >= 0 &&
                               wetOffset + frames <= node.audioRenderFrames;
@@ -1034,7 +1044,7 @@ float applyOutputShape(Node &node, float value, const char *gainKey = "gain",
 void evalConstant(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
     (void)ctx;
     (void)in;
-    out[0] = Value::makeScalar(node.pfloat("value", 1.0f));
+    out[0].setScalar(node.pfloat("value", 1.0f));
 }
 
 void evalArithmetic(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
@@ -1051,7 +1061,7 @@ void evalArithmetic(Node &node, EvalContext &ctx, const std::vector<Value> &in, 
         case 5: result = std::max(a, b); break;
         default: result = std::fabs(b) < 1e-6f ? 0.0f : std::fmod(a, b); break;
     }
-    out[0] = Value::makeScalar(applyOutputShape(node, result));
+    out[0].setScalar(applyOutputShape(node, result));
 }
 
 void evalPower(Node &node, EvalContext &ctx, const std::vector<Value> &in, std::vector<Value> &out) {
@@ -1358,15 +1368,42 @@ void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     const float value = scalarFrom(in, 0);
     const float fs = rateOf(ctx);
 
-    const int size = std::clamp(node.pint("size", 64), 2, 1024);
+    // Parameters cannot change during a compiled sample loop. Resolve them once
+    // per graph pass, then the per-sample path below only touches typed fields.
+    if (node.ringEvalSerial != ctx.evaluation) {
+        node.ringEvalSerial = ctx.evaluation;
+        const int sampleRate = static_cast<int>(std::lround(fs));
+        // A newly-connected audio processor starts from the same visible phase
+        // as every other new Ringbuffer, instead of inheriting however long it
+        // sat in the video-rate graph.
+        if (!node.ringRateResolved || node.ringAtAudioRate != ctx.audioRate ||
+            node.ringSampleRate != sampleRate) {
+            node.ringPhase = 0.0;
+            node.ringVisualFrame = -1;
+            node.ringRateResolved = true;
+            node.ringAtAudioRate = ctx.audioRate;
+            node.ringSampleRate = sampleRate;
+        }
+        int size = std::clamp(node.pint("size", 64), 2, 1024);
+        if (ctx.audioRate) {
+            const float seconds =
+                std::clamp(node.pfloat("sizeSeconds", 0.05f), 0.001f, 5.0f);
+            const int maximum = std::max(2, static_cast<int>(std::lround(fs * 5.0f)));
+            size = std::clamp(static_cast<int>(std::lround(seconds * fs)), 2, maximum);
+        }
+        node.ringCapacity = size;
+        node.ringBaseSpeed = node.pfloat("speed", 0.5f);
+        node.ringPhaseOffset = node.pfloat("phase", 0.0f);
+        if (static_cast<int>(node.ringValues.size()) != size) {
+            node.ringValues.assign(static_cast<size_t>(size), 0.0f);
+            node.ringHead = 0;
+            node.ringCount = 0;
+            node.ringSum = 0.0;
+        }
+    }
+    const int size = std::max(2, node.ringCapacity);
     // O(1) ring: push, running sum and read pointer all avoid the old O(size)
     // shift/sum, which was too slow inside an audio-rate region.
-    if (static_cast<int>(node.ringValues.size()) != size) {
-        node.ringValues.assign(static_cast<size_t>(size), 0.0f);
-        node.ringHead = 0;
-        node.ringCount = 0;
-        node.ringSum = 0.0;
-    }
     if (node.ringCount < size) {
         const int write = (node.ringHead + node.ringCount) % size;
         node.ringValues[static_cast<size_t>(write)] = value;
@@ -1383,33 +1420,45 @@ void evalRingbuffer(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     // Read pointer: `speed` loops per second, advanced one evaluation at a time
     // so the movement is independent of the evaluation rate (video frame rate
     // normally, audio sample rate inside an ADC -> DAC region).
-    float speed = node.pfloat("speed", 0.5f);
+    float speed = node.ringBaseSpeed;
     if (in.size() > 1 && in[1].type == PortType::Scalar) {
         speed *= std::pow(2.0f, std::clamp(in[1].scalar, -8.0f, 8.0f));
     }
     speed = std::clamp(speed, 0.001f, 64.0f);
-    node.publishEffective("speed", speed);
-    double phase = node.runtimeState["phase"] + speed / fs;
-    phase -= std::floor(phase);
-    node.runtimeState["phase"] = phase;
-    const int readIndex = std::clamp(static_cast<int>(phase * count), 0, count - 1);
+    const float phaseInput = in.size() > 2 ? scalarFrom(in, 2) : 0.0f;
+    double readPhase = node.ringPhase + node.ringPhaseOffset + phaseInput;
+    readPhase -= std::floor(readPhase);
+    double phaseOffset = node.ringPhaseOffset + phaseInput;
+    phaseOffset -= std::floor(phaseOffset);
+    node.ringPhase += speed / fs;
+    if (node.ringPhase >= 1.0) node.ringPhase -= 1.0;
+    const int readIndex =
+        std::clamp(static_cast<int>(readPhase * count), 0, count - 1);
     const int physical = (node.ringHead + readIndex) % size;
     const float buffered = node.ringValues[static_cast<size_t>(physical)];
+    if (node.publishReadouts) {
+        node.runtimeState["phase"] = readPhase;
+        node.runtimeState["ring.size"] = size;
+        node.runtimeState["ring.audioRate"] = ctx.audioRate ? 1.0 : 0.0;
+        node.publishEffective("speed", speed);
+        node.publishEffective("phase", static_cast<float>(phaseOffset));
+    }
 
     // The in-block display is a video-rate view: at audio rate push one sample
     // per video frame instead of one per audio sample.
     const bool pushVisual =
-        !ctx.audioRate || node.runtimeState["ring.visualFrame"] !=
-                              static_cast<double>(ctx.frame);
+        !ctx.audioRate || node.ringVisualFrame != ctx.frame;
     if (pushVisual) {
-        Node::pushHistory(node.historyA, value, size);
+        // The in-block diagram has one point per video frame, not per sample.
+        const int visualCapacity = ctx.audioRate ? 96 : size;
+        Node::pushHistory(node.historyA, value, visualCapacity);
         ++node.historyCount;
-        node.runtimeState["ring.visualFrame"] = static_cast<double>(ctx.frame);
+        node.ringVisualFrame = ctx.frame;
     }
 
-    out[0] = Value::makeScalar(value);
-    out[1] = Value::makeScalar(average);
-    out[2] = Value::makeScalar(buffered);
+    out[0].setScalar(value);
+    out[1].setScalar(average);
+    out[2].setScalar(buffered);
 }
 
 // Signal Filter: RBJ biquad in transposed direct form II. Outside an audio-rate
@@ -1419,35 +1468,43 @@ void evalSignalFilter(Node &node, EvalContext &ctx, const std::vector<Value> &in
                       std::vector<Value> &out) {
     const double input = scalarFrom(in, 0);
     const double fs = rateOf(ctx);
+    if (node.filterEvalSerial != ctx.evaluation) {
+        node.filterEvalSerial = ctx.evaluation;
+        node.filterMode = std::clamp(node.pint("mode", 0), 0, 2);
+        node.filterBaseCutoff = node.pfloat("cutoff", 4.0f);
+        node.filterBaseResonance = node.pfloat("resonance", 0.707f);
+    }
     // The in-block response plot has to use the rate the filter actually ran
     // with: the project frame rate for a modulation signal, the audio rate
     // inside an ADC -> DAC region. Never serialised.
-    if (node.publishReadouts) node.runtimeState["filter.rate"] = fs;
-    const int mode = std::clamp(node.pint("mode", 0), 0, 2);
     // Modulation inputs shift cutoff and resonance in octaves (x2 per unit), the
     // musical way to sweep a filter.
-    double q = std::clamp(node.pfloat("resonance", 0.707f), 0.05f, 20.0f);
+    double q = std::clamp(node.filterBaseResonance, 0.05f, 20.0f);
     if (in.size() > 2 && in[2].type == PortType::Scalar) {
         q *= std::pow(2.0, std::clamp(static_cast<double>(in[2].scalar), -8.0, 8.0));
     }
     q = std::clamp(q, 0.05, 20.0);
-    double cutoff = node.pfloat("cutoff", 4.0f);
+    double cutoff = node.filterBaseCutoff;
     if (in.size() > 1 && in[1].type == PortType::Scalar) {
         cutoff *= std::pow(2.0, std::clamp(static_cast<double>(in[1].scalar), -8.0, 8.0));
     }
     cutoff = std::clamp(cutoff, 0.001, std::max(1.0, fs * 0.49));
-    node.publishEffective("cutoff", static_cast<float>(cutoff));
-    node.publishEffective("resonance", static_cast<float>(q));
-    const BiquadCoefficients coefficients = biquadCoefficients(mode, cutoff, q, fs);
+    if (node.publishReadouts) {
+        node.runtimeState["filter.rate"] = fs;
+        node.publishEffective("cutoff", static_cast<float>(cutoff));
+        node.publishEffective("resonance", static_cast<float>(q));
+    }
+    const BiquadCoefficients coefficients =
+        biquadCoefficients(node.filterMode, cutoff, q, fs);
 
-    double z1 = node.runtimeState["z1"];
-    double z2 = node.runtimeState["z2"];
+    double z1 = node.filterZ1;
+    double z2 = node.filterZ2;
     const double output = coefficients.b0 * input + z1;
     z1 = coefficients.b1 * input - coefficients.a1 * output + z2;
     z2 = coefficients.b2 * input - coefficients.a2 * output;
-    node.runtimeState["z1"] = z1;
-    node.runtimeState["z2"] = z2;
-    out[0] = Value::makeScalar(static_cast<float>(output));
+    node.filterZ1 = z1;
+    node.filterZ2 = z2;
+    out[0].setScalar(static_cast<float>(output));
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,10 +1515,16 @@ void evalSignalFilter(Node &node, EvalContext &ctx, const std::vector<Value> &in
 // gets displayed. 0 VU sits at -18 dBFS.
 void evalMeter(Node &node, EvalContext &ctx, const std::vector<Value> &in,
                std::vector<Value> &out) {
+    if (node.meterEvalSerial != ctx.evaluation) {
+        node.meterEvalSerial = ctx.evaluation;
+        node.meterMode = node.pint("mode", 0);
+        node.meterRelease = std::clamp(node.pfloat("ballistics", 0.55f), 0.0f, 0.95f);
+    }
     // The block always passes the signal through untouched.
     const float value = scalarFrom(in, 0);
-    out[0] = Value::makeScalar(value);
-    const bool digital = node.pint("mode", 0) == 1;
+    out[0].setScalar(value);
+    const bool digital = node.meterMode == 1;
+    const bool waveform = node.meterMode == 2;
     const double magnitude = std::fabs(static_cast<double>(value));
     const float dbfs = magnitude > 1.0e-6 ? static_cast<float>(20.0 * std::log10(magnitude))
                                           : -120.0f;
@@ -1474,10 +1537,9 @@ void evalMeter(Node &node, EvalContext &ctx, const std::vector<Value> &in,
     }
 
     double display = magnitude;
-    if (digital) {
-        // A digital meter shows the raw value: no averaging, no release. The
-        // diagram and the readout follow the input directly.
-        node.runtimeState["average"] = magnitude;
+    if (digital || waveform) {
+        // Digital and Waveform modes show the raw value: no averaging or release.
+        node.meterAverage = magnitude;
         if (node.publishReadouts) node.runtimeState["needle"] = dbfs + 18.0f;
     } else {
         // A VU meter averages the rectified signal with analog ballistics: a
@@ -1485,28 +1547,32 @@ void evalMeter(Node &node, EvalContext &ctx, const std::vector<Value> &in,
         // needle reads the same at any frame rate (and inside an audio-rate
         // region, where it integrates every sample). The Release knob
         // stretches the fall from ~0.3 s to ~1.2 s.
-        const double release = std::clamp(node.pfloat("ballistics", 0.55f), 0.0f, 0.95f);
-        double average = node.runtimeState["average"];
+        const double release = node.meterRelease;
+        double average = node.meterAverage;
         const double tau = magnitude > average ? 0.1 : (0.3 + release * 0.9);
         const double coefficient =
             1.0 - std::exp(-std::max(0.0, static_cast<double>(dtOf(ctx))) / tau);
         average += coefficient * (magnitude - average);
-        node.runtimeState["average"] = average;
+        node.meterAverage = average;
         display = average;
         const float averageDb =
             average > 1.0e-6 ? static_cast<float>(20.0 * std::log10(average)) : -120.0f;
         if (node.publishReadouts) node.runtimeState["needle"] = averageDb + 18.0f;
-        node.runtimeState["peak"] = std::max<double>(
-            static_cast<double>(averageDb) + 18.0, node.runtimeState["peak"] * 0.99);
+        node.meterPeak =
+            std::max<double>(static_cast<double>(averageDb) + 18.0, node.meterPeak * 0.99);
+    }
+    if (node.publishReadouts) {
+        node.runtimeState["average"] = node.meterAverage;
+        node.runtimeState["peak"] = node.meterPeak;
     }
     // The in-block display is a video-rate view: at audio rate push one sample
     // per video frame instead of one per audio sample.
-    if (!ctx.audioRate ||
-        node.runtimeState["meter.visualFrame"] != static_cast<double>(ctx.frame)) {
-        Node::pushHistory(node.historyA, digital ? value : static_cast<float>(display),
+    if (!ctx.audioRate || node.meterVisualFrame != ctx.frame) {
+        Node::pushHistory(node.historyA,
+                          digital || waveform ? value : static_cast<float>(display),
                           kMeterHistory);
         ++node.historyCount;
-        node.runtimeState["meter.visualFrame"] = static_cast<double>(ctx.frame);
+        node.meterVisualFrame = ctx.frame;
     }
 }
 
@@ -2927,15 +2993,23 @@ void Registry::registerBuiltins() {
         def.description =
             "Records the incoming Scalar into a loop buffer. Outputs the live input, the running "
             "average of the buffer, and the value the read pointer is currently passing over. The "
-            "loop speed can be modulated in octaves.";
+            "loop speed can be modulated in octaves. At video rate the size is in samples; when "
+            "driven by an ADC it is measured in seconds of audio. Phase offset shifts the read "
+            "head without changing its speed.";
         def.inputs = {PortDesc{"In", PortType::Scalar},
-                      PortDesc{"Speed", PortType::Scalar, "loops/s x 2^input"}};
+                      PortDesc{"Speed", PortType::Scalar, "loops/s x 2^input"},
+                      PortDesc{"Phase offset", PortType::Scalar, "adds turns to the read head"}};
         def.outputs = {PortDesc{"Input", PortType::Scalar},
                        PortDesc{"Average", PortType::Scalar},
                        PortDesc{"Buffer", PortType::Scalar}};
+        Param sizeSeconds =
+            makeParam("sizeSeconds", "Size (s)", 0.05f, 0.001f, 5.0f, 0.001f, "Buffer");
+        sizeSeconds.valueFormat = "%.3f s";
         def.params = {
             makeIntParam("size", "Size (samples)", 64, 2, 1024, "Buffer"),
+            sizeSeconds,
             makeParam("speed", "Loop speed (loops/s)", 0.5f, 0.01f, 8.0f, 0.01f, "Buffer"),
+            makeParam("phase", "Phase offset", 0.0f, 0.0f, 1.0f, 0.001f, "Read"),
         };
         def.evaluate = evalRingbuffer;
         add(std::move(def));
@@ -3246,11 +3320,13 @@ void Registry::registerBuiltins() {
         def.label = "VU / Digital Meter";
         def.description =
             "Passes a Scalar through untouched and shows it as a classic VU meter (0 VU = "
-            "-18 dBFS) or as a value/time diagram. The needle has fast attack and slow release.";
+            "-18 dBFS), a filled value/time graph, or an unfilled waveform. The needle has fast "
+            "attack and slow release.";
         def.inputs = {PortDesc{"In", PortType::Scalar}};
         def.outputs = {PortDesc{"Out", PortType::Scalar}};
         def.params = {
-            makeEnumParam("mode", "Display", {"VU meter", "Value graph"}, 0, "Display"),
+            makeEnumParam("mode", "Display", {"VU meter", "Value graph", "Waveform"}, 0,
+                          "Display"),
             makeParam("ballistics", "Release", 0.55f, 0.0f, 0.95f, 0.01f, "Display"),
         };
         def.evaluate = evalMeter;

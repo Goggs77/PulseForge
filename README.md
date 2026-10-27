@@ -181,10 +181,10 @@ changes.
 
 The **Prefs** button (or `Ctrl+,`) opens a dialog with:
 
-- **Theme palette** - Dark, Light and Immaterial are built in. *New palette*
-  copies the active colours into a user palette; its 16 colour fields use the
-  same HSV picker as block colours. User palettes are saved as a dictionary in
-  `pulseforge_preferences.json`.
+- **Theme palette** - Immaterial is the default; Dark and Light are also built
+  in. *New palette* copies the active colours into a user palette; its 16 colour
+  fields use the same HSV picker as block colours. User palettes are saved as a
+  dictionary in `pulseforge_preferences.json`.
 - **GUI scaling** - 0.75x to 2x. Every widget metric, panel size and label is
   multiplied by it, which is also the knob for making the text larger or
   smaller.
@@ -310,8 +310,8 @@ opened.
 | Envelope Follower | Scalar | Scalar | Attack/release, threshold, gain, floor |
 | Curve / Remap | Scalar | Scalar | Input range to output range with power, smoothstep and clamping |
 | Dynamics | Audio, Pre-gain, Threshold, Ratio, Attack, Release, Post-gain | Audio | Zero-latency single-band compressor / downward expander with an optional 0 dBFS limiter (Hard Clip or Soft Clip and independent attack/release). The block draws dry and wet loudness in a 4:3 dBFS graph; the modulation ports follow the usual conventions (levels scale by `1 + input`, threshold adds 24 dB per unit, times shift by octaves). Pre-gain and Post-gain ramp from the value the previous window ended on, so a modulation step is a continuous amplitude change instead of a click |
-| ADC | Audio | left, right, ... | Starts an audio-rate region: each channel becomes a Scalar stream at the audio sample rate, so Math, Modulation, Timing and Debug blocks between it and a DAC process every sample (x2.0838 then tanh is real saturation, not a gain). `Channels` defaults to 2 (left/right) and can be 1..8 |
-| DAC | left, right, ... | Audio | Ends an audio-rate region and converts the per-channel Scalar streams back to Audio at the same rate. An unconnected channel follows the first connected one, so legacy single-port chains stay dual-mono. `Channels` defaults to 2 |
+| ADC | Audio | left, right, ... | Starts an audio-rate region: every downstream Scalar branch processes each audio sample, even when it does not reach a DAC. Non-Scalar consumers receive the final sample at video rate. `Channels` defaults to 2 (left/right) and can be 1..8 |
+| DAC | left, right, ... | Audio | Converts per-channel Scalar streams back to Audio at the audio rate and terminates its sample-rate branch. An unconnected channel follows the first connected one, so legacy single-port chains stay dual-mono. `Channels` defaults to 2 |
 
 ### Math
 
@@ -353,8 +353,8 @@ input on **Geometry**.
 | LFO | Phase, Frequency, Amplitude, Offset | Value | sine/triangle/saw/square/random, free-running or tempo-synced; the frequency input shifts by octaves, amplitude scales and offset is added |
 | Automation | Depth, Offset | Value | Keyframed curve edited in the block; unipolar 0..1 or bipolar -1..1, with modulatable depth/offset. Slice mode places the curve on a Start..Finish window drawn on the timeline (two draggable handles, colour-coded per automation, lanes scroll when they do not all fit): before Start the output holds the curve's first value, after Finish its last one, and a Start dragged past the Finish plays the curve backwards. Slice takes precedence over Loop |
 | Amount / VCA | In, Amount, Gain, Offset | Out | Scales a signal by a constant or by a second modulation input, with quantising; gain scales and offset is added |
-| Ringbuffer | In, Speed | Input, Average, Buffer | Records the scalar into a loop buffer of 2..1024 samples with an O(1) running sum, so it is usable at audio rate; `Input` is the live value, `Average` the running average and `Buffer` the sample the looping read pointer (loops/second, octave modulation) is passing over. The block draws the buffer with the read position marked |
-| Signal Filter | In, Cutoff, Resonance | Out | Zero-latency RBJ biquad (transposed direct form II) in low pass, high pass or band pass. Its sample rate is the current evaluation rate: the project frame rate for modulation, or the audio sample rate inside an ADC -> DAC region; the cutoff and resonance inputs shift by octaves. The block draws its own frequency response with a pivot you can drag to set cutoff (x, logarithmic) and resonance (y, Q = 10^(dB/20)); the plot's frequency axis and the pivot's mapping use the rate the filter actually ran with, so they span the audio Nyquist inside an ADC -> DAC region and the frame rate's one outside it |
+| Ringbuffer | In, Speed, Phase offset | Input, Average, Buffer | Records the scalar into an O(1) loop buffer. At video rate *Size* is 2..1024 samples; on an ADC-driven branch it switches to *Size (s)* and allocates `seconds x sample rate`. *Speed* is loops/second with octave modulation; *Phase offset* shifts the read head and resets predictably when the buffer enters an audio-rate path without changing the running phase. `Input` is the live value, `Average` the running average and `Buffer` the sample under the read pointer |
+| Signal Filter | In, Cutoff, Resonance | Out | Zero-latency RBJ biquad in low pass, high pass or band pass. On ADC-driven branches it processes every audio sample, with playback paused or not; outside one it filters modulation at video rate. Its response plot follows the actual evaluation rate, and cutoff/resonance remain editable live |
 
 Modulated parameters are live: the inspector handles (and the Signal Filter's
 response plot, the Ringbuffer's read marker, and so on) follow the value the block
@@ -367,7 +367,7 @@ frequency axis and pivot use the rate the filter last ran with, not the frame ra
 
 | Block | Inputs | Outputs | Notes |
 | --- | --- | --- | --- |
-| VU / Digital Meter | In | Out | Pure pass-through. The **VU** mode is an averaging meter with analog ballistics: the rectified signal is integrated (about 100 ms up, 300 ms down, stretched to ~1.2 s by the Release knob) with 0 VU = **-18 dBFS** and a peak-hold tick. The **Digital** mode ignores the release and shows the raw values in its 4-second value/time diagram |
+| VU / Digital Meter | In | Out | Pure pass-through. The **VU** mode is an averaging meter with analog ballistics: the rectified signal is integrated (about 100 ms up, 300 ms down, stretched to ~1.2 s by the Release knob) with 0 VU = **-18 dBFS** and a peak-hold tick. **Value graph** ignores the release and draws the raw signal and filled area; **Waveform** draws the same raw history as a line without the shaded area |
 | Guard | In | Out | Silences non-finite scalars: NaN and +/-Inf become 0. Three lamps flash for +Inf, -Inf and NaN, labelled with the matching symbols |
 
 ### Render
@@ -513,7 +513,8 @@ the inspector).
 
 ## Exporting
 
-The export dialog shows the exact ffmpeg command before running. Frames are
+The export dialog shows the exact ffmpeg command before running and follows the
+same GUI scaling as the rest of the editor, including its progress overlay. Frames are
 rendered into an off-screen target, read back through a double-buffered pixel
 buffer object so the GPU copy of frame *n* overlaps with the CPU upload of frame
 *n-1*, and written into ffmpeg's stdin as `rawvideo rgba`. Nothing is written to

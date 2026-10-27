@@ -8,68 +8,68 @@ namespace pf {
 static const Param kMissingParam{};
 static const std::string kEmptyString;
 
-const Param *Node::find(const std::string &key) const {
+const Param *Node::find(std::string_view key) const {
     for (const auto &param : params) {
         if (param.key == key) return &param;
     }
     return nullptr;
 }
 
-Param *Node::find(const std::string &key) {
+Param *Node::find(std::string_view key) {
     for (auto &param : params) {
         if (param.key == key) return &param;
     }
     return nullptr;
 }
 
-float Node::pfloat(const std::string &key, float fallback) const {
+float Node::pfloat(std::string_view key, float fallback) const {
     const Param *param = find(key);
     return param ? param->value : fallback;
 }
 
-int Node::pint(const std::string &key, int fallback) const {
+int Node::pint(std::string_view key, int fallback) const {
     const Param *param = find(key);
     return param ? param->intValue() : fallback;
 }
 
-bool Node::pbool(const std::string &key, bool fallback) const {
+bool Node::pbool(std::string_view key, bool fallback) const {
     const Param *param = find(key);
     return param ? param->boolean : fallback;
 }
 
-Color Node::pcolor(const std::string &key) const {
+Color Node::pcolor(std::string_view key) const {
     const Param *param = find(key);
     return param ? param->color : WHITE;
 }
 
-const std::string &Node::pstr(const std::string &key) const {
+const std::string &Node::pstr(std::string_view key) const {
     const Param *param = find(key);
     return param ? param->text : kEmptyString;
 }
 
-float Node::curveAt(const std::string &key, double normalizedTime) const {
+float Node::curveAt(std::string_view key, double normalizedTime) const {
     const Param *param = find(key);
     if (!param) return 0.0f;
     return param->evalCurve(normalizedTime);
 }
 
-void Node::setFloat(const std::string &key, float value) {
+void Node::setFloat(std::string_view key, float value) {
     if (Param *param = find(key)) param->value = value;
 }
 
-void Node::setInt(const std::string &key, int value) {
+void Node::setInt(std::string_view key, int value) {
     if (Param *param = find(key)) param->setInt(value);
 }
 
-void Node::setBool(const std::string &key, bool value) {
+void Node::setBool(std::string_view key, bool value) {
     if (Param *param = find(key)) param->boolean = value;
 }
 
-void Node::setText(const std::string &key, const std::string &value) {
+void Node::setText(std::string_view key, const std::string &value) {
     if (Param *param = find(key)) param->text = value;
 }
 
-void Node::setColor(const std::string &key, Color value) {
+void Node::setColor(std::string_view key, Color value) {
     if (Param *param = find(key)) param->color = value;
 }
 

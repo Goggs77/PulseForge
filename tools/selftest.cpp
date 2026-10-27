@@ -224,6 +224,10 @@ int main(int argc, char **argv) {
 
     {
         const std::string preferencesPath = "selftest_preferences.json";
+        Preferences defaults;
+        if (defaults.themePalette != "Immaterial") {
+            return fail("preferences default palette is not Immaterial");
+        }
         Preferences saved;
         saved.defaultDarkTheme = false;
         saved.themePalette = "My Palette";
@@ -268,7 +272,8 @@ int main(int argc, char **argv) {
             return fail("preferences dark/light migration");
         }
         std::remove(preferencesPath.c_str());
-        std::printf("  preferences : palette dictionary and dark/light migration ok\n");
+        std::printf("  preferences : Immaterial default, palette dictionary and legacy "
+                    "migration ok\n");
     }
 
     {
@@ -2348,14 +2353,19 @@ int main(int argc, char **argv) {
                         Node *vuSource = ballistics.addNode("math.constant", 200, 0);
                         Node *digital = ballistics.addNode("dbg.meter", 400, 0);
                         Node *digitalSource = ballistics.addNode("math.constant", 600, 0);
-                        if (!vu || !vuSource || !digital || !digitalSource) {
+                        Node *waveform = ballistics.addNode("dbg.meter", 800, 0);
+                        Node *waveformSource = ballistics.addNode("math.constant", 1000, 0);
+                        if (!vu || !vuSource || !digital || !digitalSource || !waveform ||
+                            !waveformSource) {
                             ok = false;
                             what = "meter blocks are not registered";
                         } else {
                             digital->setInt("mode", 1);
+                            waveform->setInt("mode", 2);
                             std::string why;
                             ok = ballistics.connect(vuSource->id, 0, vu->id, 0, &why) &&
-                                 ballistics.connect(digitalSource->id, 0, digital->id, 0, &why);
+                                 ballistics.connect(digitalSource->id, 0, digital->id, 0, &why) &&
+                                 ballistics.connect(waveformSource->id, 0, waveform->id, 0, &why);
                             if (!ok) what = why;
                         }
                         const auto lastPlotted = [](const Node &node) {
@@ -2371,21 +2381,25 @@ int main(int argc, char **argv) {
                             for (int frame = 0; frame < 6; ++frame) {
                                 vuSource->setFloat("value", 1.0f);
                                 digitalSource->setFloat("value", 1.0f);
+                                waveformSource->setFloat("value", 1.0f);
                                 ctx.frame = frame;
                                 ctx.time = frame / 60.0;
                                 ballistics.evaluate(ctx);
                             }
                             const double vuRising = vu->runtimeState["average"];
                             const float digitalFull = lastPlotted(*digital);
+                            const float waveformFull = lastPlotted(*waveform);
                             for (int frame = 6; frame < 8; ++frame) {
                                 vuSource->setFloat("value", 0.0f);
                                 digitalSource->setFloat("value", 0.0f);
+                                waveformSource->setFloat("value", 0.0f);
                                 ctx.frame = frame;
                                 ctx.time = frame / 60.0;
                                 ballistics.evaluate(ctx);
                             }
                             const double vuFalling = vu->runtimeState["average"];
                             const float digitalSilent = lastPlotted(*digital);
+                            const float waveformSilent = lastPlotted(*waveform);
                             // Averaging: 0.1 s of signal does not reach full scale.
                             // Slow release: two silent frames barely move it.
                             // Digital: exactly the raw value, both times.
@@ -2399,10 +2413,14 @@ int main(int argc, char **argv) {
                                        std::to_string(vuFalling) + ")";
                             } else if (std::fabs(digitalFull - 1.0f) > 1e-4f ||
                                        std::fabs(digitalSilent) > 1e-4f ||
+                                       std::fabs(waveformFull - 1.0f) > 1e-4f ||
+                                       std::fabs(waveformSilent) > 1e-4f ||
                                        std::fabs(static_cast<float>(digital->runtimeState["average"])) >
+                                           1e-4f ||
+                                       std::fabs(static_cast<float>(waveform->runtimeState["average"])) >
                                            1e-4f) {
                                 ok = false;
-                                what = "the Digital meter is not showing raw values (full " +
+                                what = "a digital/waveform meter is not showing raw values (full " +
                                        std::to_string(digitalFull) + ", silent " +
                                        std::to_string(digitalSilent) + ", avg " +
                                        std::to_string(digital->runtimeState["average"]) + ")";
@@ -2510,7 +2528,7 @@ int main(int argc, char **argv) {
                     if (ok) {
                         std::printf("  blocks   : meter %.3f, guard lamps, ringbuffer average "
                                     "%.3f, biquad lp=%.3f hp=%.3f bp=%.3f, VU averages and "
-                                    "releases slowly while the digital meter stays raw\n",
+                                    "releases slowly while Digital/Waveform stay raw\n",
                                     meterSource ? meterSource->pfloat("value") : 0.0f, ringAverage,
                                     lowPass, highPass, bandPass);
                     } else {
@@ -2973,6 +2991,117 @@ int main(int argc, char **argv) {
                             }
                         }
                         if (!grownOk) result = fail("audio-rate growing source: " + grownWhat);
+                    }
+
+                    // A Dynamics downstream of a DAC receives a rendered window,
+                    // not the whole clip. Its playhead range has to be converted
+                    // to that buffer's local range, and an offline DAC whose
+                    // buffer grows every frame must keep appending to Dynamics.
+                    if (result == 0) {
+                        auto tone = std::make_shared<AudioBuffer>();
+                        tone->channels = 2;
+                        tone->sampleRate = 48000;
+                        tone->frameCount = 96000;
+                        tone->samples.resize(static_cast<size_t>(tone->frameCount) * 2);
+                        for (long long i = 0; i < tone->frameCount; ++i) {
+                            const float sample =
+                                0.4f * std::sin(6.2831853f * 440.0f * i / 48000.0f);
+                            tone->samples[static_cast<size_t>(i) * 2] = sample;
+                            tone->samples[static_cast<size_t>(i) * 2 + 1] = sample;
+                        }
+
+                        Graph after;
+                        Node *src = after.addNode("src.audio", 0, 0);
+                        Node *adc = after.addNode("dsp.adc", 200, 0);
+                        Node *dac = after.addNode("dsp.dac", 400, 0);
+                        Node *dynamics = after.addNode("dsp.dynamics", 600, 0);
+                        Node *output = after.addNode("out.audio", 800, 0);
+                        bool afterOk =
+                            src && adc && dac && dynamics && output;
+                        std::string afterWhat;
+                        if (!afterOk) {
+                            afterWhat = "blocks missing";
+                        } else {
+                            dynamics->setFloat("threshold", 0.0f);
+                            dynamics->setFloat("ratio", 1.0f);
+                            dynamics->setBool("limiter", false);
+                            std::string why;
+                            afterOk = after.connect(src->id, 0, adc->id, 0, &why) &&
+                                      after.connect(adc->id, 0, dac->id, 0, &why) &&
+                                      after.connect(adc->id, 1, dac->id, 1, &why) &&
+                                      after.connect(dac->id, 0, dynamics->id, 0, &why) &&
+                                      after.connect(dynamics->id, 0, output->id, 0, &why);
+                            if (!afterOk) afterWhat = why;
+                        }
+
+                        // Preview: a DAW window starting at 48,000 must map to
+                        // local sample zero inside the one-frame DAC buffer.
+                        if (afterOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 2.0;
+                            ctx.audio = tone;
+                            ctx.offline = false;
+                            ctx.time = 1.0;
+                            ctx.audioTime = 1.0;
+                            ctx.frame = 60;
+                            after.evaluate(ctx);
+                            const AudioBuffer *rendered =
+                                dynamics->audioRenderOutput.get();
+                            if (!rendered || rendered->startFrame != 48000 ||
+                                rendered->frameCount != 800 ||
+                                loudnessDb(*rendered, 0, rendered->frameCount) < -20.0f) {
+                                afterOk = false;
+                                afterWhat =
+                                    "the preview DAC window became silence at Dynamics";
+                            }
+                        }
+
+                        // Offline: the DAC reuses one growing buffer. Dynamics
+                        // must append all 60 windows, not restart on each length
+                        // change.
+                        if (afterOk) {
+                            Exporter::resetRenderedAudio(after);
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 2.0;
+                            ctx.audio = tone;
+                            ctx.offline = true;
+                            for (int frame = 0; frame < 60; ++frame) {
+                                ctx.frame = frame;
+                                ctx.time = static_cast<double>(frame) / 60.0;
+                                ctx.audioTime = ctx.time;
+                                after.evaluate(ctx);
+                            }
+                            const AudioBuffer *rendered =
+                                dynamics->audioRenderOutput.get();
+                            if (!rendered || rendered->frameCount != 48000) {
+                                afterOk = false;
+                                afterWhat =
+                                    "Dynamics restarted after each growing DAC window";
+                            } else {
+                                double maxDiff = 0.0;
+                                for (size_t i = 0; i < rendered->samples.size(); ++i) {
+                                    maxDiff = std::max(
+                                        maxDiff,
+                                        std::fabs(static_cast<double>(rendered->samples[i]) -
+                                                  tone->samples[i]));
+                                }
+                                if (maxDiff > 1e-5 ||
+                                    after.audioSinkNodeId() != output->id) {
+                                    afterOk = false;
+                                    afterWhat =
+                                        "DAC -> Dynamics output diff " + std::to_string(maxDiff);
+                                }
+                            }
+                        }
+                        if (!afterOk) {
+                            result = fail("DAC -> Dynamics: " + afterWhat);
+                        } else {
+                            std::printf(
+                                "  dynamics : DAC -> Dynamics preview and offline track stay "
+                                "continuous\n");
+                        }
                     }
 
                     // Display ticks inside one video frame must reuse the same
@@ -3770,6 +3899,229 @@ int main(int argc, char **argv) {
                         }
                     }
 
+                    // ADC descendants remain audio-rate even without a DAC.
+                    // The paused editor still evaluates the region, so editing
+                    // the filter publishes the new value immediately.
+                    if (result == 0) {
+                        Graph branch;
+                        const int srcId = branch.addNode("src.audio", 0, 0)->id;
+                        const int adcId = branch.addNode("dsp.adc", 200, 0)->id;
+                        const int mathId = branch.addNode("math.arithmetic", 350, 0)->id;
+                        const int filterId = branch.addNode("mod.filter", 500, 0)->id;
+                        std::string why;
+                        bool branchOk = branch.connect(srcId, 0, adcId, 0, &why) &&
+                                        branch.connect(adcId, 0, mathId, 0, &why) &&
+                                        branch.connect(mathId, 0, filterId, 0, &why);
+                        std::string branchWhat;
+                        if (!branchOk) branchWhat = "could not wire dead-end audio branch: " + why;
+                        Node *filter = branch.find(filterId);
+                        if (branchOk && !filter) {
+                            branchOk = false;
+                            branchWhat = "filter disappeared";
+                        }
+                        if (branchOk) {
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.audio = clip.buffer();
+                            ctx.audioSampleRate = 48000;
+                            ctx.offline = false;
+                            branch.evaluate(ctx);
+                            const Node *math = branch.find(mathId);
+                            filter = branch.find(filterId);
+                            const double filterHz =
+                                filter ? filter->runtimeState["filter.rate"] : 0.0;
+                            if (!math || !math->runsAudioRate ||
+                                !filter || !filter->runsAudioRate ||
+                                std::fabs(filterHz - 48000.0) > 0.5) {
+                                branchOk = false;
+                                branchWhat = "dead-end ADC descendants stayed at video rate";
+                            }
+                        }
+                        if (branchOk) {
+                            filter->setFloat("cutoff", 1200.0f);
+                            EvalContext paused;
+                            paused.fps = 60.0f;
+                            paused.duration = 1.0;
+                            paused.audio = clip.buffer();
+                            paused.audioSampleRate = 48000;
+                            paused.offline = false;
+                            branch.evaluate(paused);
+                            filter = branch.find(filterId);
+                            const auto effective = filter->runtimeState.find("value.cutoff");
+                            if (effective == filter->runtimeState.end() ||
+                                std::fabs(effective->second - 1200.0) > 0.5) {
+                                branchOk = false;
+                                branchWhat = "paused filter did not publish the edited cutoff";
+                            }
+                        }
+                        if (!branchOk) {
+                            result = fail("audio-rate branch: " + branchWhat);
+                        } else {
+                            std::printf("  audio    : dead-end ADC branches run at sample rate and "
+                                        "stay editable while paused\n");
+                        }
+                    }
+
+                    // Ringbuffer capacity is seconds × sample rate only while it
+                    // is an audio processor; the legacy sample size remains for
+                    // the video-rate mode.
+                    if (result == 0) {
+                        Graph ringGraph;
+                        const int srcId = ringGraph.addNode("src.audio", 0, 0)->id;
+                        const int adcId = ringGraph.addNode("dsp.adc", 200, 0)->id;
+                        const int ringId = ringGraph.addNode("mod.ringbuffer", 350, 0)->id;
+                        const int dacId = ringGraph.addNode("dsp.dac", 500, 0)->id;
+                        const int outId = ringGraph.addNode("out.audio", 700, 0)->id;
+                        std::string why;
+                        bool ringOk = ringGraph.connect(srcId, 0, adcId, 0, &why) &&
+                                      ringGraph.connect(adcId, 0, ringId, 0, &why) &&
+                                      ringGraph.connect(ringId, 0, dacId, 0, &why) &&
+                                      ringGraph.connect(adcId, 1, dacId, 1, &why) &&
+                                      ringGraph.connect(dacId, 0, outId, 0, &why);
+                        Node *ring = ringGraph.find(ringId);
+                        if (ringOk && !ring) {
+                            ringOk = false;
+                            why = "ringbuffer disappeared";
+                        }
+                        std::string ringWhat = ringOk ? std::string() : why;
+                        if (ringOk) {
+                            ring->setFloat("sizeSeconds", 0.01f);
+                            EvalContext ctx;
+                            ctx.fps = 60.0f;
+                            ctx.duration = 1.0;
+                            ctx.audio = clip.buffer();
+                            ctx.audioSampleRate = 48000;
+                            ctx.offline = false;
+                            ringGraph.evaluate(ctx);
+                            ring = ringGraph.find(ringId);
+                            if (!ring || !ring->runsAudioRate ||
+                                ring->ringValues.size() != 480) {
+                                ringOk = false;
+                                ringWhat = "audio-rate capacity was not 0.01 s at 48 kHz";
+                            }
+                        }
+                        if (ringOk) {
+                            Graph video;
+                            const int sourceId = video.addNode("math.constant", 0, 0)->id;
+                            const int videoRingId = video.addNode("mod.ringbuffer", 200, 0)->id;
+                            if (!video.connect(sourceId, 0, videoRingId, 0, &why)) {
+                                ringOk = false;
+                                ringWhat = why;
+                            } else {
+                                EvalContext ctx;
+                                ctx.fps = 60.0f;
+                                ctx.duration = 1.0;
+                                video.evaluate(ctx);
+                                Node *videoRing = video.find(videoRingId);
+                                if (!videoRing || videoRing->runsAudioRate ||
+                                    videoRing->ringValues.size() != 64) {
+                                    ringOk = false;
+                                    ringWhat = "video-rate Ringbuffer did not keep its sample size";
+                                }
+                            }
+                        }
+                        // Audio-rate Ringbuffers reset their private running phase
+                        // when they enter an ADC region, so a newly-connected buffer
+                        // starts at the visible Phase offset rather than at a phase
+                        // inherited from however many video frames it previewed.
+                        if (ringOk) {
+                            Graph phaseGraph;
+                            Node *audio = phaseGraph.addNode("src.audio", 0, 0);
+                            Node *adc = phaseGraph.addNode("dsp.adc", 200, 0);
+                            Node *phaseRing = phaseGraph.addNode("mod.ringbuffer", 400, 0);
+                            Node *phaseSource = phaseGraph.addNode("math.constant", 600, 0);
+                            if (!audio || !adc || !phaseRing || !phaseSource) {
+                                ringOk = false;
+                                ringWhat = "phase test blocks are not registered";
+                            } else if (!phaseRing->find("phase")) {
+                                ringOk = false;
+                                ringWhat = "the Ringbuffer Phase control is missing";
+                            } else {
+                                EvalContext videoCtx;
+                                videoCtx.fps = 60.0f;
+                                videoCtx.duration = 1.0;
+                                for (int frame = 0; frame < 30; ++frame) {
+                                    videoCtx.frame = frame;
+                                    videoCtx.time = frame / 60.0;
+                                    phaseGraph.evaluate(videoCtx);
+                                }
+                                const double inheritedPhase = phaseRing->runtimeState["phase"];
+                                if (!phaseGraph.connect(audio->id, 0, adc->id, 0, &why) ||
+                                    !phaseGraph.connect(adc->id, 0, phaseRing->id, 0, &why)) {
+                                    ringOk = false;
+                                    ringWhat = why;
+                                } else {
+                                    EvalContext audioCtx;
+                                    audioCtx.fps = 60.0f;
+                                    audioCtx.duration = 1.0;
+                                    audioCtx.audio = clip.buffer();
+                                    audioCtx.audioSampleRate = 48000;
+                                    phaseGraph.evaluate(audioCtx);
+                                    const double resetPhase = phaseRing->runtimeState["phase"];
+                                    const auto firstOffset =
+                                        phaseRing->runtimeState.find("value.phase");
+                                    if (inheritedPhase < 0.2 || resetPhase > 0.02) {
+                                        ringOk = false;
+                                        ringWhat = "audio-rate phase inherited the video-rate position";
+                                    } else if (firstOffset == phaseRing->runtimeState.end() ||
+                                               std::fabs(firstOffset->second) > 1e-6) {
+                                        ringOk = false;
+                                        ringWhat = "the Phase offset followed the running read phase";
+                                    } else {
+                                        phaseGraph.evaluate(audioCtx);
+                                        const double advancingPhase =
+                                            phaseRing->runtimeState["phase"];
+                                        const auto secondOffset =
+                                            phaseRing->runtimeState.find("value.phase");
+                                        if (advancingPhase <= resetPhase ||
+                                            secondOffset == phaseRing->runtimeState.end() ||
+                                            std::fabs(secondOffset->second) > 1e-6) {
+                                            ringOk = false;
+                                            ringWhat =
+                                                "Phase offset did not remain independent of the running phase";
+                                        } else {
+                                            phaseSource->setFloat("value", 0.25f);
+                                            if (!phaseGraph.connect(phaseSource->id, 0,
+                                                                    phaseRing->id, 2, &why)) {
+                                                ringOk = false;
+                                                ringWhat = why;
+                                            } else {
+                                                phaseGraph.evaluate(audioCtx);
+                                                const double modulatedPhase =
+                                                    phaseRing->runtimeState["phase"];
+                                                const auto modulatedOffset =
+                                                    phaseRing->runtimeState.find("value.phase");
+                                                double delta =
+                                                    modulatedPhase - advancingPhase;
+                                                delta -= std::floor(delta);
+                                                if (std::fabs(delta - 0.25) > 0.01) {
+                                                    ringOk = false;
+                                                    ringWhat =
+                                                        "the Ringbuffer phase offset input did not shift the read head";
+                                                } else if (
+                                                    modulatedOffset ==
+                                                        phaseRing->runtimeState.end() ||
+                                                    std::fabs(modulatedOffset->second - 0.25) >
+                                                        0.01) {
+                                                    ringOk = false;
+                                                    ringWhat =
+                                                        "the displayed phase offset did not follow modulation";
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (!ringOk) {
+                            result = fail("Ringbuffer seconds: " + ringWhat);
+                        } else {
+                            std::printf("  ringbuffer: seconds at audio rate, samples at video rate, "
+                                        "deterministic phase-offset modulation\n");
+                        }
+                    }
+
                     // A processed Analysis input must measure the same window in
                     // preview and in export. The analyzer keeps its own history of
                     // what reaches its port, so a one-video-frame window is not
@@ -4022,7 +4374,11 @@ int main(int argc, char **argv) {
                             if (modulated) graph.connect(speed->id, 0, ring->id, 1);
                             EvalContext ctx;
                             ctx.fps = 60.0f;
-                            graph.evaluate(ctx);
+                            for (int frame = 0; frame < 2; ++frame) {
+                                ctx.frame = frame;
+                                ctx.time = frame / 60.0;
+                                graph.evaluate(ctx);
+                            }
                             *phase = ring->runtimeState["phase"];
                             return true;
                         };

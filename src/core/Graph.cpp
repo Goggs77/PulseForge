@@ -4,8 +4,8 @@
 #include <cmath>
 #include <cstdio>
 #include <unordered_map>
-#include <unordered_set>
 
+#include "core/Profile.h"
 #include "core/Registry.h"
 #include "raylib.h"
 
@@ -286,104 +286,106 @@ void syncSpectrumPresets(Graph &graph) {
     }
 }
 
-// Finds every node on an ADC -> Scalar -> DAC path, plus the pure-Scalar
-// processors that feed such a path. Those nodes are evaluated once per audio
-// sample; everything downstream of the region is evaluated afterwards with the
-// last sample as the downsampled value.
+// Every Scalar descendant of an enabled ADC is audio-rate, with or without a
+// downstream DAC. DACs terminate their branch; non-Scalar consumers stop the
+// sample-rate propagation and are evaluated later using the final sample.
 AudioRatePlan buildAudioRatePlan(const Graph &graph, const std::vector<int> &order) {
     AudioRatePlan plan;
-    std::vector<int> adcs;
-    std::vector<int> dacs;
-    for (const Node &node : graph.nodes) {
-        if (!node.enabled) continue;
-        if (node.kind == "dsp.adc") adcs.push_back(node.id);
-        else if (node.kind == "dsp.dac") dacs.push_back(node.id);
+    std::unordered_map<int, int> indexOf;
+    indexOf.reserve(graph.nodes.size());
+    for (size_t i = 0; i < graph.nodes.size(); ++i) {
+        indexOf[graph.nodes[i].id] = static_cast<int>(i);
     }
-    if (adcs.empty() || dacs.empty()) return plan;
-
-    const auto scalarLink = [&](const Link &link) {
-        const Node *from = graph.find(link.fromNode);
-        const Node *to = graph.find(link.toNode);
-        if (!from || !to || !from->enabled || !to->enabled) return false;
-        const std::vector<PortDesc> &outputs = from->outputPorts();
-        const std::vector<PortDesc> &inputs = to->inputPorts();
-        if (link.fromPort < 0 || link.fromPort >= static_cast<int>(outputs.size())) return false;
-        if (link.toPort < 0 || link.toPort >= static_cast<int>(inputs.size())) return false;
-        return outputs[link.fromPort].type == PortType::Scalar &&
-               inputs[link.toPort].type == PortType::Scalar;
-    };
-    const auto reach = [&](int start, bool forward) {
-        std::unordered_set<int> seen{start};
-        std::vector<int> stack{start};
-        while (!stack.empty()) {
-            const int current = stack.back();
-            stack.pop_back();
-            for (const Link &link : graph.links) {
-                int next = 0;
-                if (forward && link.fromNode == current && scalarLink(link)) next = link.toNode;
-                if (!forward && link.toNode == current && scalarLink(link)) next = link.fromNode;
-                if (next != 0 && seen.insert(next).second) stack.push_back(next);
-            }
+    const int count = static_cast<int>(graph.nodes.size());
+    std::vector<std::vector<int>> scalarOut(static_cast<size_t>(count));
+    std::vector<std::vector<int>> scalarIn(static_cast<size_t>(count));
+    std::vector<std::vector<int>> allOut(static_cast<size_t>(count));
+    for (const Link &link : graph.links) {
+        const auto from = indexOf.find(link.fromNode);
+        const auto to = indexOf.find(link.toNode);
+        if (from == indexOf.end() || to == indexOf.end()) continue;
+        const Node &source = graph.nodes[static_cast<size_t>(from->second)];
+        const Node &target = graph.nodes[static_cast<size_t>(to->second)];
+        if (!source.enabled || !target.enabled) continue;
+        allOut[static_cast<size_t>(from->second)].push_back(to->second);
+        const std::vector<PortDesc> &outputs = source.outputPorts();
+        const std::vector<PortDesc> &inputs = target.inputPorts();
+        if (link.fromPort < 0 || link.fromPort >= static_cast<int>(outputs.size()) ||
+            link.toPort < 0 || link.toPort >= static_cast<int>(inputs.size()) ||
+            outputs[static_cast<size_t>(link.fromPort)].type != PortType::Scalar ||
+            inputs[static_cast<size_t>(link.toPort)].type != PortType::Scalar) {
+            continue;
         }
-        return seen;
-    };
+        scalarOut[static_cast<size_t>(from->second)].push_back(to->second);
+        scalarIn[static_cast<size_t>(to->second)].push_back(from->second);
+    }
 
-    std::unordered_set<int> forwardSet;
-    std::unordered_set<int> backwardSet;
-    for (const int id : adcs) {
-        const std::unordered_set<int> found = reach(id, true);
-        forwardSet.insert(found.begin(), found.end());
+    std::vector<unsigned char> inRegion(static_cast<size_t>(count), 0);
+    std::vector<int> pending;
+    for (int i = 0; i < count; ++i) {
+        const Node &node = graph.nodes[static_cast<size_t>(i)];
+        if (node.enabled && node.kind == "dsp.adc") {
+            inRegion[static_cast<size_t>(i)] = 1;
+            pending.push_back(i);
+        }
     }
-    for (const int id : dacs) {
-        const std::unordered_set<int> found = reach(id, false);
-        backwardSet.insert(found.begin(), found.end());
-    }
-    std::unordered_set<int> region;
-    for (const int id : forwardSet) {
-        if (backwardSet.count(id)) region.insert(id);
-    }
-    if (region.empty()) return plan;
+    if (pending.empty()) return plan;
 
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        const std::vector<int> current(region.begin(), region.end());
-        for (const int id : current) {
-            const Node *node = graph.find(id);
-            if (!node) continue;
-            const std::vector<PortDesc> &inputs = node->inputPorts();
-            for (const Link &link : graph.links) {
-                if (link.toNode != id) continue;
-                if (link.toPort < 0 || link.toPort >= static_cast<int>(inputs.size())) continue;
-                if (inputs[link.toPort].type != PortType::Scalar) continue;
-                const Node *source = graph.find(link.fromNode);
-                if (!source || !source->enabled || region.count(source->id)) continue;
-                if (!isPureScalarBlock(*source)) continue;
-                region.insert(source->id);
-                changed = true;
+    // ADC -> Scalar propagation. DACs terminate nothing structurally, but their
+    // output is Audio, so ordinary Scalar propagation stops there naturally.
+    for (size_t next = 0; next < pending.size(); ++next) {
+        const int current = pending[next];
+        for (const int targetIndex : scalarOut[static_cast<size_t>(current)]) {
+            if (inRegion[static_cast<size_t>(targetIndex)]) continue;
+            const Node &target = graph.nodes[static_cast<size_t>(targetIndex)];
+            if (target.kind == "dsp.dac" || isPureScalarBlock(target)) {
+                inRegion[static_cast<size_t>(targetIndex)] = 1;
+                pending.push_back(targetIndex);
             }
         }
     }
 
-    std::unordered_set<int> downstream;
-    {
-        std::vector<int> stack(region.begin(), region.end());
-        while (!stack.empty()) {
-            const int current = stack.back();
-            stack.pop_back();
-            for (const Link &link : graph.links) {
-                if (link.fromNode != current) continue;
-                const Node *target = graph.find(link.toNode);
-                if (!target || !target->enabled || region.count(link.toNode)) continue;
-                if (downstream.insert(link.toNode).second) stack.push_back(link.toNode);
+    // Pull in pure scalar producers feeding any audio-rate input.
+    pending.clear();
+    for (int i = 0; i < count; ++i) {
+        if (inRegion[static_cast<size_t>(i)]) pending.push_back(i);
+    }
+    for (size_t next = 0; next < pending.size(); ++next) {
+        const int current = pending[next];
+        for (const int sourceIndex : scalarIn[static_cast<size_t>(current)]) {
+            if (inRegion[static_cast<size_t>(sourceIndex)]) continue;
+            const Node &source = graph.nodes[static_cast<size_t>(sourceIndex)];
+            if (isPureScalarBlock(source)) {
+                inRegion[static_cast<size_t>(sourceIndex)] = 1;
+                pending.push_back(sourceIndex);
             }
         }
     }
+
+    std::vector<unsigned char> downstream(static_cast<size_t>(count), 0);
+    pending.clear();
+    for (int i = 0; i < count; ++i) {
+        if (inRegion[static_cast<size_t>(i)]) pending.push_back(i);
+    }
+    for (size_t next = 0; next < pending.size(); ++next) {
+        const int current = pending[next];
+        for (const int targetIndex : allOut[static_cast<size_t>(current)]) {
+            if (inRegion[static_cast<size_t>(targetIndex)] ||
+                downstream[static_cast<size_t>(targetIndex)]) {
+                continue;
+            }
+            downstream[static_cast<size_t>(targetIndex)] = 1;
+            pending.push_back(targetIndex);
+        }
+    }
+
     for (const int id : order) {
-        const Node *node = graph.find(id);
-        if (!node || !node->enabled) continue;
-        if (region.count(id)) plan.region.push_back(id);
-        else if (downstream.count(id)) plan.after.push_back(id);
+        const auto index = indexOf.find(id);
+        if (index == indexOf.end()) continue;
+        const Node &node = graph.nodes[static_cast<size_t>(index->second)];
+        if (!node.enabled) continue;
+        if (inRegion[static_cast<size_t>(index->second)]) plan.region.push_back(id);
+        else if (downstream[static_cast<size_t>(index->second)]) plan.after.push_back(id);
         else plan.before.push_back(id);
     }
     plan.active = !plan.region.empty();
@@ -441,7 +443,9 @@ struct ChannelInput {
 
 void sampleAdcNode(Node &node, const EvalContext &ctx, const ChannelInput &input) {
     const int channels = std::max(1, static_cast<int>(node.outputPorts().size()));
-    node.outputs.assign(static_cast<size_t>(channels), Value{});
+    if (static_cast<int>(node.outputs.size()) != channels) {
+        node.outputs.assign(static_cast<size_t>(channels), Value{});
+    }
     const AudioBuffer *buffer = nullptr;
     if (input.source && input.port >= 0 &&
         input.port < static_cast<int>(input.source->outputs.size())) {
@@ -464,7 +468,7 @@ void sampleAdcNode(Node &node, const EvalContext &ctx, const ChannelInput &input
                                  static_cast<size_t>(sourceChannel);
             if (index < buffer->samples.size()) value = buffer->samples[index];
         }
-        node.outputs[static_cast<size_t>(c)] = Value::makeScalar(value);
+        node.outputs[static_cast<size_t>(c)].setScalar(value);
         if (node.publishReadouts) {
             node.runtimeState["value." + std::to_string(c)] = value;
         }
@@ -520,9 +524,6 @@ void sampleDacNode(Node &node, const EvalContext &ctx,
             node.runtimeState["value." + std::to_string(c)] = values[c];
         }
     }
-    node.outputs.assign(1, Value{});
-    node.outputs[0].type = PortType::Audio;
-    node.outputs[0].audio = node.audioRenderOutput;
     (void)ctx;
 }
 
@@ -599,28 +600,39 @@ struct RegionStep {
     std::vector<RegionSource> sources;    // Block: one entry per input port
     ChannelInput adcInput;                // Adc
     std::vector<ChannelInput> dacInputs;  // Dac
+#if PF_PROFILE_LEVEL >= 3
+    double profileMs = 0.0;
+#endif
 };
 
 void compileRegion(Graph &graph, const AudioRatePlan &plan, std::vector<RegionStep> *steps) {
     steps->clear();
     steps->reserve(plan.region.size());
+    std::unordered_map<int, Node *> nodesById;
+    nodesById.reserve(graph.nodes.size());
+    for (Node &node : graph.nodes) nodesById[node.id] = &node;
+    const auto nodeAt = [&](int id) -> Node * {
+        const auto found = nodesById.find(id);
+        return found == nodesById.end() ? nullptr : found->second;
+    };
     for (const int id : plan.region) {
-        Node *node = graph.find(id);
+        Node *node = nodeAt(id);
         if (!node || !node->enabled) continue;
+        node->runsAudioRate = true;
         RegionStep step;
         step.node = node;
         if (node->kind == "dsp.adc") step.kind = RegionStep::Kind::Adc;
         else if (node->kind == "dsp.dac") step.kind = RegionStep::Kind::Dac;
         if (step.kind == RegionStep::Kind::Adc) {
             if (const Link *link = graph.findInputLink(id, 0)) {
-                step.adcInput.source = graph.find(link->fromNode);
+                step.adcInput.source = nodeAt(link->fromNode);
                 step.adcInput.port = link->fromPort;
             }
         } else if (step.kind == RegionStep::Kind::Dac) {
             step.dacInputs.resize(node->inputPorts().size());
             for (size_t port = 0; port < step.dacInputs.size(); ++port) {
                 if (const Link *link = graph.findInputLink(id, static_cast<int>(port))) {
-                    step.dacInputs[port].source = graph.find(link->fromNode);
+                    step.dacInputs[port].source = nodeAt(link->fromNode);
                     step.dacInputs[port].port = link->fromPort;
                 }
             }
@@ -629,7 +641,7 @@ void compileRegion(Graph &graph, const AudioRatePlan &plan, std::vector<RegionSt
             step.sources.resize(ports.size());
             for (size_t port = 0; port < ports.size(); ++port) {
                 if (const Link *link = graph.findInputLink(id, static_cast<int>(port))) {
-                    const Node *source = graph.find(link->fromNode);
+                    const Node *source = nodeAt(link->fromNode);
                     if (source && source->enabled) {
                         step.sources[port].node = source;
                         step.sources[port].port = link->fromPort;
@@ -659,8 +671,14 @@ void sampleRegionBlock(Node &node, EvalContext &ctx, const std::vector<RegionSou
             source.port >= static_cast<int>(source.node->outputs.size())) {
             continue;
         }
-        node.inputScratch[port] =
-            convertValue(source.node->outputs[static_cast<size_t>(source.port)], ports[port].type);
+        const Value &input = source.node->outputs[static_cast<size_t>(source.port)];
+        if (input.type == PortType::Scalar && ports[port].type == PortType::Scalar) {
+            // Prefer the reusable Scalar payload over copying a full Value with
+            // its string and shared-pointer members.
+            node.inputScratch[port].setScalar(input.scalar);
+        } else {
+            node.inputScratch[port] = convertValue(input, ports[port].type);
+        }
     }
     if (node.def && node.def->evaluate) node.def->evaluate(node, ctx, node.inputScratch, node.outputs);
 }
@@ -708,7 +726,9 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
     compileRegion(graph, plan, &steps);
 
     std::vector<int> dacs;
-    bool needsRender = ctx.offline;
+    // Audio-rate branches without a DAC still have to advance every sample;
+    // they may feed a frame-rate visual or be intentional side-effect blocks.
+    bool needsRender = !steps.empty();
     for (const RegionStep &step : steps) {
         if (step.kind != RegionStep::Kind::Dac) continue;
         prepareDacBuffer(*step.node, ctx, rate, source, sourceEnd, startFrame, endFrame);
@@ -721,6 +741,9 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
     EvalContext sample = ctx;
     sample.audioRate = true;
     sample.audioSampleRate = rate;
+#if PF_PROFILE_LEVEL >= 3
+    const double regionStart = GetTime();
+#endif
     for (long long frame = startFrame; needsRender && frame < endFrame; ++frame) {
         sample.audioTime = static_cast<double>(frame) / rate;
         sample.time = ctx.time + static_cast<double>(frame - startFrame) / rate;
@@ -729,6 +752,9 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
             // The editor only ever sees the frame's final values, so nothing
             // publishes readouts for the samples before it.
             step.node->publishReadouts = lastSample;
+#if PF_PROFILE_LEVEL >= 3
+            const double stepStart = GetTime();
+#endif
             switch (step.kind) {
                 case RegionStep::Kind::Adc:
                     sampleAdcNode(*step.node, sample, step.adcInput);
@@ -740,8 +766,20 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
                     sampleRegionBlock(*step.node, sample, step.sources);
                     break;
             }
+#if PF_PROFILE_LEVEL >= 3
+            step.profileMs += (GetTime() - stepStart) * 1000.0;
+#endif
         }
     }
+#if PF_PROFILE_LEVEL >= 3
+    profile::addNode(-1, "Audio-rate region", (GetTime() - regionStart) * 1000.0);
+    for (const RegionStep &step : steps) {
+        profile::addNode(step.node->id,
+                         step.node->displayTitle() + " #" + std::to_string(step.node->id) +
+                             " (audio)",
+                         step.profileMs);
+    }
+#endif
 
     for (const int id : dacs) {
         Node *node = graph.find(id);
@@ -760,8 +798,10 @@ void evaluateAudioRegion(Graph &graph, const AudioRatePlan &plan, EvalContext &c
 }  // namespace
 
 bool Graph::evaluate(EvalContext &ctx) {
+    ctx.evaluation = ++evaluationSerial;
     syncDynamicChannelPorts(*this);
     syncSpectrumPresets(*this);
+    for (Node &node : nodes) node.runsAudioRate = false;
     std::vector<int> order;
     if (!topologicalOrder(order, &lastError)) return false;
 
