@@ -98,12 +98,13 @@ void drawPreview(UiState &state, Rectangle bounds) {
     // ---- stats ------------------------------------------------------------
     char stats[220];
     std::snprintf(stats, sizeof(stats),
-                  "%dx%d @ %.0f fps   frame %d   render %.2f ms   %d passes   %d/%d targets   ui %.0f "
-                  "fps",
-                  project.video.width, project.video.height, project.video.fps,
-                  static_cast<int>(state.playhead * project.video.fps), state.lastRenderMs,
-                  state.shaderPasses, state.pooledTargets, state.renderer.stats().peakTargets,
-                  state.lastUiFps);
+                  "%dx%d @ %.0f fps   frame %d   %d passes   %d/%d targets   ui %.0f fps  render %4.2f ms ",
+                  project.video.width, project.video.height, project.video.fps, 
+                  static_cast<int>(state.playhead * project.video.fps),
+                  state.shaderPasses, state.pooledTargets, 
+                  state.renderer.stats().peakTargets,
+                  state.lastUiFps,
+                  state.lastRenderMs);
     ui::drawTextClipped(Rectangle{imageArea.x + ui::s(8.0f), imageArea.y + imageArea.height - ui::s(18.0f),
                                   imageArea.width - ui::s(16.0f), ui::s(16.0f)},
                         stats, 10.0f, palette::withAlpha(t.textDim, 0.95f));
